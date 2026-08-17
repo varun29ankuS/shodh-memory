@@ -1779,20 +1779,60 @@ pub struct Memory {
     /// Memories flow: Working → Session → LongTerm → Archive
     pub tier: MemoryTier,
 
-    /// Entity references - bidirectional links to GraphMemory
-    /// Populated during record() via entity extraction
-    /// Enables spreading activation without graph lookup
+    /// Entity references — a denormalized copy of the graph links for this
+    /// memory.
+    ///
+    /// NOT POPULATED IN PRODUCTION, and never has been. The field and its only
+    /// writer ([`Memory::add_entity_ref`]) were introduced together and the
+    /// writer has had no non-test caller since; every production construction
+    /// path sets `Vec::new()`, and a live store returns 0 populated rows out of
+    /// 200. The doc comment that used to sit here claimed it was "populated
+    /// during record() via entity extraction" — it is not, and four consumers
+    /// silently produced nothing for as long as it said so.
+    ///
+    /// The graph is the authority: `process_experience_into_graph` writes an
+    /// `EpisodicNode` whose `uuid` is this memory's `id` and whose
+    /// `entity_refs` are the resolved entity UUIDs. Production callers must
+    /// resolve through `MemorySystem::memory_entity_ids`, not read this field.
+    ///
+    /// It is retained rather than deleted because `MemoryFlat` is encoded
+    /// positionally by postcard and this is field 9 of 22: removing it shifts
+    /// every field after it, so every stored record would decode successfully
+    /// and return garbage. Legacy records that carry values still round-trip
+    /// through `Memory::from_legacy`, and the resolver unions them in.
     pub entity_refs: Vec<EntityRef>,
 
-    /// Retrieval tracking ID - set when memory is retrieved
-    /// Used for Hebbian feedback loop (reinforce_recall)
+    /// Retrieval tracking ID.
+    ///
+    /// ALWAYS `None` in production. Its only writer is
+    /// [`Memory::mark_retrieved`], which no non-test code calls. The previous
+    /// comment here claimed this drives "the Hebbian feedback loop
+    /// (reinforce_recall)"; it does not, and there is no route by which it
+    /// could — `MemorySystem::reinforce_recall` takes an explicit
+    /// `&[MemoryId]` from its caller and never reads this field.
+    ///
+    /// Retained for the same positional-wire-format reason as `entity_refs`
+    /// (field 11 of 22 in `MemoryFlat`).
     pub last_retrieval_id: Option<Uuid>,
 
     // ==========================================================================
     // Multi-tenancy support for enterprise deployments
+    //
+    // All three are CALLER-DECLARED identity: the writer states who it is, and
+    // the server stores the claim without verifying it. Server-observed facts
+    // about a write belong elsewhere. They are `None` on every row of a real
+    // store today, but for different reasons — `agent_id` and `run_id` are
+    // accepted by `POST /api/remember` and persisted end to end, and read as
+    // null only because no shipped client (hooks, MCP, TUI, python, UI) sends
+    // them. `actor_id` had no request field and no write path at all until it
+    // was wired alongside them.
     // ==========================================================================
+    /// The agent that wrote this memory, as declared by the writer.
     pub agent_id: Option<String>,
+    /// The run/session of the writing agent, as declared by the writer.
     pub run_id: Option<String>,
+    /// The human or upstream principal the writer acted on behalf of, as
+    /// declared by the writer.
     pub actor_id: Option<String>,
 
     // Similarity score (only populated in search results, not stored)
@@ -2015,7 +2055,13 @@ impl Memory {
         self.version > 1
     }
 
-    /// Add entity reference (bidirectional link to graph)
+    /// Add an entity reference to the denormalized [`Self::entity_refs`] copy.
+    ///
+    /// No production path calls this and none should: the graph owns this
+    /// relation, and a second copy on the memory drifts the moment entity
+    /// canonicalization merges two nodes. It exists so tests can construct
+    /// records in the legacy shape and pin the positional wire format that
+    /// still carries the field.
     pub fn add_entity_ref(&mut self, entity_id: Uuid, name: String, relation: String) {
         // Avoid duplicates
         if !self.entity_refs.iter().any(|r| r.entity_id == entity_id) {
@@ -2044,7 +2090,11 @@ impl Memory {
         self.related_todo_ids.contains(todo_id)
     }
 
-    /// Get entity IDs for graph operations
+    /// Entity IDs from the denormalized [`Self::entity_refs`] copy ONLY.
+    ///
+    /// Returns `[]` for every memory this product has written. Production
+    /// callers want `MemorySystem::memory_entity_ids`, which resolves through
+    /// the graph; this accessor is kept for tests that pin the stored field.
     pub fn entity_ids(&self) -> Vec<Uuid> {
         self.entity_refs.iter().map(|r| r.entity_id).collect()
     }
@@ -2060,7 +2110,13 @@ impl Memory {
         self.metadata.lock().activation *= decay_factor;
     }
 
-    /// Set retrieval tracking ID for Hebbian feedback
+    /// Set [`Self::last_retrieval_id`].
+    ///
+    /// No non-test code calls this, and nothing reads the field it sets.
+    /// Reinforcement (`MemorySystem::reinforce_recall`) is driven by an
+    /// explicit `&[MemoryId]` supplied by the caller, so a stored retrieval
+    /// marker has no consumer. Kept so tests can populate the field the
+    /// positional wire format still carries.
     pub fn mark_retrieved(&mut self, retrieval_id: Uuid) {
         self.last_retrieval_id = Some(retrieval_id);
         // Also record access
@@ -4302,6 +4358,15 @@ impl TodoStatus {
             _ => None,
         }
     }
+
+    /// Whether this status means the todo has left the working set.
+    ///
+    /// Done and Cancelled are already treated as one class everywhere that
+    /// matters — overdue counting, the default list filter, dependency
+    /// unblocking — and both carry a settlement time in `completed_at`.
+    pub fn is_settled(&self) -> bool {
+        matches!(self, TodoStatus::Done | TodoStatus::Cancelled)
+    }
 }
 
 /// Todo priority (Linear-style)
@@ -4357,6 +4422,21 @@ impl TodoPriority {
     }
 }
 
+/// Number of days in a calendar month (handles leap years).
+fn days_in_month(year: i32, month: u32) -> u32 {
+    use chrono::{Datelike, NaiveDate};
+
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .and_then(|first_of_next| first_of_next.pred_opt())
+        .map(|last| last.day())
+        .unwrap_or(28)
+}
+
 /// Recurrence pattern for repeating todos
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -4371,7 +4451,139 @@ pub enum Recurrence {
     EveryNDays { n: u32 },
 }
 
+/// Weekday abbreviations in `Recurrence::Weekly`'s numbering (0 = Sunday).
+const WEEKDAY_NAMES: [&str; 7] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+
+/// Parse a weekday token into `Recurrence::Weekly`'s numbering (0 = Sunday).
+fn parse_weekday(token: &str) -> Option<u8> {
+    match token {
+        "0" | "sun" | "sunday" => Some(0),
+        "1" | "mon" | "monday" => Some(1),
+        "2" | "tue" | "tues" | "tuesday" => Some(2),
+        "3" | "wed" | "weds" | "wednesday" => Some(3),
+        "4" | "thu" | "thur" | "thurs" | "thursday" => Some(4),
+        "5" | "fri" | "friday" => Some(5),
+        "6" | "sat" | "saturday" => Some(6),
+        _ => None,
+    }
+}
+
 impl Recurrence {
+    /// Human-writable forms this pattern accepts, quoted in every rejection so
+    /// a caller that guesses wrong is told what to send instead.
+    pub const PATTERN_FORMS: &'static str = "daily | weekly | weekly:mon,wed,fri \
+         (or weekly:1,3,5, 0=Sunday) | monthly | monthly:15 (1-31) | every 3 days (1-3650)";
+
+    /// Longest interval `EveryNDays` accepts. `next_occurrence` adds the
+    /// interval to a timestamp and chrono panics on an out-of-range date, so
+    /// this is a guard rail rather than a preference — ten years is well past
+    /// any real recurring task and nowhere near the overflow.
+    pub const MAX_INTERVAL_DAYS: u32 = 3650;
+
+    /// Parse a recurrence pattern. Every variant is reachable from here.
+    ///
+    /// Case-insensitive; `_`, `-` and spaces are interchangeable, so both
+    /// `every_3_days` and `every 3 days` parse. The bare words `daily`,
+    /// `weekly` (Mon-Fri) and `monthly` (day 1) keep the meanings they have
+    /// always had, so existing clients are unaffected.
+    ///
+    /// The error is a short reason, not a full sentence: callers add their own
+    /// framing (the HTTP layer appends [`Recurrence::PATTERN_FORMS`]).
+    pub fn from_pattern(s: &str) -> Result<Self, String> {
+        let lowered = s.trim().to_lowercase().replace(['_', '-'], " ");
+        let normalized = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        let (head, arg) = match normalized.split_once(':') {
+            Some((head, arg)) => (head.trim(), Some(arg.trim())),
+            None => (normalized.as_str(), None),
+        };
+
+        match (head, arg) {
+            ("daily", None) => Ok(Recurrence::Daily),
+
+            // The long-standing default: the working week.
+            ("weekly", None) => Ok(Recurrence::Weekly {
+                days: vec![1, 2, 3, 4, 5],
+            }),
+            ("weekly", Some(list)) => {
+                let mut days = Vec::new();
+                for token in list.split(',') {
+                    let token = token.trim();
+                    let day =
+                        parse_weekday(token).ok_or_else(|| format!("unknown weekday '{token}'"))?;
+                    days.push(day);
+                }
+                // `next_occurrence` scans for the first day greater than today,
+                // so an unsorted list would pick the wrong one.
+                days.sort_unstable();
+                days.dedup();
+                if days.is_empty() {
+                    return Err("no weekdays given".to_string());
+                }
+                Ok(Recurrence::Weekly { days })
+            }
+
+            // The long-standing default: the first of the month.
+            ("monthly", None) => Ok(Recurrence::Monthly { day: 1 }),
+            ("monthly", Some(day)) => {
+                let parsed: u8 = day
+                    .parse()
+                    .map_err(|_| format!("'{day}' is not a day of the month"))?;
+                if !(1..=31).contains(&parsed) {
+                    return Err("day of month must be 1-31".to_string());
+                }
+                Ok(Recurrence::Monthly { day: parsed })
+            }
+
+            // "every 3 days" / "every_3_days" / "every 1 day"
+            (head, None) => {
+                let interval = head
+                    .strip_prefix("every ")
+                    .and_then(|rest| rest.strip_suffix(" days").or(rest.strip_suffix(" day")))
+                    .ok_or_else(|| "unrecognised pattern".to_string())?;
+                let n: u32 = interval
+                    .parse()
+                    .map_err(|_| format!("'{interval}' is not a whole number"))?;
+                if n == 0 {
+                    return Err(
+                        "an interval of 0 days would repeat forever on the same day".to_string()
+                    );
+                }
+                if n > Self::MAX_INTERVAL_DAYS {
+                    return Err(format!(
+                        "interval must be at most {} days",
+                        Self::MAX_INTERVAL_DAYS
+                    ));
+                }
+                Ok(Recurrence::EveryNDays { n })
+            }
+
+            _ => Err("unrecognised pattern".to_string()),
+        }
+    }
+
+    /// Render back into a pattern [`Recurrence::from_pattern`] accepts.
+    ///
+    /// Interchange formats (MIF export) store this rather than the `Debug`
+    /// rendering, which no parser reads.
+    pub fn to_pattern(&self) -> String {
+        match self {
+            Recurrence::Daily => "daily".to_string(),
+            Recurrence::Weekly { days } => {
+                if days.is_empty() {
+                    return "weekly".to_string();
+                }
+                let names: Vec<&str> = days
+                    .iter()
+                    .map(|d| WEEKDAY_NAMES[(*d as usize).min(6)])
+                    .collect();
+                format!("weekly:{}", names.join(","))
+            }
+            Recurrence::Monthly { day } => format!("monthly:{day}"),
+            Recurrence::EveryNDays { n } => format!("every {n} days"),
+        }
+    }
+
     /// Calculate the next due date from a given date
     pub fn next_occurrence(&self, from: DateTime<Utc>) -> DateTime<Utc> {
         use chrono::{Datelike, Duration};
@@ -4398,14 +4610,25 @@ impl Recurrence {
                 from + Duration::days(days_until)
             }
             Recurrence::Monthly { day } => {
-                let target_day = (*day).min(28) as u32; // Cap at 28 to avoid month overflow
-                let mut next = from;
-                // Move to next month if we're past the target day
-                if from.day() >= target_day {
-                    next = from + Duration::days(32); // Jump to next month
+                use chrono::{NaiveDate, TimeZone};
+
+                let target = (*day).clamp(1, 31) as u32;
+                let (mut year, mut month) = (from.year(), from.month());
+                // On or past the target day, the next occurrence is next month.
+                if from.day() >= target {
+                    if month == 12 {
+                        year += 1;
+                        month = 1;
+                    } else {
+                        month += 1;
+                    }
                 }
-                // Set to target day
-                next.with_day(target_day).unwrap_or(next)
+                // A month shorter than the target fires on its last day rather
+                // than sliding into the following month.
+                let last_day = days_in_month(year, month);
+                NaiveDate::from_ymd_opt(year, month, target.min(last_day))
+                    .map(|d| Utc.from_utc_datetime(&d.and_time(from.time())))
+                    .unwrap_or(from)
             }
             Recurrence::EveryNDays { n } => from + Duration::days(*n as i64),
         }
@@ -4652,9 +4875,7 @@ impl Todo {
     /// Check if todo is overdue
     pub fn is_overdue(&self) -> bool {
         if let Some(due) = &self.due_date {
-            Utc::now() > *due
-                && self.status != TodoStatus::Done
-                && self.status != TodoStatus::Cancelled
+            Utc::now() > *due && !self.status.is_settled()
         } else {
             false
         }
@@ -4664,8 +4885,7 @@ impl Todo {
     pub fn overdue_seconds(&self) -> Option<i64> {
         if let Some(due) = &self.due_date {
             let now = Utc::now();
-            if now > *due && self.status != TodoStatus::Done && self.status != TodoStatus::Cancelled
-            {
+            if now > *due && !self.status.is_settled() {
                 return Some((now - *due).num_seconds());
             }
         }
@@ -4682,11 +4902,43 @@ impl Todo {
         }
     }
 
+    /// Apply a status transition, keeping `completed_at` honest.
+    ///
+    /// Settlement is the server's business, not each client's: entering a
+    /// settled state (Done or Cancelled) stamps the settlement time, and
+    /// leaving one clears it, so a reopened todo cannot go on reporting how
+    /// long it "took". Moving between two settled states keeps the original
+    /// stamp — the todo settled when it settled.
+    ///
+    /// Every write path that changes a todo's status must go through here.
+    pub fn apply_status(&mut self, status: TodoStatus) {
+        let now = Utc::now();
+        let was_settled = self.status.is_settled();
+        self.status = status;
+
+        if self.status.is_settled() {
+            if !was_settled {
+                self.completed_at = Some(now);
+            }
+        } else {
+            // Unconditional: an unsettled todo has no completion time, and a
+            // legacy row carrying one is exactly the bug this closes.
+            self.completed_at = None;
+        }
+
+        self.updated_at = now;
+    }
+
     /// Mark as completed
     pub fn complete(&mut self) {
-        self.status = TodoStatus::Done;
-        self.completed_at = Some(Utc::now());
-        self.updated_at = Utc::now();
+        self.apply_status(TodoStatus::Done);
+        // `/complete` is an explicit "this is done, now". A todo that was
+        // already Done but never stamped (rows written before settlement was
+        // owned by the server) gets its stamp from that action rather than
+        // from a guess about when it originally happened.
+        if self.completed_at.is_none() {
+            self.completed_at = Some(self.updated_at);
+        }
     }
 
     /// Create next recurrence if applicable
@@ -5827,6 +6079,86 @@ mod tests {
             stored.metadata.get("operator").map(String::as_str),
             Some("kestrel"),
             "new keys are added"
+        );
+    }
+
+    // ── todo settlement and recurrence ──────────────────────────────────
+
+    fn at(y: i32, m: u32, d: u32) -> DateTime<Utc> {
+        use chrono::TimeZone;
+        Utc.with_ymd_and_hms(y, m, d, 9, 30, 0).unwrap()
+    }
+
+    /// `Monthly { day }` was only ever reachable as `day: 1`, so its date math
+    /// was never exercised: it capped the target at 28 and advanced by "+32
+    /// days", which skips February entirely. Now that a client can ask for
+    /// day 31, the next occurrence has to land in the very next month, on the
+    /// last day of that month when it is shorter than the target.
+    #[test]
+    fn monthly_recurrence_lands_in_the_next_month() {
+        let r = Recurrence::Monthly { day: 31 };
+        assert_eq!(
+            r.next_occurrence(at(2026, 1, 31)),
+            at(2026, 2, 28),
+            "January 31 must roll to February, clamped to the month's last day"
+        );
+        assert_eq!(
+            r.next_occurrence(at(2028, 1, 31)),
+            at(2028, 2, 29),
+            "a leap February has a 29th"
+        );
+        assert_eq!(
+            Recurrence::Monthly { day: 15 }.next_occurrence(at(2026, 3, 2)),
+            at(2026, 3, 15),
+            "a target still ahead in this month fires this month"
+        );
+        assert_eq!(
+            Recurrence::Monthly { day: 15 }.next_occurrence(at(2026, 12, 20)),
+            at(2027, 1, 15),
+            "December rolls the year over"
+        );
+    }
+
+    /// Entering a settled state stamps the settlement time; leaving one clears
+    /// it. Before this, `completed_at` was written only by `complete()` and
+    /// never cleared, so a reopened todo kept reporting how long it "took".
+    #[test]
+    fn status_transitions_keep_completed_at_honest() {
+        let mut todo = Todo::new("u".to_string(), "Ship the thing".to_string());
+        assert!(todo.completed_at.is_none());
+
+        todo.apply_status(TodoStatus::Done);
+        let settled_at = todo.completed_at.expect("entering Done must stamp");
+
+        // Moving between settled states must not move the stamp: the
+        // settlement happened when it happened.
+        todo.apply_status(TodoStatus::Cancelled);
+        assert_eq!(
+            todo.completed_at,
+            Some(settled_at),
+            "moving between settled states keeps the original settlement time"
+        );
+
+        todo.apply_status(TodoStatus::InProgress);
+        assert!(
+            todo.completed_at.is_none(),
+            "reopening must clear the settlement time"
+        );
+
+        todo.apply_status(TodoStatus::Cancelled);
+        assert!(
+            todo.completed_at.is_some(),
+            "cancelling settles the todo and must stamp it"
+        );
+
+        // A legacy row that is Done with no stamp gets one from an explicit
+        // /complete — an action taken now, not a guess about the past.
+        let mut legacy = Todo::new("u".to_string(), "Legacy done row".to_string());
+        legacy.status = TodoStatus::Done;
+        legacy.complete();
+        assert!(
+            legacy.completed_at.is_some(),
+            "complete() must always leave a stamp behind"
         );
     }
 }

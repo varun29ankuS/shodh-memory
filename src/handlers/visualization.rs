@@ -443,8 +443,20 @@ pub async fn get_graph_data(
             size: 6.0 + mem.importance() * 8.0,
         });
 
-        // Connect memory to its entities
-        for entity_id in mem.entity_ids() {
+        // Connect memory to its entities.
+        //
+        // Resolved from the episode the graph pass wrote for this memory —
+        // its uuid IS the memory id. `Memory::entity_ids()` reads the stored
+        // `entity_refs` field, which no production write path ever fills, so
+        // this loop used to have zero iterations for every memory.
+        let memory_entities = graph_guard
+            .get_episode(&mem.id.0)
+            .ok()
+            .flatten()
+            .map(|episode| episode.entity_refs)
+            .unwrap_or_default();
+
+        for entity_id in memory_entities {
             let entity_id_str = entity_id.to_string();
             if entity_ids.contains(&entity_id_str) {
                 edges.push(GraphEdge {

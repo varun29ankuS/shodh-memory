@@ -240,7 +240,7 @@ pub use crate::memory::segmentation::{
 };
 pub use crate::memory::sessions::{
     Session, SessionDigest, SessionEvent, SessionId, SessionStats, SessionStatus, SessionStore,
-    SessionStoreStats, SessionSummary, TemporalContext, TimeOfDay,
+    SessionSummary, TemporalContext, TimeOfDay, UserSessionStats,
 };
 pub use crate::memory::temporal_facts::{EventType, ResolvedTime, TemporalFact, TemporalFactStore};
 pub use crate::memory::todos::{ProjectStats, TodoStore, UserTodoStats};
@@ -1671,18 +1671,26 @@ impl MemorySystem {
         ))
     }
 
-    /// Remember with agent context for multi-agent systems
+    /// Remember with caller-declared write identity.
     ///
-    /// Same as `remember` but tracks which agent created the memory,
-    /// enabling agent-specific retrieval and hierarchical memory tracking.
+    /// Same as `remember` but records who wrote the memory: the agent, its
+    /// run, and the principal it acted for. All three are claims the caller
+    /// makes about itself and are stored unverified — see the field docs on
+    /// [`Memory::agent_id`].
+    ///
+    /// `actor_id` was added to this signature rather than left as the
+    /// hardcoded `None` it had been since the initial release: the field is
+    /// persisted by `Memory` and served by `/api/memory/{id}`, so it was a
+    /// storable, readable value that nothing could ever set.
     pub fn remember_with_agent(
         &self,
         experience: Experience,
         created_at: Option<chrono::DateTime<chrono::Utc>>,
         agent_id: Option<String>,
         run_id: Option<String>,
+        actor_id: Option<String>,
     ) -> Result<MemoryId> {
-        self.remember_with_agent_detailed(experience, created_at, agent_id, run_id)
+        self.remember_with_agent_detailed(experience, created_at, agent_id, run_id, actor_id)
             .map(|outcome| outcome.id)
     }
 
@@ -1693,6 +1701,7 @@ impl MemorySystem {
         created_at: Option<chrono::DateTime<chrono::Utc>>,
         agent_id: Option<String>,
         run_id: Option<String>,
+        actor_id: Option<String>,
     ) -> Result<RememberOutcome> {
         // IDEMPOTENCY (issue #109): Content hash dedup + enrichment merge,
         // through the same single implementation `remember()` uses.
@@ -1734,14 +1743,14 @@ impl MemorySystem {
             }
         }
 
-        // Create memory with agent context
+        // Create memory with caller-declared write identity
         let memory = Arc::new(Memory::new(
             memory_id.clone(),
             experience,
             importance,
             agent_id,
             run_id,
-            None, // actor_id
+            actor_id,
             created_at,
         ));
 
@@ -5234,6 +5243,11 @@ impl MemorySystem {
         let mut cache_hits = 0;
         let mut storage_fetches = 0;
         let mut filtered_out = 0;
+        // Candidates skipped because their record could not be read. Counted
+        // separately from `filtered_out` (a deliberate exclusion) because a
+        // non-zero value here means results are silently incomplete and the
+        // storage underneath needs looking at.
+        let mut unreadable_records = 0;
 
         // Layer 5: Unified scoring with hebbian + recency + emotional + feedback signals
         // All signals are multiplicative on the base score to preserve RRF ranking.
@@ -5559,9 +5573,21 @@ impl MemorySystem {
                 continue;
             }
 
-            // Cold path: Fetch from RocksDB storage (expensive deserialization)
-            match self.retriever.get_from_storage(&memory_id) {
-                Ok(memory) => {
+            // Cold path: Fetch from RocksDB storage (expensive deserialization).
+            //
+            // The three outcomes are deliberately NOT collapsed. Removing the
+            // index entry unindexes a live memory permanently — `remove_memory`
+            // drops the id mapping AND calls `storage.delete_vector_mapping`,
+            // so the removal outlives a restart while the record itself stays
+            // in RocksDB, reachable by nothing. That is only ever correct when
+            // the memory is genuinely gone, which is exactly what `Ok(None)`
+            // (and only `Ok(None)`) attests to. An `Err` — transient IO, a
+            // locked or unreadable file, a record that does not decode — is an
+            // inconclusive read, never proof of absence: we skip the candidate
+            // and leave the index alone, matching the tolerance the scanning
+            // paths already apply to individual bad records.
+            match self.retriever.get_from_storage_opt(&memory_id) {
+                Ok(Some(memory)) => {
                     // CRITICAL FIX: Apply filters before adding to results
                     if self.retriever.matches_filters(&memory, &vector_query) {
                         // Reuse unified scoring (includes feedback_multiplier)
@@ -5577,30 +5603,46 @@ impl MemorySystem {
                         filtered_out += 1;
                     }
                 }
+                Ok(None) => {
+                    tracing::warn!(
+                        memory_id = %memory_id.0,
+                        "recall: vector index points at a memory RocksDB reports \
+                         absent — cleaning up the orphaned index entry"
+                    );
+                    self.retriever.remove_memory(&memory_id);
+                }
                 Err(e) => {
-                    // This cleanup is a WRITE on the read path — it soft-deletes
-                    // the vectors in Vamana and deletes the memory's vector
-                    // mapping from RocksDB — and it was the one recall-path
-                    // mutation that never consulted the read-only gate. A recall
-                    // that promises not to alter the corpus must not silently
-                    // unindex a memory, so it is gated like every sibling
-                    // mutation. The stale reference is not lost: the entry is
-                    // still there for the next writable recall (or a
-                    // `repair_index`) to collect.
-                    if Self::recall_readonly(query) {
-                        tracing::warn!(
-                            memory_id = %memory_id.0,
-                            error = %e,
-                            "Stale vector reference — cleanup SKIPPED (read-only recall)"
-                        );
-                    } else {
-                        tracing::warn!(
-                            memory_id = %memory_id.0,
-                            error = %e,
-                            "Stale vector reference — cleaning up orphaned index entry"
-                        );
-                        self.retriever.remove_memory(&memory_id);
-                    }
+                    // An Err here is an INCONCLUSIVE read, not proof the memory
+                    // is gone, so nothing is deleted — the index entry stays and
+                    // the candidate is skipped for this query only.
+                    //
+                    // Two branches arrived at this site from different
+                    // directions and the stricter rule wins. One made the
+                    // cleanup that used to run here consult the read-only gate,
+                    // because unindexing a memory is a WRITE on the read path
+                    // (it soft-deletes the vectors in Vamana and drops the
+                    // memory's vector mapping) and a recall that promises not to
+                    // alter the corpus must not perform it. The other removed
+                    // the cleanup outright. Removing it outright subsumes the
+                    // gate — there is no longer a write to gate — and is the
+                    // safer rule for an independent reason: `deserialize_memory`
+                    // now retries an unreadable record under an older
+                    // `NerEntityRecord` layout, so a record that errors on one
+                    // build can decode on the next. Deleting its index entry
+                    // would have made that repair unreachable for exactly the
+                    // records it exists to rescue.
+                    //
+                    // A genuine orphan still gets collected: the `Ok(None)` arm
+                    // above is RocksDB positively reporting the memory absent,
+                    // which is proof, and it removes the entry.
+                    unreadable_records += 1;
+                    tracing::warn!(
+                        memory_id = %memory_id.0,
+                        error = %e,
+                        "recall: memory record could not be read — skipping this \
+                         candidate and KEEPING its index entry; an inconclusive \
+                         read is not proof the memory is gone"
+                    );
                 }
             }
 
@@ -5631,8 +5673,16 @@ impl MemorySystem {
             cache_hits,
             storage_fetches,
             filtered_out,
+            unreadable_records,
             "recall [layer:5] memory fetch + unified scoring"
         );
+        if unreadable_records > 0 {
+            tracing::warn!(
+                unreadable_records,
+                "recall returned incomplete results: some candidate records \
+                 could not be read; their index entries were kept"
+            );
+        }
         if let Some(ref mut s) = stats {
             s.stage_timings
                 .get_or_insert_with(StageTiming::default)
@@ -6963,11 +7013,67 @@ impl MemorySystem {
     // Memory-Edge Tier Coupling Methods
     // =========================================================================
 
+    /// Graph entity ids a memory refers to, resolved against an already-held
+    /// graph read guard.
+    ///
+    /// [`Memory::entity_refs`] is the field this looks like it should read, and
+    /// it is empty on every memory this product has ever written: the method
+    /// that pushes to it has had no non-test caller since the field was
+    /// introduced, every constructor sets `Vec::new()`, and a live store returns
+    /// 0 populated rows out of 200.
+    ///
+    /// The authority is the graph. `process_experience_into_graph` writes an
+    /// [`crate::graph_memory::EpisodicNode`] whose `uuid` IS the memory's own
+    /// UUID and whose `entity_refs` are the resolved entity ids — and entity
+    /// canonicalization keeps that side current, whereas a denormalized copy on
+    /// the memory would drift the moment two entities merged.
+    ///
+    /// The stored field is still unioned in, because `Memory::from_legacy`
+    /// faithfully restores it for any record that carries one. The field itself
+    /// stays: it sits at position 9 of the 22 positional fields in `MemoryFlat`,
+    /// so removing it would shift every field after it and turn every stored
+    /// record into a decode that succeeds and returns garbage.
+    fn entity_ids_from_graph(
+        graph: &crate::graph_memory::GraphMemory,
+        memory: &Memory,
+    ) -> Vec<Uuid> {
+        let mut ids: Vec<Uuid> = memory.entity_refs.iter().map(|r| r.entity_id).collect();
+
+        if let Ok(Some(episode)) = graph.get_episode(&memory.id.0) {
+            for uuid in episode.entity_refs {
+                if !ids.contains(&uuid) {
+                    ids.push(uuid);
+                }
+            }
+        }
+
+        ids
+    }
+
+    /// Graph entity ids a memory refers to. See [`Self::entity_ids_from_graph`]
+    /// for why this does not simply read `Memory::entity_refs`.
+    ///
+    /// Takes the graph read lock itself, so callers that already hold it must
+    /// use [`Self::entity_ids_from_graph`] instead.
+    pub fn memory_entity_ids(&self, memory: &Memory) -> Vec<Uuid> {
+        match &self.graph_memory {
+            Some(graph) => Self::entity_ids_from_graph(&graph.read(), memory),
+            None => memory.entity_refs.iter().map(|r| r.entity_id).collect(),
+        }
+    }
+
     /// Calculate graph-adjusted importance threshold for tier promotion (Direction 3).
     ///
     /// Well-connected memories (many L2+ edges) get a discount on the promotion threshold.
     /// Isolated memories (entities but no edges) get a penalty.
     /// Memories with no entities are unaffected (no graph context to evaluate).
+    ///
+    /// The entity set is resolved through the graph rather than read off
+    /// `memory.entity_refs`. That field is empty for every memory in
+    /// production, so the guard below used to return `base_threshold`
+    /// unconditionally and everything after it was unreachable — this whole
+    /// direction of the memory-edge tier coupling has been inert since it
+    /// shipped.
     fn graph_adjusted_threshold(&self, memory: &Memory, base_threshold: f32) -> f32 {
         use crate::constants::*;
 
@@ -6976,15 +7082,17 @@ impl MemorySystem {
             None => return base_threshold,
         };
 
-        if memory.entity_refs.is_empty() {
+        let graph_guard = graph.read();
+        let entity_ids = Self::entity_ids_from_graph(&graph_guard, memory);
+
+        if entity_ids.is_empty() {
             return base_threshold;
         }
 
-        let graph_guard = graph.read();
         let mut l2_plus_count = 0usize;
 
-        for entity_ref in &memory.entity_refs {
-            if let Ok(edges) = graph_guard.get_entity_relationships(&entity_ref.entity_id) {
+        for entity_id in &entity_ids {
+            if let Ok(edges) = graph_guard.get_entity_relationships(entity_id) {
                 for edge in &edges {
                     if matches!(
                         edge.tier,
@@ -7083,6 +7191,11 @@ impl MemorySystem {
     /// When graph decay prunes edges and leaves entities orphaned, the memories
     /// referencing those entities get a small importance boost to prevent immediate
     /// decay death. This gives them one more maintenance cycle to prove value.
+    ///
+    /// "References" is resolved through the graph, not read off
+    /// `memory.entity_refs` — that field is empty for every memory in
+    /// production, so this boost had never fired for anyone. See
+    /// [`Self::entity_ids_from_graph`].
     pub fn compensate_orphaned_memories(&self, orphaned_entity_ids: &[String]) -> Result<usize> {
         use crate::constants::ORPHAN_COMPENSATORY_BOOST;
 
@@ -7101,12 +7214,28 @@ impl MemorySystem {
             self.session_memory.read().all_memories(),
         ];
 
+        // One guard for the whole scan rather than one acquisition per memory.
+        let graph_guard = self.graph_memory.as_ref().map(|g| g.read());
+
+        // `remember()` puts the SAME `Arc<Memory>` in working memory and — when
+        // importance clears `importance_threshold` — in session memory too, so
+        // the two tiers overlap. Without this set such a memory receives the
+        // boost twice and is counted twice. That was latent for as long as this
+        // loop body was unreachable; activating it made it observable.
+        let mut seen: std::collections::HashSet<MemoryId> = std::collections::HashSet::new();
+
         for memories in &tiers {
             for memory in memories {
-                let entity_count = memory
-                    .entity_refs
+                if !seen.insert(memory.id.clone()) {
+                    continue;
+                }
+                let entity_ids = match &graph_guard {
+                    Some(graph) => Self::entity_ids_from_graph(graph, memory),
+                    None => memory.entity_refs.iter().map(|r| r.entity_id).collect(),
+                };
+                let entity_count = entity_ids
                     .iter()
-                    .filter(|e| orphaned_set.contains(e.entity_id.to_string().as_str()))
+                    .filter(|id| orphaned_set.contains(id.to_string().as_str()))
                     .count();
                 if entity_count > 0 {
                     let new_importance =
@@ -11790,6 +11919,436 @@ mod readonly_recall_tests {
             "the default path must still strengthen the co-retrieval edge \
              between memories returned together — before={:?} after={:?}",
             before.edges, after.edges
+        );
+    }
+}
+
+
+#[cfg(test)]
+mod memory_entity_resolution_tests {
+    //! `Memory::entity_refs` is never populated on any production write path —
+    //! every constructor sets `Vec::new()`, and the one method that pushes to it
+    //! has no non-test caller. The graph, however, records exactly this
+    //! information: `process_experience_into_graph` writes an `EpisodicNode`
+    //! whose `uuid` IS the memory id and whose `entity_refs` are the resolved
+    //! graph entity UUIDs.
+    //!
+    //! These tests pin the consumers to the graph rather than to the empty
+    //! field. Each one sets up the episode the way the handler layer does and
+    //! asserts on behaviour that was previously unreachable.
+
+    use super::*;
+    use crate::graph_memory::{
+        EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode, GraphMemory, LtpStatus,
+        RelationType, RelationshipEdge,
+    };
+    use crate::memory::types::Experience;
+    use std::collections::HashMap as StdHashMap;
+
+    fn setup() -> (MemorySystem, tempfile::TempDir) {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = MemoryConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            working_memory_size: 50,
+            session_memory_size_mb: 50,
+            max_heap_per_user_mb: 200,
+            auto_compress: false,
+            compression_age_days: 1,
+            importance_threshold: 0.0,
+        };
+        let mut system = MemorySystem::new(config, None).expect("memory system");
+        let graph = GraphMemory::new(&temp_dir.path().join("graph"), None).expect("graph");
+        system.set_graph_memory(Arc::new(parking_lot::RwLock::new(graph)));
+        (system, temp_dir)
+    }
+
+    fn add_entity(graph: &GraphMemory, name: &str) -> uuid::Uuid {
+        let now = chrono::Utc::now();
+        graph
+            .add_entity(EntityNode {
+                uuid: uuid::Uuid::new_v4(),
+                name: name.to_string(),
+                labels: vec![EntityLabel::Concept],
+                created_at: now,
+                last_seen_at: now,
+                mention_count: 1,
+                summary: String::new(),
+                attributes: StdHashMap::new(),
+                name_embedding: None,
+                salience: 1.0,
+                is_proper_noun: true,
+                selectivity: None,
+                fine_type: None,
+                kb_id: None,
+            })
+            .expect("add entity")
+    }
+
+    fn add_l2_edge(graph: &GraphMemory, from: uuid::Uuid, to: uuid::Uuid) {
+        let now = chrono::Utc::now();
+        graph
+            .add_relationship(RelationshipEdge {
+                uuid: uuid::Uuid::new_v4(),
+                from_entity: from,
+                to_entity: to,
+                relation_type: RelationType::CoOccurs,
+                strength: 1.0,
+                created_at: now,
+                valid_at: now,
+                invalidated_at: None,
+                source_episode_id: None,
+                context: String::new(),
+                last_activated: now,
+                activation_count: 1,
+                ltp_status: LtpStatus::None,
+                tier: EdgeTier::L2Episodic,
+                activation_timestamps: None,
+                entity_confidence: None,
+                forman_curvature: None,
+                endpoint_selectivity: None,
+                provenance: Vec::new(),
+                promoted_at: None,
+            })
+            .expect("add edge");
+    }
+
+    /// Mirror `process_experience_into_graph`: the episode's uuid IS the memory
+    /// id, and its `entity_refs` are the resolved graph entity UUIDs.
+    fn link_memory_to_entities(graph: &GraphMemory, id: &MemoryId, refs: Vec<uuid::Uuid>) {
+        let now = chrono::Utc::now();
+        graph
+            .add_episode(EpisodicNode {
+                uuid: id.0,
+                name: format!("Memory {}", &id.0.to_string()[..8]),
+                content: String::new(),
+                valid_at: now,
+                created_at: now,
+                entity_refs: refs,
+                source: EpisodeSource::Message,
+                metadata: StdHashMap::new(),
+            })
+            .expect("add episode");
+    }
+
+    /// `importance_override` is pinned well below 1.0 so the compensatory boost
+    /// has headroom — `compensate_orphaned_memories` caps at 1.0, so a memory
+    /// that scored 1.0 on its own would show no movement even with a correct
+    /// fix and the assertion would be measuring the cap, not the behaviour.
+    fn remember(system: &MemorySystem, content: &str) -> MemoryId {
+        system
+            .remember(
+                Experience {
+                    content: content.to_string(),
+                    importance_override: Some(0.5),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("remember")
+    }
+
+    fn working_memory_for(system: &MemorySystem, id: &MemoryId) -> SharedMemory {
+        system
+            .working_memory
+            .read()
+            .all_memories()
+            .into_iter()
+            .find(|m| &m.id == id)
+            .expect("memory is in working tier after remember")
+    }
+
+    /// `graph_adjusted_threshold` short-circuits on `memory.entity_refs.is_empty()`,
+    /// which is ALWAYS true in production — so the whole edge-count discount
+    /// below that guard is unreachable code and tier promotion has never been
+    /// graph-aware.
+    ///
+    /// Mutation that turns this red again: restore the
+    /// `if memory.entity_refs.is_empty() { return base_threshold; }` guard.
+    #[test]
+    fn graph_adjusted_threshold_discounts_a_well_connected_memory() {
+        let (system, _dir) = setup();
+        let graph = system.graph_memory().expect("graph wired").clone();
+
+        let (alpha, beta, gamma) = {
+            let g = graph.read();
+            let alpha = add_entity(&g, "alpha");
+            let beta = add_entity(&g, "beta");
+            let gamma = add_entity(&g, "gamma");
+            add_l2_edge(&g, alpha, beta);
+            add_l2_edge(&g, alpha, gamma);
+            add_l2_edge(&g, beta, gamma);
+            (alpha, beta, gamma)
+        };
+
+        let id = remember(&system, "A memory whose entities are richly connected.");
+        link_memory_to_entities(&graph.read(), &id, vec![alpha, beta, gamma]);
+
+        let memory = working_memory_for(&system, &id);
+        assert!(
+            memory.entity_refs.is_empty(),
+            "precondition: no production path populates Memory::entity_refs"
+        );
+
+        let base = 0.50_f32;
+        let adjusted = system.graph_adjusted_threshold(&memory, base);
+        assert!(
+            adjusted < base,
+            "a memory with three L2 edges must get a promotion discount, got \
+             {adjusted} against base {base}"
+        );
+    }
+
+    /// The other half of the same guard: a memory that HAS entities but no
+    /// strong edges is supposed to be penalised. That branch was equally
+    /// unreachable.
+    #[test]
+    fn graph_adjusted_threshold_penalises_an_isolated_memory() {
+        let (system, _dir) = setup();
+        let graph = system.graph_memory().expect("graph wired").clone();
+
+        let lonely = add_entity(&graph.read(), "lonely");
+        let id = remember(&system, "A memory whose single entity has no edges.");
+        link_memory_to_entities(&graph.read(), &id, vec![lonely]);
+
+        let memory = working_memory_for(&system, &id);
+        let base = 0.50_f32;
+        let adjusted = system.graph_adjusted_threshold(&memory, base);
+        assert!(
+            adjusted > base,
+            "a memory with entities but no L2+ edges must be penalised, got \
+             {adjusted} against base {base}"
+        );
+    }
+
+    /// A memory the graph knows nothing about has no graph context to judge, so
+    /// the base threshold must be returned unchanged. This is the branch that
+    /// the empty-field short-circuit made look correct for every memory.
+    #[test]
+    fn graph_adjusted_threshold_is_neutral_without_an_episode() {
+        let (system, _dir) = setup();
+        let id = remember(&system, "A memory the graph never saw.");
+        let memory = working_memory_for(&system, &id);
+
+        let base = 0.50_f32;
+        assert_eq!(system.graph_adjusted_threshold(&memory, base), base);
+    }
+
+    /// `compensate_orphaned_memories` scans working and session memories for
+    /// references to orphaned entities via `memory.entity_refs` — always empty,
+    /// so the compensatory boost has never fired for anyone.
+    ///
+    /// Mutation that turns this red again: read `memory.entity_refs` instead of
+    /// resolving the memory's entities through the graph.
+    ///
+    /// The exact-boost assertion is a second, independent guard. `remember()`
+    /// files one `Arc<Memory>` into both working and session memory, so the
+    /// two-tier scan sees it twice; before the dedup this reported
+    /// `compensated == 2` and applied the boost twice. Removing the `seen` set
+    /// turns this red.
+    #[test]
+    fn orphan_compensation_finds_entities_through_the_graph() {
+        let (system, _dir) = setup();
+        let graph = system.graph_memory().expect("graph wired").clone();
+
+        let orphan = add_entity(&graph.read(), "orphaned-entity");
+        let id = remember(&system, "A memory that mentions the orphaned entity.");
+        link_memory_to_entities(&graph.read(), &id, vec![orphan]);
+
+        let memory = working_memory_for(&system, &id);
+        let before = memory.importance();
+
+        let compensated = system
+            .compensate_orphaned_memories(&[orphan.to_string()])
+            .expect("compensate");
+
+        assert_eq!(
+            compensated, 1,
+            "the memory referencing the orphaned entity was compensated {compensated} times, \
+             expected exactly once"
+        );
+
+        let expected = before + crate::constants::ORPHAN_COMPENSATORY_BOOST as f32;
+        let actual = memory.importance();
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "importance moved by the wrong amount: {before} -> {actual}, expected {expected}"
+        );
+    }
+
+    /// Compensation must not fire for a memory that does not reference the
+    /// orphaned entity — otherwise the "fix" would just boost everything.
+    #[test]
+    fn orphan_compensation_ignores_unrelated_memories() {
+        let (system, _dir) = setup();
+        let graph = system.graph_memory().expect("graph wired").clone();
+
+        let (orphan, unrelated) = {
+            let g = graph.read();
+            (add_entity(&g, "orphaned-entity"), add_entity(&g, "other"))
+        };
+        let id = remember(&system, "A memory about something else entirely.");
+        link_memory_to_entities(&graph.read(), &id, vec![unrelated]);
+
+        let memory = working_memory_for(&system, &id);
+        let before = memory.importance();
+
+        let compensated = system
+            .compensate_orphaned_memories(&[orphan.to_string()])
+            .expect("compensate");
+
+        assert_eq!(compensated, 0, "an unrelated memory was compensated");
+        assert_eq!(memory.importance(), before);
+    }
+}
+
+#[cfg(test)]
+mod unreadable_record_index_tests {
+    //! The cold read path used to collapse three different outcomes of
+    //! `get_from_storage` into one: "RocksDB says this key does not exist",
+    //! "RocksDB failed to read", and "the bytes are there but do not decode".
+    //! All three landed in the same `Err` arm, whose only action was
+    //! `retriever.remove_memory(...)` — which drops the memory's vector ids
+    //! from the id mapping AND calls `storage.delete_vector_mapping`, so the
+    //! removal survives a restart.
+    //!
+    //! That made a *transient* read failure permanently unindex a live memory:
+    //! the record is still in RocksDB, but nothing points at it any more.
+    //! Deleting an index entry must require proof of absence.
+
+    use super::*;
+    use crate::memory::types::Experience;
+
+    /// A value too short for even the most permissive entry in the 17-path
+    /// legacy fallback chain (`MinimalMemory`, the shortest, needs 16 bytes
+    /// of UUID before it reads anything else). Longer garbage is NOT reliably
+    /// undecodable — the fallback chain will happily reinterpret it — so the
+    /// test pins the one shape that is guaranteed to reach the error arm.
+    const UNDECODABLE_BYTES: &[u8] = &[0x01];
+
+    fn setup() -> (MemorySystem, tempfile::TempDir) {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = MemoryConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            working_memory_size: 50,
+            session_memory_size_mb: 50,
+            max_heap_per_user_mb: 200,
+            auto_compress: false,
+            compression_age_days: 30,
+            importance_threshold: 0.0,
+        };
+        let system = MemorySystem::new(config, None).expect("memory system");
+        (system, temp_dir)
+    }
+
+    fn remember(system: &MemorySystem, content: &str) -> MemoryId {
+        system
+            .remember(
+                Experience {
+                    content: content.to_string(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("remember")
+    }
+
+    /// Force the cold path: the fetch loop checks working then session memory
+    /// before touching RocksDB, so a just-written memory would never reach the
+    /// storage read this test is about.
+    fn evict_from_caches(system: &MemorySystem, id: &MemoryId) {
+        let _ = system.working_memory.write().remove(id);
+        let _ = system.session_memory.write().remove(id);
+    }
+
+    fn recall_text(system: &MemorySystem, text: &str) {
+        let query = Query {
+            query_text: Some(text.to_string()),
+            max_results: 10,
+            ..Default::default()
+        };
+        let _ = system.recall(&query).expect("recall");
+    }
+
+    /// THE decisive test: a record that cannot be read is not evidence that the
+    /// memory is gone, so the index entry must survive. Writing undecodable
+    /// bytes at the key reproduces the same `Err` the read path sees for a
+    /// transient RocksDB IO failure — `MemoryStorage::get` funnels both into
+    /// one `Err`, which is precisely the conflation under test.
+    #[test]
+    fn unreadable_record_does_not_drop_the_index_entry() {
+        let (system, _tmp) = setup();
+        let id = remember(&system, "The quarterly revenue report is due on Friday.");
+        assert!(
+            system.retriever.get_indexed_memory_ids().contains(&id),
+            "precondition: the memory should be in the vector index"
+        );
+        evict_from_caches(&system, &id);
+
+        // Corrupt the stored bytes in place: the key EXISTS, the value is
+        // undecodable. `db.get` succeeds, `deserialize_memory` fails.
+        system
+            .long_term_memory
+            .db()
+            .put(id.0.as_bytes(), UNDECODABLE_BYTES)
+            .expect("write undecodable bytes");
+
+        recall_text(&system, "quarterly revenue report");
+
+        assert!(
+            system.retriever.get_indexed_memory_ids().contains(&id),
+            "an unreadable record was treated as proof of absence and the live \
+             memory was permanently unindexed"
+        );
+    }
+
+    /// The other half of the discrimination: a key RocksDB positively reports
+    /// as absent IS proof, and the orphaned index entry must still be cleaned
+    /// up. Without this the fix would just disable the cleanup.
+    #[test]
+    fn genuinely_absent_record_still_drops_the_index_entry() {
+        let (system, _tmp) = setup();
+        let id = remember(&system, "The quarterly revenue report is due on Friday.");
+        assert!(system.retriever.get_indexed_memory_ids().contains(&id));
+        evict_from_caches(&system, &id);
+
+        // Delete the record only — deliberately NOT via `forget`, so the vector
+        // index keeps pointing at a key that no longer exists.
+        system
+            .long_term_memory
+            .db()
+            .delete(id.0.as_bytes())
+            .expect("delete record");
+
+        recall_text(&system, "quarterly revenue report");
+
+        assert!(
+            !system.retriever.get_indexed_memory_ids().contains(&id),
+            "a genuinely absent record left its orphaned index entry behind"
+        );
+    }
+
+    /// `get_opt` is the seam the read path uses to tell the two apart, so pin
+    /// its contract directly: absence is `Ok(None)`, an undecodable record is
+    /// `Err` — never `Ok(None)`.
+    #[test]
+    fn get_opt_reports_absence_and_unreadability_differently() {
+        let (system, _tmp) = setup();
+        let id = remember(&system, "A memory that will be corrupted.");
+
+        let missing = MemoryId(uuid::Uuid::new_v4());
+        assert!(
+            matches!(system.long_term_memory.get_opt(&missing), Ok(None)),
+            "a key that was never written must read back as Ok(None)"
+        );
+
+        system
+            .long_term_memory
+            .db()
+            .put(id.0.as_bytes(), UNDECODABLE_BYTES)
+            .expect("write undecodable bytes");
+        assert!(
+            system.long_term_memory.get_opt(&id).is_err(),
+            "an undecodable record must be an error, not a report of absence"
         );
     }
 }

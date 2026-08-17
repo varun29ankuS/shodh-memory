@@ -18,6 +18,7 @@ pub mod audit;
 // Memory core operations
 pub mod anomalies;
 pub mod crud;
+pub mod history;
 pub mod recall;
 pub mod remember;
 

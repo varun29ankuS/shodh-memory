@@ -380,8 +380,83 @@ async fn list_sessions_empty() {
 #[tokio::test]
 async fn session_stats() {
     let h = Harness::new();
-    let (status, _) = json_of(h.app(), authed_get("/api/sessions/stats")).await;
+    let (status, _) = json_of(
+        h.app(),
+        authed_get("/api/sessions/stats?user_id=test-user"),
+    )
+    .await;
     assert!(status.is_success());
+}
+
+/// `/api/sessions/stats` must answer about the caller's own sessions and nobody
+/// else's.
+///
+/// Regression guard for a cross-tenant leak: the handler used to take no
+/// `user_id` at all and return `SessionStore::stats()`, a sum over every user in
+/// the process. The `user_id` query parameter was accepted by axum and silently
+/// dropped, so four different tenants received a byte-identical aggregate —
+/// including `users_with_sessions`, which disclosed how many other tenants
+/// existed to any authenticated key.
+///
+/// The load-bearing assertion is the inequality: any future refactor that
+/// reintroduces a cross-user sum makes the two responses identical again and
+/// turns this red.
+#[tokio::test]
+async fn session_stats_are_scoped_to_the_caller() {
+    let h = Harness::new();
+
+    // Tenant A has one completed and one active session. Tenant B has none.
+    let store = h.mgr.session_store();
+    let finished = store.start_session("tenant-a");
+    store.end_session(&finished, "test");
+    let _live = store.start_session("tenant-a");
+
+    let (status_a, body_a) = json_of(
+        h.app(),
+        authed_get("/api/sessions/stats?user_id=tenant-a"),
+    )
+    .await;
+    assert!(status_a.is_success(), "tenant-a stats returned {status_a}");
+
+    let (status_b, body_b) = json_of(
+        h.app(),
+        authed_get("/api/sessions/stats?user_id=tenant-b"),
+    )
+    .await;
+    assert!(status_b.is_success(), "tenant-b stats returned {status_b}");
+
+    assert_ne!(
+        body_a["stats"], body_b["stats"],
+        "two tenants with different session histories received the same \
+         aggregate — the endpoint is not scoped to the caller"
+    );
+
+    assert_eq!(body_a["stats"]["user_id"], "tenant-a");
+    assert_eq!(body_a["stats"]["active_sessions"], 1);
+    assert_eq!(body_a["stats"]["completed_sessions"], 1);
+
+    assert_eq!(body_b["stats"]["user_id"], "tenant-b");
+    assert_eq!(body_b["stats"]["active_sessions"], 0);
+    assert_eq!(body_b["stats"]["completed_sessions"], 0);
+
+    // The tenant census must not be reachable from a per-user response.
+    assert!(
+        body_a["stats"]["users_with_sessions"].is_null(),
+        "per-user session stats must not disclose how many tenants exist"
+    );
+}
+
+/// The endpoint must reject a missing `user_id` rather than fall back to an
+/// unscoped answer. A silent default is exactly how the original leak read to a
+/// caller: a request that looks scoped and is not.
+#[tokio::test]
+async fn session_stats_require_a_user_id() {
+    let h = Harness::new();
+    let status = status_of(h.app(), authed_get("/api/sessions/stats")).await;
+    assert!(
+        status.is_client_error(),
+        "unscoped /api/sessions/stats returned {status}, expected a 4xx"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -567,6 +642,222 @@ async fn upsert_memory() {
     )
     .await;
     assert!(status.is_success(), "upsert returned {status}");
+}
+
+/// Caller-declared write identity must survive the round trip.
+///
+/// `Memory` carries three multi-tenancy fields — `agent_id`, `run_id`,
+/// `actor_id` — and all three read as `null` on every row of a real store. That
+/// is two different causes wearing one symptom, and this test separates them:
+/// `agent_id`/`run_id` have been accepted and persisted all along (no client
+/// sends them), while `actor_id` had no request field and no write path at all,
+/// so it was structurally unreachable.
+///
+/// The `actor_id` assertion is the fail-first one. The other two are a
+/// regression guard on the `remember_with_agent_detailed` branch at
+/// `remember.rs`, which is easy to lose because nothing in production exercises
+/// it.
+#[tokio::test]
+async fn remember_persists_caller_declared_identity() {
+    let h = Harness::new();
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/remember",
+            json!({
+                "user_id": "identity-user",
+                "content": "Provenance round-trip: agent, run and actor.",
+                "agent_id": "agent-7",
+                "run_id": "run-42",
+                "actor_id": "actor-varun"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "remember failed: {body}");
+
+    let id = body
+        .get("id")
+        .or_else(|| body.get("memory_id"))
+        .and_then(|v| v.as_str())
+        .expect("remember response carries an id")
+        .to_string();
+
+    let (status, stored) = json_of(
+        h.app(),
+        authed_get(&format!("/api/memory/{id}?user_id=identity-user")),
+    )
+    .await;
+    assert!(status.is_success(), "get_memory returned {status}");
+
+    let memory = stored.get("memory").unwrap_or(&stored);
+    assert_eq!(memory["agent_id"], "agent-7", "agent_id dropped: {stored}");
+    assert_eq!(memory["run_id"], "run-42", "run_id dropped: {stored}");
+    assert_eq!(
+        memory["actor_id"], "actor-varun",
+        "actor_id dropped — the field is persisted by `Memory` but nothing \
+         accepts or writes it: {stored}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// audit trail — per-memory history
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Every memory mutation is written to `CF_AUDIT` by ~23 `log_event` call
+/// sites, and until this route existed the only thing any client could learn
+/// from that trail was a bucketed tally of event-type names on
+/// `POST /api/sessions/digest`. `MultiUserMemoryManager::get_history` — the
+/// per-memory reader written to serve exactly this — had zero callers
+/// repo-wide.
+///
+/// Fail-first: without the route this is a 404.
+#[tokio::test]
+async fn memory_history_serves_the_audit_trail_for_one_memory() {
+    let h = Harness::new();
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/remember",
+            json!({
+                "user_id": "audit-user",
+                "content": "Original content before the update."
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "remember failed: {body}");
+    let id = body
+        .get("id")
+        .or_else(|| body.get("memory_id"))
+        .and_then(|v| v.as_str())
+        .expect("remember response carries an id")
+        .to_string();
+
+    // A second memory whose audit entries must NOT appear in the first one's
+    // history — the filter is the point of a per-memory reader.
+    let (_, other) = json_of(
+        h.app(),
+        authed_post(
+            "/api/remember",
+            json!({"user_id": "audit-user", "content": "An unrelated memory."}),
+        ),
+    )
+    .await;
+    let other_id = other
+        .get("id")
+        .or_else(|| other.get("memory_id"))
+        .and_then(|v| v.as_str())
+        .expect("remember response carries an id")
+        .to_string();
+
+    // `PUT /api/memory/{id}` is an audited mutation (crud.rs logs "UPDATE").
+    for (target, text) in [(&id, "First revision."), (&other_id, "Other revision.")] {
+        let (status, resp) = json_of(
+            h.app(),
+            authed_put(
+                &format!("/api/memory/{target}"),
+                json!({"user_id": "audit-user", "content": text}),
+            ),
+        )
+        .await;
+        assert!(status.is_success(), "update returned {status}: {resp}");
+    }
+
+    let (status, history) = json_of(
+        h.app(),
+        authed_get(&format!("/api/memory/{id}/history?user_id=audit-user")),
+    )
+    .await;
+    assert!(
+        status.is_success(),
+        "per-memory history returned {status}: {history}"
+    );
+
+    let events = history["events"]
+        .as_array()
+        .unwrap_or_else(|| panic!("history response has an `events` array: {history}"));
+    assert!(
+        !events.is_empty(),
+        "the UPDATE was audited but the reader returned nothing: {history}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|e| e["memory_id"].as_str() == Some(id.as_str())),
+        "history leaked another memory's audit entries: {history}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e["event_type"].as_str() == Some("UPDATE")),
+        "the UPDATE event is missing from the memory's history: {history}"
+    );
+    assert_eq!(history["memory_id"], id);
+    assert_eq!(history["count"], events.len());
+}
+
+/// The route is user-scoped like every other namespace read: `user_id` is
+/// required, and one tenant cannot read another tenant's audit trail.
+#[tokio::test]
+async fn memory_history_is_user_scoped() {
+    let h = Harness::new();
+
+    let (_, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/remember",
+            json!({"user_id": "audit-owner", "content": "Owned by audit-owner."}),
+        ),
+    )
+    .await;
+    let id = body
+        .get("id")
+        .or_else(|| body.get("memory_id"))
+        .and_then(|v| v.as_str())
+        .expect("remember response carries an id")
+        .to_string();
+
+    let (status, resp) = json_of(
+        h.app(),
+        authed_put(
+            &format!("/api/memory/{id}"),
+            json!({"user_id": "audit-owner", "content": "Revised by the owner."}),
+        ),
+    )
+    .await;
+    assert!(status.is_success(), "update returned {status}: {resp}");
+
+    let (status, mine) = json_of(
+        h.app(),
+        authed_get(&format!("/api/memory/{id}/history?user_id=audit-owner")),
+    )
+    .await;
+    assert!(status.is_success(), "owner history returned {status}");
+    assert!(
+        !mine["events"].as_array().expect("events array").is_empty(),
+        "owner sees no history: {mine}"
+    );
+
+    let (status, theirs) = json_of(
+        h.app(),
+        authed_get(&format!("/api/memory/{id}/history?user_id=audit-stranger")),
+    )
+    .await;
+    assert!(status.is_success(), "stranger history returned {status}");
+    assert!(
+        theirs["events"].as_array().expect("events array").is_empty(),
+        "a different tenant read this memory's audit trail: {theirs}"
+    );
+
+    // Missing user_id is a 4xx, not an unscoped answer.
+    let status = status_of(h.app(), authed_get(&format!("/api/memory/{id}/history"))).await;
+    assert!(
+        status.is_client_error(),
+        "unscoped history returned {status}, expected a 4xx"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1590,6 +1881,372 @@ async fn project_lifecycle() {
     )
     .await;
     assert!(status.is_success());
+}
+
+/// `update_todo` with `status=done` assigned the status and stopped: no
+/// `completed_at`, and — the expensive part — no recurrence rollover. A daily
+/// task "finished" that way silently stopped recurring. Every client but the
+/// one routed through `/complete` was exposed; the TUI cycles
+/// `in_progress → done` through this exact path (`tui/src/stream.rs`,
+/// `next_status`), and the MCP `update_todo` tool lists `done` in its enum.
+#[tokio::test]
+async fn update_to_done_settles_and_rolls_over_recurrence() {
+    let h = Harness::new();
+    let user = "settle-user";
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/todos/add",
+            json!({
+                "user_id": user,
+                "content": "Water the plants",
+                "recurrence": "daily",
+                "due_date": "today"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create todo: {body}");
+    let todo_id = body["todo"]["id"].as_str().expect("todo id").to_string();
+    assert_eq!(
+        body["todo"]["recurrence"]["type"],
+        json!("daily"),
+        "recurrence must be persisted on create: {body}"
+    );
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/update"),
+            json!({"user_id": user, "status": "done"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update to done: {body}");
+    assert_eq!(body["todo"]["status"], json!("done"), "status: {body}");
+    assert!(
+        body["todo"]["completed_at"].is_string(),
+        "completing through the update path must stamp completed_at: {body}"
+    );
+    assert_eq!(
+        body["next_recurrence"]["content"],
+        json!("Water the plants"),
+        "the update response must surface the occurrence it spawned: {body}"
+    );
+
+    // The decisive assertion: a recurring task completed through /update must
+    // leave a live next occurrence behind, exactly as /complete does.
+    let (status, body) = json_of(
+        h.app(),
+        authed_post("/api/todos", json!({"user_id": user})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let live: Vec<&serde_json::Value> = body["todos"]
+        .as_array()
+        .expect("todos array")
+        .iter()
+        .filter(|t| t["content"] == json!("Water the plants"))
+        .collect();
+    assert_eq!(
+        live.len(),
+        1,
+        "completing a daily todo through /update must spawn exactly one next occurrence: {body}"
+    );
+    assert_ne!(
+        live[0]["id"].as_str(),
+        Some(todo_id.as_str()),
+        "the next occurrence must be a new todo, not the completed one: {body}"
+    );
+    assert!(
+        live[0]["completed_at"].is_null(),
+        "a freshly spawned occurrence must not carry a completion stamp: {body}"
+    );
+
+    // Settlement fires on the transition, not on the value, so repeating the
+    // same update spawns nothing further. The MCP tool metadata declares
+    // update_todo idempotent; this is what that declaration rests on.
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/update"),
+            json!({"user_id": user, "status": "done"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "repeat update: {body}");
+    assert!(
+        body["next_recurrence"].is_null(),
+        "re-marking a done todo done must not spawn another occurrence: {body}"
+    );
+
+    let (_, body) = json_of(
+        h.app(),
+        authed_post("/api/todos", json!({"user_id": user})),
+    )
+    .await;
+    let live = body["todos"]
+        .as_array()
+        .expect("todos array")
+        .iter()
+        .filter(|t| t["content"] == json!("Water the plants"))
+        .count();
+    assert_eq!(
+        live, 1,
+        "a repeated done update must leave exactly one live occurrence: {body}"
+    );
+}
+
+/// The two doors must agree on every transition, not just the common one.
+/// `/complete` on a cancelled recurring todo re-completes it and rolls it
+/// over, so `/update` with `status=done` has to do the same — otherwise
+/// "revive this and mark it done" silently ends the series depending on which
+/// endpoint the client happens to use.
+#[tokio::test]
+async fn reviving_a_cancelled_todo_into_done_rolls_over_like_complete() {
+    let h = Harness::new();
+    let user = "revive-user";
+
+    let (_, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/todos/add",
+            json!({
+                "user_id": user,
+                "content": "Take out the bins",
+                "recurrence": "every 7 days",
+                "due_date": "today"
+            }),
+        ),
+    )
+    .await;
+    let todo_id = body["todo"]["id"].as_str().expect("todo id").to_string();
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/update"),
+            json!({"user_id": user, "status": "cancelled"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "cancel: {body}");
+    let cancelled_at = body["todo"]["completed_at"]
+        .as_str()
+        .expect("cancelling stamps the settlement time")
+        .to_string();
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/update"),
+            json!({"user_id": user, "status": "done"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "revive to done: {body}");
+    assert_eq!(
+        body["next_recurrence"]["content"],
+        json!("Take out the bins"),
+        "cancelled → done must roll the series over, as /complete does: {body}"
+    );
+    assert_eq!(
+        body["todo"]["completed_at"].as_str(),
+        Some(cancelled_at.as_str()),
+        "the todo settled when it was cancelled; that time must not move: {body}"
+    );
+}
+
+/// `completed_at` was written only by `Todo::complete()`, and never cleared.
+/// A todo reopened after being done kept its completion stamp, which is how a
+/// row in the "To do" column ended up reporting "took 2d". Settlement is the
+/// server's job: entering Done/Cancelled stamps it, leaving them clears it.
+#[tokio::test]
+async fn settlement_stamp_follows_status_in_both_directions() {
+    let h = Harness::new();
+    let user = "stamp-user";
+
+    let (_, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/todos/add",
+            json!({"user_id": user, "content": "Reopen me later"}),
+        ),
+    )
+    .await;
+    let todo_id = body["todo"]["id"].as_str().expect("todo id").to_string();
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/complete"),
+            json!({"user_id": user}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "complete: {body}");
+    let stamped_at = body["todo"]["completed_at"]
+        .as_str()
+        .expect("complete must stamp completed_at")
+        .to_string();
+
+    // Reopen: the stamp must go, or every client has to reconstruct settlement
+    // from the status field to avoid showing "took 2d" on an open task.
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/update"),
+            json!({"user_id": user, "status": "todo"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "reopen: {body}");
+    assert!(
+        body["todo"]["completed_at"].is_null(),
+        "reopening must clear completed_at (was {stamped_at}): {body}"
+    );
+
+    // Cancelling settles the todo too — it leaves the working set and stops
+    // counting as overdue, so it needs a settlement time like Done does.
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/update"),
+            json!({"user_id": user, "status": "cancelled"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "cancel: {body}");
+    assert!(
+        body["todo"]["completed_at"].is_string(),
+        "cancelling must stamp the settlement time: {body}"
+    );
+    assert!(
+        body["next_recurrence"].is_null(),
+        "cancelling must not spawn a next occurrence: {body}"
+    );
+}
+
+/// `parse_recurrence` accepted three words and hardcoded their parameters:
+/// weekly was always Mon–Fri, monthly always day 1, and `EveryNDays` was
+/// unreachable from any client. All four variants must be expressible, the
+/// bare words must keep working, and a zero interval must be rejected rather
+/// than stored as a same-day infinite repeat.
+#[tokio::test]
+async fn recurrence_grammar_reaches_every_variant() {
+    let h = Harness::new();
+    let user = "recur-user";
+
+    let cases = [
+        ("daily", json!({"type": "daily"})),
+        ("weekly", json!({"type": "weekly", "days": [1, 2, 3, 4, 5]})),
+        ("monthly", json!({"type": "monthly", "day": 1})),
+        ("weekly:mon,fri", json!({"type": "weekly", "days": [1, 5]})),
+        ("weekly:0,6", json!({"type": "weekly", "days": [0, 6]})),
+        // `next_occurrence` scans `days` for the first entry greater than
+        // today, so the list has to come out sorted and deduplicated.
+        ("Weekly:FRI,mon", json!({"type": "weekly", "days": [1, 5]})),
+        ("weekly:mon,mon", json!({"type": "weekly", "days": [1]})),
+        ("monthly:15", json!({"type": "monthly", "day": 15})),
+        ("every 3 days", json!({"type": "every_n_days", "n": 3})),
+        ("every_10_days", json!({"type": "every_n_days", "n": 10})),
+    ];
+
+    for (input, expected) in cases {
+        let (status, body) = json_of(
+            h.app(),
+            authed_post(
+                "/api/todos/add",
+                json!({"user_id": user, "content": format!("Recurs {input}"), "recurrence": input}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "create with '{input}': {body}");
+        assert_eq!(
+            body["todo"]["recurrence"], expected,
+            "'{input}' must parse to {expected}: {body}"
+        );
+    }
+
+    for bad in ["every 0 days", "weekly:funday", "monthly:0", "fortnightly"] {
+        let (status, body) = json_of(
+            h.app(),
+            authed_post(
+                "/api/todos/add",
+                json!({"user_id": user, "content": format!("Bad {bad}"), "recurrence": bad}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "'{bad}' must be rejected, got: {body}"
+        );
+    }
+}
+
+/// `UpdateTodoRequest` had no `recurrence` field, so a recurrence could never
+/// be changed or removed once the todo was created — the only escape was
+/// delete-and-recreate, which loses the id, the comments and the links.
+#[tokio::test]
+async fn recurrence_is_editable_and_removable() {
+    let h = Harness::new();
+    let user = "recur-edit-user";
+
+    let (_, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/todos/add",
+            json!({"user_id": user, "content": "Standup", "recurrence": "daily"}),
+        ),
+    )
+    .await;
+    let todo_id = body["todo"]["id"].as_str().expect("todo id").to_string();
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/update"),
+            json!({"user_id": user, "recurrence": "weekly:mon"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "change recurrence: {body}");
+    assert_eq!(
+        body["todo"]["recurrence"],
+        json!({"type": "weekly", "days": [1]}),
+        "recurrence must be changeable: {body}"
+    );
+
+    // Empty string clears, matching how `parent_id` clears on this same request.
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/update"),
+            json!({"user_id": user, "recurrence": ""}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "clear recurrence: {body}");
+    assert!(
+        body["todo"]["recurrence"].is_null(),
+        "an empty recurrence must remove it: {body}"
+    );
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/update"),
+            json!({"user_id": user, "recurrence": "fortnightly"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unparseable recurrence must be rejected on update too: {body}"
+    );
 }
 
 #[tokio::test]

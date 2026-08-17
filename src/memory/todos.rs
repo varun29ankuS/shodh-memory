@@ -654,27 +654,44 @@ impl TodoStore {
         user_id: &str,
         todo_id: &TodoId,
     ) -> Result<Option<(Todo, Option<Todo>)>> {
-        if let Some(mut todo) = self.get_todo(user_id, todo_id)? {
-            // Remove old indices
-            self.remove_todo_indices(&todo)?;
-
-            // Mark as complete
-            todo.complete();
-
-            // Store updated todo
-            let stored_todo = self.store_todo(&todo)?;
-
-            // Create next recurrence if applicable
-            let next_todo = if let Some(next) = stored_todo.create_next_recurrence() {
-                Some(self.store_todo(&next)?)
-            } else {
-                None
-            };
-
-            Ok(Some((stored_todo, next_todo)))
-        } else {
-            Ok(None)
+        match self.get_todo(user_id, todo_id)? {
+            Some(mut todo) => {
+                todo.complete();
+                Ok(Some(self.settle_todo(&todo)?))
+            }
+            None => Ok(None),
         }
+    }
+
+    /// Persist a todo that has just entered a settled state and spawn its next
+    /// occurrence if it recurs.
+    ///
+    /// This is the single settlement write path: `complete_todo` and the
+    /// update handler both come through here, so a completion cannot lose its
+    /// recurrence rollover depending on which door the client used.
+    ///
+    /// Only Done rolls over. Cancelled means "not doing this", not "done with
+    /// this one, see you next time".
+    ///
+    /// `todo` must already carry its settled status and stamp — use
+    /// [`Todo::apply_status`] or [`Todo::complete`] before calling.
+    pub fn settle_todo(&self, todo: &Todo) -> Result<(Todo, Option<Todo>)> {
+        if let Some(previous) = self.get_todo(&todo.user_id, &todo.id)? {
+            self.remove_todo_indices(&previous)?;
+        }
+
+        let settled = self.store_todo(todo)?;
+
+        let next = if settled.status == TodoStatus::Done {
+            match settled.create_next_recurrence() {
+                Some(next) => Some(self.store_todo(&next)?),
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        Ok((settled, next))
     }
 
     // =========================================================================

@@ -1832,11 +1832,27 @@ impl MemoryStorage {
                 let uuid = uuid::Uuid::from_slice(&value).ok()?;
                 // Verify the memory still exists (might have been deleted)
                 let memory_id = MemoryId(uuid);
-                match self.get(&memory_id) {
-                    Ok(_) => Some(memory_id),
-                    Err(_) => {
-                        // Stale index entry — memory was deleted, clean up
+                match self.get_opt(&memory_id) {
+                    Ok(Some(_)) => Some(memory_id),
+                    Ok(None) => {
+                        // Proven stale: RocksDB reports no record at that id,
+                        // so the memory really was deleted. Clean up.
                         let _ = self.db.delete_cf(idx, hash_key.as_bytes());
+                        None
+                    }
+                    Err(e) => {
+                        // Inconclusive read — the memory may well exist. Do NOT
+                        // delete the dedup entry: destroying it on a transient
+                        // failure loses the only pointer from this content to
+                        // its memory, and the caller then writes a duplicate
+                        // whose store overwrites the entry with the new id.
+                        tracing::warn!(
+                            memory_id = %memory_id.0,
+                            error = %e,
+                            "content-hash dedup lookup could not read the target \
+                             memory — keeping the dedup entry and reporting no \
+                             match for this call only"
+                        );
                         None
                     }
                 }
@@ -1845,11 +1861,22 @@ impl MemoryStorage {
         }
     }
 
-    /// Retrieve a memory by ID
+    /// Retrieve a memory by ID, separating "this key does not exist" from
+    /// "this read did not succeed".
     ///
-    /// Performs lazy migration: if memory is in legacy format, re-writes it
-    /// in current format for faster future reads.
-    pub fn get(&self, id: &MemoryId) -> Result<Memory> {
+    /// `Ok(None)` is returned in exactly one case: RocksDB itself reported no
+    /// value at the key. That is the only outcome that proves the memory is
+    /// gone. Every other failure — a RocksDB/IO error, or bytes that are
+    /// present but do not decode — is `Err`, because the record may well still
+    /// be there. Callers that delete index entries, dedup entries or any other
+    /// pointer *to* a memory must key that deletion off `Ok(None)` and never
+    /// off `Err`: an inconclusive read is not proof of absence, and treating it
+    /// as one turns a transient blip into permanent, silent data loss.
+    ///
+    /// Performs the same lazy migration as [`Self::get`]: if a memory is in a
+    /// legacy format it is re-written in the current format for faster future
+    /// reads.
+    pub fn get_opt(&self, id: &MemoryId) -> Result<Option<Memory>> {
         let key = id.0.as_bytes();
         match self.db.get(key)? {
             Some(value) => {
@@ -1869,10 +1896,22 @@ impl MemoryStorage {
                     }
                 }
 
-                Ok(memory)
+                Ok(Some(memory))
             }
-            None => Err(anyhow!("Memory not found: {id:?}")),
+            None => Ok(None),
         }
+    }
+
+    /// Retrieve a memory by ID, where a missing memory is itself an error.
+    ///
+    /// This is the right call when the record IS the answer — a single-id read
+    /// has nothing to return if the memory is absent. Callers that are
+    /// *scanning* (and would react to the failure by discarding a pointer to
+    /// the memory) must use [`Self::get_opt`] instead, which distinguishes
+    /// absence from an unsuccessful read.
+    pub fn get(&self, id: &MemoryId) -> Result<Memory> {
+        self.get_opt(id)?
+            .ok_or_else(|| anyhow!("Memory not found: {id:?}"))
     }
 
     /// Re-write a memory in current format (lazy migration helper)

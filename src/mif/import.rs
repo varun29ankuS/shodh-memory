@@ -13,7 +13,7 @@ use crate::graph_memory::{
 };
 use crate::memory::types::{
     Experience, ExperienceType, MemoryId, ProspectiveTask, ProspectiveTaskId,
-    ProspectiveTaskStatus, ProspectiveTrigger, Todo, TodoId, TodoPriority, TodoStatus,
+    ProspectiveTaskStatus, ProspectiveTrigger, Recurrence, Todo, TodoId, TodoPriority, TodoStatus,
 };
 use crate::memory::{Project, ProjectId, ProjectStatus};
 use anyhow::{bail, Result};
@@ -120,6 +120,24 @@ pub fn prepare_todos(doc: &MifDocument, user_id: &str) -> Vec<Todo> {
             let status = parse_todo_status(&t.status);
             let priority = parse_todo_priority(&t.priority);
 
+            // An unreadable pattern drops the recurrence rather than failing
+            // the whole import, but it is never silent — a document written by
+            // another tool may use a form this build does not know.
+            let recurrence = t.recurrence.as_deref().and_then(|pattern| {
+                match Recurrence::from_pattern(pattern) {
+                    Ok(recurrence) => Some(recurrence),
+                    Err(reason) => {
+                        tracing::warn!(
+                            todo_id = %t.id,
+                            pattern,
+                            reason,
+                            "Dropping unreadable todo recurrence on import"
+                        );
+                        None
+                    }
+                }
+            });
+
             let comments = t
                 .comments
                 .iter()
@@ -155,7 +173,7 @@ pub fn prepare_todos(doc: &MifDocument, user_id: &str) -> Vec<Todo> {
                 tags: t.tags.clone(),
                 notes: t.notes.clone(),
                 blocked_on: t.blocked_on.clone(),
-                recurrence: None,
+                recurrence,
                 created_at: t.created_at,
                 updated_at: t.updated_at,
                 due_date: t.due_date,

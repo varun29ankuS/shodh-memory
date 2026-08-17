@@ -839,17 +839,35 @@ impl SessionStore {
         count
     }
 
-    /// Get store statistics
-    pub fn stats(&self) -> SessionStoreStats {
-        let active = self.active.read();
-        let completed = self.completed.read();
+    /// Get store statistics for a single user.
+    ///
+    /// This store is process-wide and holds every tenant's sessions in one
+    /// pair of maps, so a caller asking "how many sessions are there?" can only
+    /// be answered honestly per user. The previous cross-user aggregate
+    /// (`stats()`, returning `SessionStoreStats`) was removed rather than kept
+    /// alongside this: its only caller served it over HTTP to any authenticated
+    /// key, and a summed-across-tenants figure has no legitimate per-request
+    /// consumer. If an operator-facing total is ever needed it belongs behind an
+    /// admin surface, not on a user-scoped endpoint.
+    pub fn stats_for_user(&self, user_id: &str) -> UserSessionStats {
+        let active_sessions = self
+            .active
+            .read()
+            .values()
+            .filter(|s| s.user_id == user_id)
+            .count();
 
-        let total_completed: usize = completed.values().map(|v| v.len()).sum();
+        let completed_sessions = self
+            .completed
+            .read()
+            .get(user_id)
+            .map(|sessions| sessions.len())
+            .unwrap_or(0);
 
-        SessionStoreStats {
-            active_sessions: active.len(),
-            completed_sessions: total_completed,
-            users_with_sessions: completed.len(),
+        UserSessionStats {
+            user_id: user_id.to_string(),
+            active_sessions,
+            completed_sessions,
         }
     }
 }
@@ -860,12 +878,19 @@ impl Default for SessionStore {
     }
 }
 
-/// Session store statistics
+/// Session store statistics for one user.
+///
+/// Deliberately carries no cross-tenant figure. The shape this replaced had a
+/// `users_with_sessions` field, which disclosed how many distinct tenants the
+/// process was serving to anyone holding any API key — and it was served from a
+/// handler that took no `user_id` at all, so every tenant received the same
+/// numbers. `user_id` is echoed back so a caller can tell at a glance which
+/// tenant the answer is about.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionStoreStats {
+pub struct UserSessionStats {
+    pub user_id: String,
     pub active_sessions: usize,
     pub completed_sessions: usize,
-    pub users_with_sessions: usize,
 }
 
 #[cfg(test)]

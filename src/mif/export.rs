@@ -60,9 +60,11 @@ pub fn build_document(
     // Two maps: UUID-based (primary) and name-based (fallback), because
     // entity_refs on memories may store UUIDs that don't match graph entity UUIDs
     // when the NER pipeline created refs before the graph entity was consolidated.
-    let (entity_map_by_id, entity_map_by_name): (
+    #[allow(clippy::type_complexity)]
+    let (entity_map_by_id, entity_map_by_name, entity_name_by_id): (
         HashMap<Uuid, Vec<String>>,
         HashMap<String, Vec<String>>,
+        HashMap<Uuid, String>,
     ) = if let Some(g) = graph {
         let entities = g.get_all_entities().unwrap_or_default();
         let by_id: HashMap<Uuid, Vec<String>> = entities
@@ -79,10 +81,33 @@ pub fn build_document(
                 (e.name.to_lowercase(), types)
             })
             .collect();
-        (by_id, by_name)
+        let name_by_id: HashMap<Uuid, String> =
+            entities.iter().map(|e| (e.uuid, e.name.clone())).collect();
+        (by_id, by_name, name_by_id)
     } else {
-        (HashMap::new(), HashMap::new())
+        (HashMap::new(), HashMap::new(), HashMap::new())
     };
+
+    // Memory -> graph entity UUIDs, keyed by the memory's own UUID.
+    //
+    // `Memory::entity_refs` is empty on every stored memory (nothing in
+    // production ever writes it), so this export used to fall through entirely
+    // to the name-based `experience.entities` path below and resolve every type
+    // by a lowercase name match. The graph pass records the resolved entity ids
+    // on an `EpisodicNode` whose uuid IS the memory id — that is the same
+    // information, already canonicalized, and it resolves types by UUID.
+    //
+    // Fetched in one scan rather than per memory, matching the entity maps
+    // above.
+    let episode_entity_refs: HashMap<Uuid, Vec<Uuid>> = graph
+        .map(|g| {
+            g.get_all_episodes()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|episode| (episode.uuid, episode.entity_refs))
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Convert memories
     let mut mif_memories = Vec::with_capacity(memories.len());
@@ -120,32 +145,56 @@ pub fn build_document(
             (m.experience.content.clone(), None)
         };
 
-        // Resolve entity types from graph (UUID lookup, then name fallback)
-        let entities: Vec<MifEntityRef> = m
-            .entity_refs
-            .iter()
-            .map(|eref| {
-                let entity_type = entity_map_by_id
-                    .get(&eref.entity_id)
-                    .and_then(|types| types.first().cloned())
-                    .or_else(|| {
-                        entity_map_by_name
-                            .get(&eref.name.to_lowercase())
+        // The memory's entities, resolved through its episode: names and types
+        // both come from the graph by UUID, so no lowercase name match is
+        // involved and canonicalized entities export under their canonical name.
+        let mut entities: Vec<MifEntityRef> = episode_entity_refs
+            .get(&m.id.0)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| {
+                        let name = entity_name_by_id.get(id)?;
+                        let entity_type = entity_map_by_id
+                            .get(id)
                             .and_then(|types| types.first().cloned())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        Some(MifEntityRef {
+                            name: name.clone(),
+                            entity_type,
+                            confidence: 1.0,
+                        })
                     })
-                    .unwrap_or_else(|| "unknown".to_string());
-                MifEntityRef {
-                    name: eref.name.clone(),
-                    entity_type,
-                    confidence: 1.0,
-                }
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
 
-        // Also include experience.entities that didn't make it to entity_refs,
-        // resolving types from the graph name map when possible.
-        let ref_names: std::collections::HashSet<&str> =
-            m.entity_refs.iter().map(|r| r.name.as_str()).collect();
+        // Any refs carried on the record itself that the graph did not cover.
+        // Empty for everything this product wrote; `Memory::from_legacy`
+        // restores it for records that predate the field going inert.
+        for eref in &m.entity_refs {
+            if entities.iter().any(|r| r.name == eref.name) {
+                continue;
+            }
+            let entity_type = entity_map_by_id
+                .get(&eref.entity_id)
+                .and_then(|types| types.first().cloned())
+                .or_else(|| {
+                    entity_map_by_name
+                        .get(&eref.name.to_lowercase())
+                        .and_then(|types| types.first().cloned())
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+            entities.push(MifEntityRef {
+                name: eref.name.clone(),
+                entity_type,
+                confidence: 1.0,
+            });
+        }
+
+        // Also include experience.entities that the graph never resolved —
+        // blocklisted surfaces, and anything the entity pass dropped.
+        let ref_names: std::collections::HashSet<String> =
+            entities.iter().map(|r| r.name.clone()).collect();
         let mut extra_entities: Vec<MifEntityRef> = m
             .experience
             .entities
@@ -400,10 +449,9 @@ fn convert_todo(t: &Todo) -> MifTodo {
         contexts: t.contexts.clone(),
         notes: t.notes.clone(),
         blocked_on: t.blocked_on.clone(),
-        recurrence: t
-            .recurrence
-            .as_ref()
-            .map(|r| format!("{r:?}").to_lowercase()),
+        // A pattern the importer can read back, not the Debug rendering
+        // ("weekly { days: [1, 5] }") that no parser accepts.
+        recurrence: t.recurrence.as_ref().map(|r| r.to_pattern()),
         comments,
         related_memory_ids: t.related_memory_ids.iter().map(|id| id.0).collect(),
         external_id: t.external_id.clone(),
@@ -700,5 +748,47 @@ mod tests {
         assert_eq!(imported, 1);
         let entities = graph2.get_all_entities().unwrap();
         assert_eq!(entities[0].fine_type, None);
+    }
+
+    /// A todo's recurrence must survive an export/import round trip. Export
+    /// emitted the Debug rendering ("weekly { days: [1, 5] }") and import
+    /// dropped the field outright, so exporting a recurring todo and importing
+    /// it back silently stopped it recurring. Only worth catching now that a
+    /// client can set a recurrence other than the three hardcoded defaults.
+    #[test]
+    fn mif_round_trip_preserves_todo_recurrence() {
+        use crate::memory::types::Recurrence;
+        use crate::mif::import::prepare_todos;
+
+        let mut todo = Todo::new("round-trip-user".to_string(), "Weekly review".to_string());
+        todo.recurrence = Some(Recurrence::Weekly { days: vec![1, 5] });
+
+        let exported = convert_todo(&todo);
+        assert_eq!(
+            exported.recurrence.as_deref(),
+            Some("weekly:mon,fri"),
+            "export must emit a pattern the importer can read back"
+        );
+
+        let doc: MifDocument = serde_json::from_value(serde_json::json!({
+            "mif_version": "2.0",
+            "generator": {"name": "test", "version": "0"},
+            "export_meta": {
+                "id": "round-trip",
+                "created_at": Utc::now(),
+                "user_id": "round-trip-user",
+                "checksum": "",
+            },
+            "todos": [exported],
+        }))
+        .expect("build MIF document");
+
+        let restored = prepare_todos(&doc, "round-trip-user");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(
+            restored[0].recurrence,
+            Some(Recurrence::Weekly { days: vec![1, 5] }),
+            "import must restore the recurrence, not drop it"
+        );
     }
 }

@@ -81,12 +81,24 @@ pub struct RememberRequest {
     pub sequence_number: Option<u32>,
     #[serde(default)]
     pub preceding_memory_id: Option<String>,
+    // Caller-declared write identity. All three land on `Memory` and are
+    // stored verbatim; the server does not verify them.
+    //
+    // `parent_agent_id` used to sit here between `agent_id` and `run_id`. It
+    // was accepted by serde, referenced nowhere else in the repo, and had no
+    // destination field on `Memory` — the same accepted-and-silently-dropped
+    // shape as the `user_id` that `/api/sessions/stats` ignored. It is removed
+    // rather than wired: giving it a home means a new persisted field, and
+    // `MemoryFlat` is encoded positionally, so that is a wire-format change
+    // that has to be justified by a consumer. There is none. Removing it is
+    // transparent to clients — `RememberRequest` does not deny unknown fields,
+    // so a request still carrying it is accepted exactly as before.
     #[serde(default)]
     pub agent_id: Option<String>,
     #[serde(default)]
-    pub parent_agent_id: Option<String>,
-    #[serde(default)]
     pub run_id: Option<String>,
+    #[serde(default)]
+    pub actor_id: Option<String>,
     /// Parent memory ID for hierarchical organization
     /// Use this to create memory trees (e.g., "71-research" -> "algebraic" -> "21×27≡-1")
     #[serde(default)]
@@ -722,11 +734,14 @@ pub async fn remember(
         let created_at = req.created_at;
         let agent_id = req.agent_id.clone();
         let run_id = req.run_id.clone();
+        let actor_id = req.actor_id.clone();
 
         tokio::task::spawn_blocking(move || {
             let memory_guard = memory.read();
-            if agent_id.is_some() || run_id.is_some() {
-                memory_guard.remember_with_agent_detailed(exp_clone, created_at, agent_id, run_id)
+            if agent_id.is_some() || run_id.is_some() || actor_id.is_some() {
+                memory_guard.remember_with_agent_detailed(
+                    exp_clone, created_at, agent_id, run_id, actor_id,
+                )
             } else {
                 memory_guard.remember_detailed(exp_clone, created_at)
             }

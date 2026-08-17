@@ -12,7 +12,7 @@ use super::state::MultiUserMemoryManager;
 use crate::errors::{AppError, ValidationErrorExt};
 use crate::memory::{
     Experience, ExperienceType, Session, SessionDigest, SessionEvent, SessionId, SessionStatus,
-    SessionStoreStats, SessionSummary,
+    SessionSummary, UserSessionStats,
 };
 use crate::validation;
 use std::collections::HashMap;
@@ -72,11 +72,22 @@ pub struct EndSessionResponse {
     pub session: Option<Session>,
 }
 
+/// Request for session store stats.
+///
+/// `user_id` is REQUIRED. It used to be absent from this handler entirely while
+/// still being accepted by axum as an unmatched query parameter, so a caller
+/// could pass `?user_id=…`, get a 200, and reasonably believe the answer was
+/// scoped when it was a sum over every tenant in the process.
+#[derive(Debug, Deserialize)]
+pub struct SessionStatsRequest {
+    pub user_id: String,
+}
+
 /// Response for session store stats
 #[derive(Debug, Serialize)]
 pub struct SessionStoreStatsResponse {
     pub success: bool,
-    pub stats: SessionStoreStats,
+    pub stats: UserSessionStats,
 }
 
 /// POST /api/sessions - List sessions for a user
@@ -145,11 +156,20 @@ pub async fn end_session(
     }
 }
 
-/// GET /api/sessions/stats - Get overall session store statistics
+/// GET /api/sessions/stats?user_id={user} - Session store statistics for one user.
+///
+/// Scoped to the named tenant. Previously this handler took no `user_id` and
+/// returned `SessionStore::stats()`, a sum over every user held in the
+/// process — four different profiles received byte-identical counts, including
+/// a `users_with_sessions` tenant census. Both the unscoped reader and that
+/// field are gone; see [`UserSessionStats`].
 pub async fn get_session_stats(
     State(state): State<AppState>,
+    Query(req): Query<SessionStatsRequest>,
 ) -> Result<Json<SessionStoreStatsResponse>, AppError> {
-    let stats = state.session_store.stats();
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    let stats = state.session_store.stats_for_user(&req.user_id);
 
     Ok(Json(SessionStoreStatsResponse {
         success: true,
