@@ -121,38 +121,66 @@ describe("readMemory", () => {
     expect(readMemory({ state: "unauthorized", status: 403 }, fresh).evidence).toContain("403");
   });
 
-  it("tells someone to START a server only when nothing answered", () => {
-    const r = readMemory({ state: "offline", detail: "Failed to fetch" }, fresh);
+  it("reads a 502 as a backend that is NOT RUNNING, because that is what it is", () => {
+    // MEASURED, NOT ASSUMED. The browser never speaks to the memory server
+    // directly: every /api/* request goes through shodh-front, whose `forward`
+    // turns a failed upstream request into 502 (front/src/main.rs), and vite's
+    // dev proxy does the same. With the backend stopped, GET /api/users through
+    // the dev server returns 502 — so "not started" arrives here as an ANSWERED
+    // 502, and it is by far the most common failure this ribbon will report.
+    const r = readMemory(
+      { state: "offline", detail: "backend returned 502", answered: 502 },
+      fresh,
+    );
     expect(r.state).toBe("Not running");
     expect(r.tone).toBe("warn");
     expect(r.remedy).toBe("Start the shodh backend.");
+    // The trap this test exists to hold shut: an earlier draft called any
+    // answered status "Erroring" and told the reader the server "is running",
+    // which is the opposite of true for the commonest failure there is.
+    expect(r.state).not.toBe("Erroring");
+    expect(r.consequence).not.toContain("is running");
+  });
+
+  it("reads a 504 the same way — a gateway timeout is not a server answering", () => {
+    expect(readMemory({ state: "offline", detail: "…", answered: 504 }, fresh).state).toBe(
+      "Not running",
+    );
+  });
+
+  it("blames the page's OWN server when nothing answered at all", () => {
+    // A NetworkError means the front itself is unreachable — it is the thing
+    // that serves this HTML and proxies everything else. Naming the memory
+    // server here would diagnose the wrong process.
+    const r = readMemory({ state: "offline", detail: "Failed to fetch" }, fresh);
+    expect(r.state).toBe("No connection");
+    expect(r.remedy).not.toContain("Start the shodh backend");
+    expect(r.remedy).toContain("shodh-front");
+    expect(r.consequence).toContain("its own server");
     expect(r.evidence).toContain("Failed to fetch");
   });
 
-  it("REFUSES to tell someone to start a server that answered 500", () => {
-    // THE DEFECT THIS FILE EXISTS FOR. The old strip printed
-    // `Not running — start the shodh backend` over a backend that had answered
-    // 500 and was therefore already up. lib/api/health.ts documents the same
-    // distinction at length for the full-page case and the strip threw it away.
+  it("keeps Erroring for a status the BACKEND itself answered", () => {
+    // 500 is passed through the proxy verbatim, so it really is the backend
+    // saying it failed — and that server IS up, so nobody should be sent to
+    // start it.
     const r = readMemory(
       { state: "offline", detail: "backend returned 500", answered: 500 },
       fresh,
     );
-    expect(r.state).not.toBe("Not running");
     expect(r.state).toBe("Erroring");
+    expect(r.tone).toBe("alarm");
     expect(r.remedy).not.toContain("Start the shodh backend");
     expect(r.remedy).toContain("already up");
     expect(r.consequence).toContain("is running");
     expect(r.evidence).toContain("500");
   });
 
-  it("escalates an erroring server above an absent one", () => {
+  it("escalates a backend that answered wrongly above one that is merely absent", () => {
     // Absent is ordinary — it is a local process someone starts by hand.
     // Answering wrongly is not ordinary, and the tones must not agree.
-    const absent = readMemory({ state: "offline", detail: "Failed to fetch" }, fresh);
-    const erroring = readMemory({ state: "offline", detail: "…", answered: 502 }, fresh);
-    expect(absent.tone).toBe("warn");
-    expect(erroring.tone).toBe("alarm");
+    expect(readMemory({ state: "offline", detail: "…", answered: 502 }, fresh).tone).toBe("warn");
+    expect(readMemory({ state: "offline", detail: "…", answered: 500 }, fresh).tone).toBe("alarm");
   });
 
   it("says nothing it cannot support before the first probe resolves", () => {
@@ -182,7 +210,7 @@ describe("readMemory", () => {
     // The asymmetry is deliberate: a server that was down two minutes ago is
     // still, in all likelihood, down. Downgrading that to "not sure" would hide
     // a real outage.
-    const r = readMemory({ state: "offline", detail: "Failed to fetch" }, stale);
+    const r = readMemory({ state: "offline", detail: "…", answered: 502 }, stale);
     expect(r.state).toBe("Not running");
     expect(r.tone).toBe("warn");
   });

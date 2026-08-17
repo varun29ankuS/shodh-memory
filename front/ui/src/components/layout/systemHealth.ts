@@ -173,6 +173,33 @@ function withFreshness(reading: ServiceReading, freshness: Freshness): ServiceRe
 const MEMORY_LOST = "Recall, graph, geo and tasks have nothing to read";
 
 /**
+ * Statuses that mean the PROXY could not reach the backend — not that the
+ * backend answered with an error.
+ *
+ * THE BROWSER NEVER TALKS TO THE MEMORY SERVER DIRECTLY. Every `/api/*` request
+ * goes through the shodh-front binary in production (`front/src/main.rs`,
+ * `forward`: a failed upstream request becomes `StatusCode::BAD_GATEWAY` with
+ * the body `shodh-front proxy error → …`) and through vite's proxy in dev,
+ * which does the same. So a backend that is simply not started reaches this
+ * code as an ANSWERED 502, and a `NetworkError` means something else entirely —
+ * that the page cannot reach its own server.
+ *
+ * This was observed live rather than reasoned about: with the backend stopped,
+ * `GET /api/users` through the dev server returned 502, and the ribbon's first
+ * draft duly announced "the memory server is running but could not serve the
+ * request" over a server that was not running. `lib/seat/client.ts` already had
+ * this right for the seat ("502 is the front proxy saying it could not reach
+ * the seat process"); the backend probe did not.
+ *
+ * 504 is included on its meaning, not on an observed path: nothing in this
+ * stack emits one today (a reqwest failure becomes 502), but "gateway timeout"
+ * can never be honestly reported as a server that is answering.
+ */
+function proxyCouldNotReachIt(answered: number): boolean {
+  return answered === 502 || answered === 504;
+}
+
+/**
  * The memory server: the thing every screen in this product reads from.
  *
  * THE TWO OFFLINE CASES ARE SPLIT HERE AND WERE NOT BEFORE. `Reachability`
@@ -221,33 +248,55 @@ export function readMemory(reach: Reachability, freshness: Freshness): ServiceRe
   }
 
   if (reach.state === "offline") {
-    return reach.answered === undefined
-      ? withFreshness(
-          {
-            id: "memory",
-            service,
-            state: "Not running",
-            tone: "warn",
-            consequence: `${MEMORY_LOST}.`,
-            remedy: "Start the shodh backend.",
-            evidence: reach.detail,
-            checked,
-          },
-          freshness,
-        )
-      : withFreshness(
-          {
-            id: "memory",
-            service,
-            state: "Erroring",
-            tone: "alarm",
-            consequence: `The memory server is running but could not serve the request, so ${MEMORY_LOST.toLowerCase()}.`,
-            remedy: "Read the shodh backend's log — it is already up, so starting it again is not the fix.",
-            evidence: `answered ${reach.answered}`,
-            checked,
-          },
-          freshness,
-        );
+    // Nothing answered at all — so not even the page's own server, which is
+    // what serves this HTML and proxies everything else. A remedy naming the
+    // memory server would be a diagnosis of the wrong process.
+    if (reach.answered === undefined) {
+      return withFreshness(
+        {
+          id: "memory",
+          service,
+          state: "No connection",
+          tone: "warn",
+          consequence:
+            "This page cannot reach its own server, so neither the memory server nor the assistant can be reached through it.",
+          remedy: "Check the network, or restart shodh-front.",
+          evidence: reach.detail,
+          checked,
+        },
+        freshness,
+      );
+    }
+
+    if (proxyCouldNotReachIt(reach.answered)) {
+      return withFreshness(
+        {
+          id: "memory",
+          service,
+          state: "Not running",
+          tone: "warn",
+          consequence: `${MEMORY_LOST}.`,
+          remedy: "Start the shodh backend.",
+          evidence: `no answer behind the proxy (${reach.answered})`,
+          checked,
+        },
+        freshness,
+      );
+    }
+
+    return withFreshness(
+      {
+        id: "memory",
+        service,
+        state: "Erroring",
+        tone: "alarm",
+        consequence: `The memory server is running but could not serve the request, so ${MEMORY_LOST.toLowerCase()}.`,
+        remedy: "Read the shodh backend's log — it is already up, so starting it again is not the fix.",
+        evidence: `answered ${reach.answered}`,
+        checked,
+      },
+      freshness,
+    );
   }
 
   const profiles = reach.profiles.filter(isHumanProfile).length;
