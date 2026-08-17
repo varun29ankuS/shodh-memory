@@ -1076,10 +1076,10 @@ fn decide(memories: &ClassCounts, nodes: &ClassCounts, complete: bool) -> Verdic
 /// would cut this roughly 35-fold; that is a storage-layout change, not a
 /// change to this module.
 ///
-/// 13s of `fill_cache(false)` sequential reading, off the request path, once an
-/// hour, is a 0.4% duty cycle and evicts nothing. `ScrubBudget` exists to bound
-/// pathological cases and to make a truncated sweep *say so* — not as a
-/// sampling knob.
+/// ~14s of `fill_cache(false)` sequential reading, off the request path, once
+/// an hour, is a 0.4% duty cycle that evicts nothing and takes no lock the
+/// serving path needs. `ScrubBudget` exists to bound pathological cases and to
+/// make a truncated sweep *say so* — not as a sampling knob.
 pub fn scrub_user(
     user_id: &str,
     memory_db: &DB,
