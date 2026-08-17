@@ -12,6 +12,7 @@ import {
   elapsedLabel,
   hoistCommonPrefix,
   lanesOf,
+  lateDays,
   lifelineOf,
   originOf,
   laneCurve,
@@ -22,8 +23,9 @@ import {
   shortId,
   statusChanges,
   stepPath,
+  partitionOverdue,
+  recurrenceLabel,
   subtaskProgress,
-  summarise,
   truncation,
   type Board,
 } from "./derive";
@@ -126,55 +128,6 @@ describe("priorityLabel", () => {
   it("shortens medium so it fits a row without competing with the title", () => {
     expect(priorityLabel("medium")).toBe("med");
     expect(priorityLabel("urgent")).toBe("urgent");
-  });
-});
-
-describe("summarise", () => {
-  it("reports truncation only when the server's total exceeds the rows sent", () => {
-    const rows = [todo({ id: "a" }), todo({ id: "b" })];
-    expect(summarise(rows, 2, NOW).truncated).toBe(false);
-    const cut = summarise(rows, 431, NOW);
-    expect(cut.truncated).toBe(true);
-    expect(cut.shown).toBe(2);
-    expect(cut.total).toBe(431);
-  });
-
-  it("never claims a total smaller than the rows it was handed", () => {
-    // A total below the row count would render "showing 2 of 1".
-    const s = summarise([todo({ id: "a" }), todo({ id: "b" })], 1, NOW);
-    expect(s.total).toBe(2);
-    expect(s.truncated).toBe(false);
-  });
-
-  it("counts overdue by the same rule the rows render, not by due_date presence", () => {
-    const rows = [
-      todo({ id: "a", due_date: iso(local(2026, 8, 1)) }), // overdue
-      todo({ id: "b", due_date: iso(local(2026, 8, 16, 23)) }), // due today
-      todo({ id: "c", due_date: iso(local(2026, 9, 1)) }), // future
-      todo({ id: "d" }), // none
-    ];
-    expect(summarise(rows, 4, NOW).overdue).toBe(1);
-  });
-
-  it("counts urgent and high separately so neither hides inside the other", () => {
-    const rows = [
-      todo({ id: "a", priority: "urgent" }),
-      todo({ id: "b", priority: "high" }),
-      todo({ id: "c", priority: "high" }),
-      todo({ id: "d", priority: "low" }),
-    ];
-    const s = summarise(rows, 4, NOW);
-    expect(s.urgent).toBe(1);
-    expect(s.high).toBe(2);
-  });
-
-  it("counts distinct project prefixes, ignoring todos that carry none", () => {
-    const rows = [
-      todo({ id: "a", project_prefix: "SHOD" }),
-      todo({ id: "b", project_prefix: "SHOD" }),
-      todo({ id: "c", project_prefix: null }),
-    ];
-    expect(summarise(rows, 3, NOW).projects).toBe(1);
   });
 });
 
@@ -676,7 +629,7 @@ describe("boardOf", () => {
       triage({ id: "d", status: "done" }),
       triage({ id: "e", status: "cancelled" }),
     ];
-    expect(boardOf(rows, rows.length, [])).toMatchObject({
+    expect(boardOf(rows, rows.length, [], NOW)).toMatchObject({
       open: 3,
       underway: 1,
       blocked: 1,
@@ -694,7 +647,7 @@ describe("boardOf", () => {
       triage({ id: "a", status: "blocked", blocked_on: "counsel" }),
       triage({ id: "b", blocked_by: ["a"] }),
     ];
-    const board = boardOf(rows, rows.length, []);
+    const board = boardOf(rows, rows.length, [], NOW);
     expect(board.blocked).toBe(1);
     expect(board.waiting).toBe(1);
     expect(board.dependencies).toBe(1);
@@ -704,15 +657,15 @@ describe("boardOf", () => {
     // The live `claude` profile: 50 todos recorded inside 33 minutes on one
     // day, not one of them ever moved.
     const rows = [triage({ id: "a" }), triage({ id: "b" })];
-    expect(boardOf(rows, rows.length, []).moved).toBe(0);
+    expect(boardOf(rows, rows.length, [], NOW).moved).toBe(0);
   });
 
   it("carries the truncation fact, which is what suppresses every ratio", () => {
     // The server paginates after sorting by manual order, priority and due date
     // — never by project — so a slice is arbitrary across all lanes at once.
     const rows = [triage({ id: "a" })];
-    expect(boardOf(rows, 431, []).truncated).toBe(true);
-    expect(boardOf(rows, 1, []).truncated).toBe(false);
+    expect(boardOf(rows, 431, [], NOW).truncated).toBe(true);
+    expect(boardOf(rows, 1, [], NOW).truncated).toBe(false);
   });
 });
 
@@ -724,9 +677,16 @@ describe("axisOf", () => {
     open: 0,
     underway: 0,
     blocked: 0,
+    todo: 0,
+    backlog: 0,
     settled: 0,
     done: 0,
     cancelled: 0,
+    overdue: 0,
+    overdueDays: null,
+    dueSoon: 0,
+    dated: 0,
+    recurring: 0,
     projects: 0,
     moved,
     dependencies: 0,
@@ -994,5 +954,190 @@ describe("hoistCommonPrefix", () => {
     const hoisted = hoistCommonPrefix(contents);
     expect(hoisted?.rest).toEqual(["a", "b", "c", "d"]);
     expect(hoisted?.rest.length).toBe(contents.length);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * SCHEDULE
+ *
+ * Every figure here is one a reader acts on and cannot check: "5 overdue"
+ * beside a list they have not read, "the oldest by 118 days" beside a badge
+ * reading 117, "repeats Mon, Wed" over a day numbering that is off by one. All
+ * three render as entirely plausible.
+ * ------------------------------------------------------------------ */
+
+describe("lateDays", () => {
+  it("is null for a task that is not late, including one due later today", () => {
+    expect(lateDays(todo(), NOW)).toBeNull();
+    expect(lateDays(todo({ due_date: iso(local(2026, 8, 16, 23)) }), NOW)).toBeNull();
+  });
+
+  it("counts calendar days between local midnights, not 24-hour windows", () => {
+    // Due at 23:00 yesterday, now 12:00 today: thirteen hours late, one
+    // calendar day. A millisecond division would call this zero.
+    expect(lateDays(todo({ due_date: iso(local(2026, 8, 15, 23)) }), NOW)).toBe(1);
+    expect(lateDays(todo({ due_date: iso(local(2026, 4, 20, 23, 59)) }), NOW)).toBe(118);
+  });
+
+  it("is zero, not null, for a task that went late earlier the same day", () => {
+    // Late is late. The caller decides whether a number this small is worth
+    // printing; conflating it with "not late" would drop the row from the count.
+    expect(lateDays(todo({ due_date: iso(local(2026, 8, 16, 11)) }), NOW)).toBe(0);
+  });
+
+  it("agrees with the badge the row renders", () => {
+    // The screen's standing figure and its rows are one claim at two scales.
+    const late = todo({ due_date: iso(local(2026, 4, 20, 23, 59)) });
+    expect(dueMeta(late, NOW)?.label).toBe(`Overdue ${lateDays(late, NOW)}d`);
+  });
+});
+
+describe("recurrenceLabel", () => {
+  it("names the weekdays by the SERVER'S numbering, where 0 is Sunday", () => {
+    // src/memory/types.rs:3929. An off-by-one here shifts every repeating task
+    // by a day and nothing on screen would look wrong.
+    expect(recurrenceLabel({ type: "weekly", days: [0] })).toBe("repeats Sun");
+    expect(recurrenceLabel({ type: "weekly", days: [1, 3, 5] })).toBe("repeats Mon, Wed, Fri");
+    expect(recurrenceLabel({ type: "weekly", days: [6] })).toBe("repeats Sat");
+  });
+
+  it("keeps the stored order of the days rather than sorting them", () => {
+    expect(recurrenceLabel({ type: "weekly", days: [5, 1] })).toBe("repeats Fri, Mon");
+  });
+
+  it("says nothing for a weekly pattern naming no usable day", () => {
+    // The server picks a date anyway for an empty set (`from + 1 week`,
+    // types.rs:3944-3947). Printing "repeats weekly" over that would present a
+    // data defect as a schedule somebody set.
+    expect(recurrenceLabel({ type: "weekly", days: [] })).toBeNull();
+    expect(recurrenceLabel({ type: "weekly", days: [9] })).toBeNull();
+  });
+
+  it("collapses a seven-day week to the thing it actually is", () => {
+    expect(recurrenceLabel({ type: "weekly", days: [0, 1, 2, 3, 4, 5, 6] })).toBe("repeats daily");
+    expect(recurrenceLabel({ type: "every_n_days", n: 1 })).toBe("repeats daily");
+  });
+
+  it("gets the ordinal right on the days every naive version gets wrong", () => {
+    expect(recurrenceLabel({ type: "monthly", day: 1 })).toBe("repeats on the 1st");
+    expect(recurrenceLabel({ type: "monthly", day: 2 })).toBe("repeats on the 2nd");
+    expect(recurrenceLabel({ type: "monthly", day: 3 })).toBe("repeats on the 3rd");
+    expect(recurrenceLabel({ type: "monthly", day: 11 })).toBe("repeats on the 11th");
+    expect(recurrenceLabel({ type: "monthly", day: 12 })).toBe("repeats on the 12th");
+    expect(recurrenceLabel({ type: "monthly", day: 13 })).toBe("repeats on the 13th");
+    expect(recurrenceLabel({ type: "monthly", day: 21 })).toBe("repeats on the 21st");
+    expect(recurrenceLabel({ type: "monthly", day: 31 })).toBe("repeats on the 31st");
+  });
+
+  it("says nothing for a pattern that describes no schedule", () => {
+    expect(recurrenceLabel({ type: "monthly", day: 0 })).toBeNull();
+    expect(recurrenceLabel({ type: "monthly", day: 32 })).toBeNull();
+    expect(recurrenceLabel({ type: "every_n_days", n: 0 })).toBeNull();
+    expect(recurrenceLabel({ type: "every_n_days", n: -3 })).toBeNull();
+  });
+
+  it("reads the two remaining variants", () => {
+    expect(recurrenceLabel({ type: "daily" })).toBe("repeats daily");
+    expect(recurrenceLabel({ type: "every_n_days", n: 3 })).toBe("repeats every 3 days");
+  });
+});
+
+describe("partitionOverdue", () => {
+  it("lifts late rows out without disturbing the order of either half", () => {
+    // `sort_order` is a MANUAL rank with a reorder endpoint of its own, and the
+    // server sorts by it first. A sort here would discard that silently for
+    // every profile that had ever arranged a list.
+    const rows = [
+      triage({ id: "a" }),
+      triage({ id: "b", due_date: iso(local(2026, 8, 1)) }),
+      triage({ id: "c" }),
+      triage({ id: "d", due_date: iso(local(2026, 4, 20)) }),
+      triage({ id: "e", due_date: iso(local(2026, 9, 30)) }),
+    ];
+    const split = partitionOverdue(rows, NOW);
+    expect(split.overdue.map((t) => t.id)).toEqual(["b", "d"]);
+    expect(split.rest.map((t) => t.id)).toEqual(["a", "c", "e"]);
+  });
+
+  it("judges lateness by the same rule as the badge, not by carrying a date", () => {
+    // Due later today is not late, and a row that renders no red badge must
+    // not be lifted above rows that do.
+    const rows = [triage({ id: "a", due_date: iso(local(2026, 8, 16, 23)) })];
+    expect(partitionOverdue(rows, NOW).overdue).toHaveLength(0);
+  });
+
+  it("keeps every row: nothing is dropped by being partitioned", () => {
+    const rows = [triage({ id: "a" }), triage({ id: "b", due_date: iso(local(2026, 8, 1)) })];
+    const split = partitionOverdue(rows, NOW);
+    expect(split.overdue.length + split.rest.length).toBe(rows.length);
+  });
+});
+
+describe("boardOf — the schedule", () => {
+  it("counts late work over OPEN rows only", () => {
+    // A settled task past its due date is finished, not late. The live corpus
+    // is 82 settled rows all predating today by months; folding those in would
+    // report the profile as catastrophically overdue when nothing is
+    // outstanding at all.
+    const rows = [
+      triage({ id: "a", status: "todo", due_date: iso(local(2026, 8, 1)) }),
+      triage({ id: "b", status: "done", due_date: iso(local(2026, 4, 1)) }),
+      triage({ id: "c", status: "cancelled", due_date: iso(local(2026, 4, 1)) }),
+    ];
+    const board = boardOf(rows, rows.length, [], NOW);
+    expect(board.overdue).toBe(1);
+    expect(board.dated).toBe(1);
+  });
+
+  it("reports how late the LATEST one is, so the count has a scale", () => {
+    const rows = [
+      triage({ id: "a", due_date: iso(local(2026, 8, 15, 23)) }),
+      triage({ id: "b", due_date: iso(local(2026, 4, 20, 23, 59)) }),
+    ];
+    expect(boardOf(rows, rows.length, [], NOW).overdueDays).toBe(118);
+  });
+
+  it("has no lateness figure when nothing is late", () => {
+    const rows = [triage({ id: "a", due_date: iso(local(2026, 9, 30)) })];
+    expect(boardOf(rows, rows.length, [], NOW).overdueDays).toBeNull();
+  });
+
+  it("counts due-soon over the same three-day window the row colours", () => {
+    const rows = [
+      triage({ id: "a", due_date: iso(local(2026, 8, 16, 23)) }),
+      triage({ id: "b", due_date: iso(local(2026, 8, 19, 1)) }),
+      triage({ id: "c", due_date: iso(local(2026, 8, 20, 23)) }),
+    ];
+    const board = boardOf(rows, rows.length, [], NOW);
+    expect(board.dueSoon).toBe(2);
+    expect(board.dated).toBe(3);
+  });
+
+  it("splits open work into every bucket the list groups by", () => {
+    // The ledger draws all four, including the empty ones — the only way the
+    // grouping is visible on a profile whose rows all sit in one state.
+    const rows = [
+      triage({ id: "a", status: "in_progress" }),
+      triage({ id: "b", status: "todo" }),
+      triage({ id: "c", status: "todo" }),
+      triage({ id: "d", status: "backlog" }),
+      triage({ id: "e", status: "done" }),
+    ];
+    const board = boardOf(rows, rows.length, [], NOW);
+    expect(board.underway).toBe(1);
+    expect(board.blocked).toBe(0);
+    expect(board.todo).toBe(2);
+    expect(board.backlog).toBe(1);
+    expect(board.underway + board.blocked + board.todo + board.backlog).toBe(board.open);
+  });
+
+  it("counts repeats across every status, because a repeat outlives its task", () => {
+    // `create_next_recurrence` runs on COMPLETION (src/memory/todos.rs:668), so
+    // a done recurring task is precisely the one that spawned the next.
+    const rows = [
+      triage({ id: "a", status: "done", recurrence: { type: "daily" } }),
+      triage({ id: "b", status: "todo" }),
+    ];
+    expect(boardOf(rows, rows.length, [], NOW).recurring).toBe(1);
   });
 });

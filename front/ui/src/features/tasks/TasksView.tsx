@@ -10,6 +10,7 @@ import {
   Cog,
   Inbox,
   Play,
+  Repeat,
   RotateCcw,
   User,
   X,
@@ -52,12 +53,15 @@ import {
   lanesOf,
   lifelineOf,
   originOf,
+  partitionOverdue,
   priorityLabel,
   provenanceOf,
+  recurrenceLabel,
   settledReason,
   shortId,
   subtaskProgress,
   type Blocker,
+  type Board,
   type Lane,
 } from "./derive";
 import { LaneStrip } from "./LaneStrip";
@@ -672,6 +676,186 @@ function TaskActions({ todo, profile }: { todo: TriageTodo; profile: string }) {
 }
 
 /* -------------------------------------------------------------------------- *
+ * WHAT IS DONE AND WHAT IS TO BE DONE
+ *
+ * THE LIST HAS ALWAYS BEEN GROUPED BY STATE. `OPEN_ORDER` renders a section per
+ * status and Settled has had its own collapsed section at the foot of the
+ * screen since it was built. What was missing is that a reader cannot SEE a
+ * grouping whose empty buckets are not drawn: the `claude` profile holds 50
+ * tasks all sitting in To do, so it renders exactly one heading, and one
+ * heading over fifty rows is indistinguishable from no grouping at all. That is
+ * why the screen read as "a long list of todos" to the person who owns it.
+ *
+ * SO THE SCHEME IS STATED WHERE THE ROWS CANNOT STATE IT. This ledger names
+ * every bucket the list uses, in the order the list uses them, INCLUDING the
+ * ones holding nothing. An empty section is still not rendered — a heading over
+ * no rows is furniture — but a zero here is a fact worth having: it is what
+ * tells a reader that "everything is in To do" is a property of this profile
+ * rather than of this screen.
+ *
+ * SETTLED IS BELOW THE RULE AND IS NOT PART OF THE SAME COLUMN OF ATTENTION.
+ * It is evidence, not the job, and 82 of 93 rows on the live profile. Its two
+ * outcomes are reported apart, because finishing something and abandoning it
+ * are different results and a single "settled" figure hides which happened.
+ *
+ * THE FIGURES ARE COUNTED HERE, over the rows in hand, and never read from the
+ * server's `todo_counts` — that field has three construction sites in the Rust
+ * tree and every one is `::default()`, so it ships zeros for every project
+ * regardless of what it holds.
+ * -------------------------------------------------------------------------- */
+
+/** The status each ledger line counts, in the order the list renders them. */
+const LEDGER_ORDER: TodoStatus[] = OPEN_ORDER;
+
+function ledgerCount(board: Board, status: TodoStatus): number {
+  switch (status) {
+    case "in_progress":
+      return board.underway;
+    case "blocked":
+      return board.blocked;
+    case "todo":
+      return board.todo;
+    case "backlog":
+      return board.backlog;
+    case "done":
+      return board.done;
+    case "cancelled":
+      return board.cancelled;
+  }
+}
+
+function LedgerLine({
+  status,
+  count,
+  note,
+}: {
+  status: TodoStatus;
+  count: number;
+  note?: string;
+}) {
+  const meta = STATUS_META[status];
+  const Icon = meta.icon;
+  const empty = count === 0;
+  return (
+    <div className="flex items-baseline gap-2 py-[1px] text-[12px]">
+      <Icon
+        aria-hidden="true"
+        className={cn("size-3 shrink-0 translate-y-[2px]", empty ? "text-muted-foreground/30" : meta.iconClass)}
+        strokeWidth={1.8}
+      />
+      <span className={cn("min-w-0 flex-1", empty && "text-muted-foreground/50")}>{meta.label}</span>
+      {note ? <span className="text-muted-foreground/60 shrink-0 text-[10px]">{note}</span> : null}
+      {/* Right-aligned and tabular, so the column can be read down as a shape
+          rather than as five sentences. */}
+      <span
+        className={cn(
+          "mono shrink-0 tabular-nums",
+          empty ? "text-muted-foreground/40" : "text-foreground/85",
+        )}
+      >
+        {count}
+      </span>
+    </div>
+  );
+}
+
+function StateLedger({ board }: { board: Board }) {
+  return (
+    <div>
+      {LEDGER_ORDER.map((status) => (
+        <LedgerLine key={status} status={status} count={ledgerCount(board, status)} />
+      ))}
+      <div className="border-border/70 mt-1.5 border-t pt-1.5">
+        <LedgerLine status="done" count={board.done} />
+        <LedgerLine status="cancelled" count={board.cancelled} note="no longer wanted" />
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- *
+ * WHAT IS LATE
+ *
+ * OVERDUE IS THE ONE STATE THAT MUST NOT BE MISSABLE, and on this screen it was
+ * a badge on a row and nothing else — five late tasks on the live `claude-code`
+ * profile, the oldest by 118 days, scattered through a ten-row To do section in
+ * whatever order the server returned them, with no figure anywhere that a
+ * reader could have arrived at without reading every row.
+ *
+ * `--destructive` IS THE RIGHT TOKEN AND IS NOW UNCONTESTED. This screen
+ * reserves exactly two hues: `--warn` for work waiting on something, and
+ * `--destructive` for late. Priority used to take both and was moved off them
+ * onto an ink meter precisely so that each would mean one thing; this is the
+ * thing `--destructive` was kept for.
+ *
+ * IT SAYS HOW LATE, NOT ONLY HOW MANY. "5 overdue" is a number a reader has no
+ * scale for. "the oldest by 118 days" is what turns it into a judgement, and it
+ * is the same arithmetic the row badges use — `lateDays`, shared, so the
+ * summary and the rows cannot disagree by a day.
+ *
+ * A FLOOR RATHER THAN A SUPPRESSION WHEN THE LIST IS TRUNCATED. Every RATIO on
+ * this screen is withheld while `board.truncated`, because the server paginates
+ * across projects and no lane's denominator would be its own. A count of late
+ * work has no denominator to be wrong about — it can only be an undercount — so
+ * it is stated as "at least n" rather than hidden. Withholding an alarm is a
+ * worse failure than stating a lower bound on it.
+ * -------------------------------------------------------------------------- */
+
+function ScheduleLine({ board }: { board: Board }) {
+  // Nothing dated at all is the state of the `claude` profile and of most of
+  // this instance. It is said once, quietly, so that "0 overdue" cannot be
+  // read as "everything is on time".
+  if (board.dated === 0 && board.recurring === 0) {
+    return (
+      <p className="text-muted-foreground/70 mt-2 text-[11px] leading-relaxed">
+        No open task carries a due date, so nothing here is early or late. Dates and repeats are
+        set where a task is created; this screen does not add them.
+      </p>
+    );
+  }
+
+  const atLeast = board.truncated ? "at least " : "";
+
+  return (
+    <div className="mt-2 space-y-1">
+      {board.overdue > 0 ? (
+        <p className="border-destructive text-destructive border-l-2 pl-2.5 text-[12px] leading-relaxed">
+          <span className="font-medium">
+            {atLeast}
+            {board.overdue} {board.overdue === 1 ? "task is" : "tasks are"} past{" "}
+            {board.overdue === 1 ? "its" : "their"} due date
+          </span>
+          {board.overdueDays !== null && board.overdueDays >= 1
+            ? ` — the oldest by ${board.overdueDays} ${board.overdueDays === 1 ? "day" : "days"}.`
+            : "."}
+        </p>
+      ) : null}
+
+      <Meta className="text-[11px]">
+        {board.overdue === 0 && board.dated > 0 ? (
+          <span>
+            nothing overdue, of {board.dated} dated
+          </span>
+        ) : null}
+        {board.dueSoon > 0 ? (
+          <span className="text-warn">
+            {board.dueSoon} due within 3 days
+          </span>
+        ) : null}
+        {board.recurring > 0 ? (
+          <span>
+            {board.recurring} {board.recurring === 1 ? "repeats" : "repeat"}
+          </span>
+        ) : null}
+        {board.dated > 0 && board.recurring === 0 ? (
+          <span className="text-muted-foreground/60">nothing repeats</span>
+        ) : null}
+      </Meta>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- *
  * ONE TASK
  * -------------------------------------------------------------------------- */
 
@@ -682,6 +866,7 @@ function TaskRow({
   all,
   byId,
   showProject,
+  now,
 }: {
   todo: TriageTodo;
   /** The title with any group-wide prefix already lifted to the heading. The
@@ -692,11 +877,15 @@ function TaskRow({
   all: readonly TriageTodo[];
   byId: ReadonlyMap<string, TriageTodo>;
   showProject: boolean;
+  /** The screen's single clock. Passed rather than read here, so this badge and
+   *  the standing count above it are the same judgement. */
+  now: number;
 }) {
   const [open, setOpen] = useState(false);
   const meta = STATUS_META[todo.status];
   const Icon = meta.icon;
-  const due = dueMeta(todo, Date.now());
+  const due = dueMeta(todo, now);
+  const repeats = todo.recurrence ? recurrenceLabel(todo.recurrence) : null;
   const blockers = blockersOf(todo, byId);
   const subtasks = subtaskProgress(todo, all);
   const line = lifelineOf(todo);
@@ -754,6 +943,16 @@ function TaskRow({
                 {due.label}
               </Badge>
             )
+          ) : null}
+          {/* A repeat is not an alarm and takes no colour. It qualifies the due
+              date beside it: "Overdue 3d · repeats Mon, Wed" is a task whose
+              next instance is already scheduled, which reads very differently
+              from a one-off nobody has done. */}
+          {repeats ? (
+            <span className="text-muted-foreground/80 flex items-center gap-1 text-[10px]">
+              <Repeat aria-hidden="true" className="size-2.5 shrink-0" strokeWidth={2} />
+              {repeats}
+            </span>
           ) : null}
         </Meta>
         {/* OUTSIDE THE META CLUSTER, so it holds one column down the list
@@ -958,9 +1157,25 @@ export function TasksView({ reach }: { reach: Reachability }) {
   });
 
   const todos = useMemo(() => data?.todos ?? [], [data]);
+
+  /**
+   * ONE CLOCK FOR THE WHOLE SCREEN, sampled when the rows arrive.
+   *
+   * The standing "5 overdue, the oldest by 118 days", each row's own badge and
+   * the partition that lifts late rows to the top of their group are one
+   * judgement made at three scales. Three separate `Date.now()` calls in one
+   * render can straddle a midnight or a due instant, and the failure is not a
+   * crash — it is a heading claiming three overdue above four red rows, which
+   * reads as perfectly plausible.
+   */
+  const now = useMemo(() => Date.now(), [data]);
+
   const byId = useMemo(() => new Map(todos.map((t) => [t.id, t])), [todos]);
   const lanes = useMemo(() => lanesOf(todos, data?.projects ?? []), [todos, data?.projects]);
-  const board = useMemo(() => boardOf(todos, data?.count ?? 0, lanes), [todos, data?.count, lanes]);
+  const board = useMemo(
+    () => boardOf(todos, data?.count ?? 0, lanes, now),
+    [todos, data?.count, lanes, now],
+  );
   const axis = useMemo(() => axisOf(lanes, board), [lanes, board]);
 
   const visible = useMemo(
@@ -1074,15 +1289,25 @@ export function TasksView({ reach }: { reach: Reachability }) {
             "@min-[1180px]:border-r @min-[1180px]:border-b-0 @min-[1180px]:pb-5",
           )}
         >
-          <Meta className="text-[12px]">
-            <Stat value={board.open} label="open" />
-            {board.underway > 0 ? <Stat value={board.underway} label="underway" /> : null}
-            {board.blocked > 0 ? (
-              <span className="text-warn">{board.blocked} blocked</span>
+          <div className="flex items-baseline justify-between gap-2">
+            <h2 className="text-[12px] font-medium tracking-tight">
+              {board.open} to do, {board.settled} settled
+            </h2>
+            {board.projects > 1 ? (
+              <Meta className="text-[11px]">
+                <Stat value={board.projects} label="projects" />
+              </Meta>
             ) : null}
-            <Stat value={board.settled} label="settled" />
-            {board.projects > 1 ? <Stat value={board.projects} label="projects" /> : null}
-          </Meta>
+          </div>
+
+          {/* The list's own grouping, named — including the buckets holding
+              nothing, which is the only way the scheme is visible on a profile
+              whose tasks all sit in one state. */}
+          <div className="mt-1.5">
+            <StateLedger board={board} />
+          </div>
+
+          <ScheduleLine board={board} />
 
           {/* "ARE WE BLOCKED" IS ANSWERED EVERY TIME, INCLUDING WHEN THE ANSWER
               IS NO — it is one of the questions this screen exists for, and a
@@ -1225,8 +1450,14 @@ export function TasksView({ reach }: { reach: Reachability }) {
         ) : null}
 
         {OPEN_ORDER.map((status) => {
-          const rows = visible.filter((t) => t.status === status);
-          if (rows.length === 0) return null;
+          const inState = visible.filter((t) => t.status === status);
+          if (inState.length === 0) return null;
+          // LATE WORK RISES; NOTHING ELSE MOVES. A stable partition, not a
+          // sort — `sort_order` is a manual rank with an endpoint of its own,
+          // and re-sorting by lateness would discard whatever order a reader
+          // arranged. See `partitionOverdue`.
+          const split = partitionOverdue(inState, now);
+          const rows = [...split.overdue, ...split.rest];
           const meta = STATUS_META[status];
           const Icon = meta.icon;
           // Said once above the group instead of fifty times down the left
@@ -1240,6 +1471,14 @@ export function TasksView({ reach }: { reach: Reachability }) {
                   {meta.label}
                 </span>
                 <span className="text-muted-foreground/60 mono text-[10px]">{rows.length}</span>
+                {/* Stated on the heading, not only on the rows: a reader who
+                    has collapsed nothing and read nothing still learns that
+                    part of this group is late, and where those rows are. */}
+                {split.overdue.length > 0 ? (
+                  <span className="text-destructive shrink-0 text-[11px] font-medium">
+                    {split.overdue.length} overdue, first
+                  </span>
+                ) : null}
                 {shared ? (
                   <span className="text-muted-foreground/70 min-w-0 truncate text-[11px]">
                     every title begins{" "}
@@ -1256,6 +1495,7 @@ export function TasksView({ reach }: { reach: Reachability }) {
                   all={todos}
                   byId={byId}
                   showProject={lane === null && lanes.length > 1}
+                  now={now}
                 />
               ))}
             </section>

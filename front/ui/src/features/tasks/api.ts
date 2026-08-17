@@ -18,6 +18,39 @@ import { api, type Todo } from "@/lib/api";
  * here.
  */
 
+/**
+ * `Recurrence` — src/memory/types.rs:3923-3935.
+ *
+ * A SERDE-TAGGED UNION, NOT A STRING. `#[serde(tag = "type", rename_all =
+ * "snake_case")]` puts the variant in a `type` field beside the variant's own
+ * data, so the wire forms are `{"type":"daily"}`,
+ * `{"type":"weekly","days":[1,3]}`, `{"type":"monthly","day":15}` and
+ * `{"type":"every_n_days","n":3}`. The field names inside a variant are NOT
+ * touched by the enum's `rename_all` — only the variant names are — and all
+ * three are already lowercase.
+ *
+ * `days` is 0=Sunday through 6=Saturday, the server's own numbering
+ * (types.rs:3929). It is not JavaScript's `Date#getDay` by coincidence; it
+ * happens to agree, and nothing here relies on that.
+ *
+ * ALL FOUR ARE DECLARED, THOUGH ONLY THREE CAN BE CREATED OVER HTTP.
+ * `parse_recurrence` (src/handlers/todos.rs:443-459) accepts the words "daily",
+ * "weekly" and "monthly" and hardcodes weekly to `[1,2,3,4,5]` and monthly to
+ * day 1; `EveryNDays` has no spelling it accepts at all. The struct is the
+ * contract — MIF import and any direct write can produce the rest — so the
+ * reader handles what the field can hold, not what one handler constructs.
+ *
+ * IT IS CREATE-ONLY. `UpdateTodoRequest` (todos.rs:257-292) has no
+ * `recurrence` field, so a repeat cannot be changed or cleared through the API
+ * this screen uses. That is why the screen renders the pattern and offers no
+ * control over it.
+ */
+export type Recurrence =
+  | { type: "daily" }
+  | { type: "weekly"; days: number[] }
+  | { type: "monthly"; day: number }
+  | { type: "every_n_days"; n: number };
+
 /** `TodoCommentType` — src/memory/types.rs:4050-4063, `rename_all = "snake_case"`. */
 export type TodoCommentType = "comment" | "activity" | "progress" | "resolution";
 
@@ -68,6 +101,17 @@ export interface TriageTodo extends Todo {
    * rejected" (types.rs:4157-4158), which `blocked_on` cannot be.
    */
   blocked_by?: string[];
+  /**
+   * src/memory/types.rs:4121. Present and null on every todo on this instance —
+   * zero of 143 across four profiles carry a pattern, verified live.
+   *
+   * Declared regardless: `create_next_recurrence` (types.rs:4256-4272) is
+   * wired, `complete_todo` calls it through `TodoStore` (src/memory/todos.rs:668)
+   * and returns the new todo as `next_recurrence` in its response
+   * (todos.rs:220-226), so the first repeating task anyone creates rolls over
+   * immediately and this screen must already be able to read it.
+   */
+  recurrence?: Recurrence | null;
 }
 
 /**

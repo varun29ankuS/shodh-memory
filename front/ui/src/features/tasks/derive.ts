@@ -1,6 +1,6 @@
 import type { Todo, TodoPriority, TodoStatus } from "@/lib/api";
 import { parseTime } from "@/features/briefing/derive";
-import type { LinkedMemory, TriageProject, TriageTodo } from "./api";
+import type { LinkedMemory, Recurrence, TriageProject, TriageTodo } from "./api";
 
 /**
  * The arithmetic behind the Tasks screen, kept out of the component so it can
@@ -78,6 +78,25 @@ function startOfLocalDay(ms: number): number {
  * can be tested at all. A malformed or absent date yields null rather than an
  * "Invalid Date" chip.
  */
+/**
+ * How many whole calendar days late a task is, or null if it is not late.
+ *
+ * THE ONE LATENESS ARITHMETIC ON THIS SCREEN. The row's badge and the standing
+ * "the latest is n days past" figure are the same claim at two scales, and two
+ * implementations of "how late" is how a screen ends up saying "Overdue 117d"
+ * on a row under a summary that reads 118. Both read this.
+ *
+ * Zero is a real answer and is not null: a task that went past its due date
+ * this morning IS late, by less than a day. The caller decides whether a
+ * number that small is worth printing.
+ */
+export function lateDays(todo: Todo, now: number): number | null {
+  if (!todo.due_date) return null;
+  const dueMs = new Date(todo.due_date).getTime();
+  if (Number.isNaN(dueMs) || now <= dueMs) return null;
+  return Math.floor((startOfLocalDay(now) - startOfLocalDay(dueMs)) / 86_400_000);
+}
+
 export function dueMeta(todo: Todo, now: number): DueMeta | null {
   if (!todo.due_date) return null;
   const due = new Date(todo.due_date);
@@ -85,7 +104,7 @@ export function dueMeta(todo: Todo, now: number): DueMeta | null {
   if (Number.isNaN(dueMs)) return null;
 
   if (now > dueMs) {
-    const late = Math.floor((startOfLocalDay(now) - startOfLocalDay(dueMs)) / 86_400_000);
+    const late = lateDays(todo, now) ?? 0;
     // Under a day late has no useful number in it; "Overdue 0d" is worse than
     // the word on its own.
     return {
@@ -121,20 +140,78 @@ export function priorityLabel(priority: TodoPriority): string | null {
   }
 }
 
-export interface TaskSummary {
-  /** Rows actually on screen. */
-  shown: number;
-  /** `TodoListResponse.count` — the total BEFORE the server's `.truncate(limit)`
-   *  (src/handlers/todos.rs:1419-1432), so this is the only place the screen can
-   *  learn that it is showing a slice. */
-  total: number;
-  truncated: boolean;
-  urgent: number;
-  high: number;
-  overdue: number;
-  /** Distinct project prefixes present among the rows. One project means the
-   *  chip repeats the same three letters down fifty rows and is dropped. */
-  projects: number;
+/* ------------------------------------------------------------------ *
+ * WHEN SOMETHING REPEATS
+ *
+ * The wire shape, its four variants and the three that HTTP can actually
+ * create are documented on `Recurrence` in ./api. This is only how one reads.
+ *
+ * NOTHING ON THIS INSTANCE RECURS. Zero of 143 todos across four profiles
+ * carry a pattern, verified live. Written against the field rather than the
+ * corpus for the same reason `subtaskProgress` is: the field is real, the
+ * rollover is wired end to end, and the day something sets one the screen must
+ * already read it. Nothing on screen implies a schedule exists where none does.
+ * ------------------------------------------------------------------ */
+
+/** 0=Sun through 6=Sat, the server's own numbering (types.rs:3929). Indexed,
+ *  not computed from a Date, because a lookup cannot drift by a day the way
+ *  constructing a reference Sunday and adding offsets can. */
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** Ordinal suffix for a day of the month. 11th–13th are the exceptions every
+ *  naive implementation of this gets wrong. */
+function ordinal(day: number): string {
+  const tens = day % 100;
+  if (tens >= 11 && tens <= 13) return `${day}th`;
+  switch (day % 10) {
+    case 1:
+      return `${day}st`;
+    case 2:
+      return `${day}nd`;
+    case 3:
+      return `${day}rd`;
+    default:
+      return `${day}th`;
+  }
+}
+
+/**
+ * How a repeat reads, in words.
+ *
+ * Null where the pattern cannot be stated: a weekly recurrence with no days, a
+ * monthly one naming a day outside 1–31, an every-n with a non-positive n.
+ * These are all constructible in the struct and none of them describes a real
+ * schedule, so the screen says nothing rather than "repeats on the 0th".
+ *
+ * A WEEKLY WITH NO DAYS IS NOT SILENTLY WEEKLY, even though the server treats
+ * it as such — `next_occurrence` falls back to `from + 1 week` for an empty set
+ * (src/memory/types.rs:3944-3947). That fallback is the server choosing a date
+ * anyway; printing "repeats weekly" over it would present a data defect as a
+ * schedule somebody set.
+ *
+ * Days are printed in the order given, not sorted. The order is what was
+ * stored, and reordering it would be this screen editing the record on its way
+ * to the reader.
+ */
+export function recurrenceLabel(recurrence: Recurrence): string | null {
+  switch (recurrence.type) {
+    case "daily":
+      return "repeats daily";
+    case "weekly": {
+      const days = recurrence.days.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6);
+      if (days.length === 0) return null;
+      if (days.length === 7) return "repeats daily";
+      return `repeats ${days.map((d) => WEEKDAYS[d]).join(", ")}`;
+    }
+    case "monthly":
+      if (!Number.isInteger(recurrence.day) || recurrence.day < 1 || recurrence.day > 31) {
+        return null;
+      }
+      return `repeats on the ${ordinal(recurrence.day)}`;
+    case "every_n_days":
+      if (!Number.isInteger(recurrence.n) || recurrence.n < 1) return null;
+      return recurrence.n === 1 ? "repeats daily" : `repeats every ${recurrence.n} days`;
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -293,27 +370,6 @@ export function settledReason(todo: TriageTodo): string | null {
  */
 export function truncation(shown: number, total: number): { total: number; truncated: boolean } {
   return { total: Math.max(total, shown), truncated: total > shown };
-}
-
-export function summarise(todos: Todo[], total: number, now: number): TaskSummary {
-  const prefixes = new Set<string>();
-  let urgent = 0;
-  let high = 0;
-  let overdue = 0;
-  for (const todo of todos) {
-    if (todo.project_prefix) prefixes.add(todo.project_prefix);
-    if (todo.priority === "urgent") urgent += 1;
-    if (todo.priority === "high") high += 1;
-    if (dueMeta(todo, now)?.overdue) overdue += 1;
-  }
-  return {
-    shown: todos.length,
-    ...truncation(todos.length, total),
-    urgent,
-    high,
-    overdue,
-    projects: prefixes.size,
-  };
 }
 
 /* ================================================================== *
@@ -740,9 +796,37 @@ export interface Board {
   open: number;
   underway: number;
   blocked: number;
+  /** Open work not yet picked up, and open work explicitly pushed back. Held
+   *  apart from `open` so the rail can show the ledger the list is grouped by
+   *  — including the buckets that are empty, which is the only way a reader on
+   *  a profile with one populated state can see that there are five. */
+  todo: number;
+  backlog: number;
   settled: number;
   done: number;
   cancelled: number;
+  /* ---- SCHEDULE ---- *
+   *
+   * Counted over OPEN work only. A settled task past its due date is not late;
+   * it is finished, and on this corpus the whole settled population predates
+   * today by months — folding it in would report "82 overdue" on a profile
+   * where nothing is outstanding at all.
+   */
+  /** Open tasks past `due_date`, by the server's own strict rule. */
+  overdue: number;
+  /** How late the latest of them is, in whole days, or null when none is. Days
+   *  between local midnights, matching `dueMeta` exactly rather than being a
+   *  second, slightly different lateness arithmetic. */
+  overdueDays: number | null;
+  /** Open tasks due today or inside the next three days — the same window
+   *  `dueMeta` gives its `warn` tone to, so the figure and the row agree. */
+  dueSoon: number;
+  /** Open tasks carrying a due date at all. The denominator that keeps
+   *  "0 overdue" from reading as "everything is on time" on a profile where
+   *  nothing has a date. */
+  dated: number;
+  /** Tasks of any status carrying a recurrence. Zero on every live profile. */
+  recurring: number;
   /** Lanes with at least one todo in hand. */
   projects: number;
   /** Todos that have ever changed state. Zero means nothing here has moved. */
@@ -757,15 +841,27 @@ export interface Board {
   to: number | null;
 }
 
-export function boardOf(todos: TriageTodo[], total: number, lanes: readonly Lane[]): Board {
+export function boardOf(
+  todos: TriageTodo[],
+  total: number,
+  lanes: readonly Lane[],
+  now: number,
+): Board {
   let open = 0;
   let underway = 0;
   let blocked = 0;
+  let todoCount = 0;
+  let backlog = 0;
   let done = 0;
   let cancelled = 0;
   let moved = 0;
   let dependencies = 0;
   let waiting = 0;
+  let overdue = 0;
+  let overdueDays: number | null = null;
+  let dueSoon = 0;
+  let dated = 0;
+  let recurring = 0;
   let from: number | null = null;
   let to: number | null = null;
 
@@ -775,8 +871,24 @@ export function boardOf(todos: TriageTodo[], total: number, lanes: readonly Lane
     else {
       open += 1;
       if (todo.status === "in_progress") underway += 1;
-      if (todo.status === "blocked") blocked += 1;
+      else if (todo.status === "blocked") blocked += 1;
+      else if (todo.status === "backlog") backlog += 1;
+      else todoCount += 1;
+
+      // Schedule is a question about outstanding work only.
+      const due = dueMeta(todo, now);
+      if (due) {
+        dated += 1;
+        if (due.overdue) {
+          overdue += 1;
+          const late = lateDays(todo, now);
+          if (late !== null && (overdueDays === null || late > overdueDays)) overdueDays = late;
+        } else if (due.tone === "warn") {
+          dueSoon += 1;
+        }
+      }
     }
+    if (todo.recurrence) recurring += 1;
     if (hasMoved(todo)) moved += 1;
     if ((todo.blocked_by ?? []).length > 0) dependencies += 1;
     if (todo.blocked_on?.trim()) waiting += 1;
@@ -794,9 +906,16 @@ export function boardOf(todos: TriageTodo[], total: number, lanes: readonly Lane
     open,
     underway,
     blocked,
+    todo: todoCount,
+    backlog,
     settled: done + cancelled,
     done,
     cancelled,
+    overdue,
+    overdueDays,
+    dueSoon,
+    dated,
+    recurring,
     projects: lanes.length,
     moved,
     dependencies,
@@ -849,6 +968,45 @@ export function axisOf(lanes: readonly Lane[], board: Board): Axis | null {
  *  otherwise place a mark outside the track. */
 export function positionOn(axis: Axis, at: number): number {
   return Math.min(1, Math.max(0, (at - axis.from) / axis.span));
+}
+
+/* ================================================================== *
+ * LATE WORK RISES, AND NOTHING ELSE MOVES
+ *
+ * A PARTITION, NOT A SORT, AND THE DIFFERENCE IS THE USER'S OWN ORDERING.
+ * `Todo.sort_order` is a MANUAL rank — the reorder endpoint exists for no other
+ * purpose (src/handlers/todos.rs, `POST /api/todos/{id}/reorder`) — and the
+ * list handler sorts by it first, then priority, then due date
+ * (todos.rs:1007-1012). Re-sorting the rows here by lateness would throw all
+ * three away and replace a considered order with a computed one, silently, for
+ * every profile that had ever dragged a row.
+ *
+ * So the late rows are lifted to the front and BOTH halves keep the order the
+ * server sent. A reader who arranged their list still recognises it; the thing
+ * that cannot wait is simply at the top of it.
+ *
+ * Applied inside a status group rather than across the whole list, because the
+ * grouping by state is the spine of this screen and a band that cut across it
+ * would put a late task and an underway task in the same block while their
+ * headings said otherwise.
+ * ================================================================== */
+
+export interface OverduePartition<T> {
+  overdue: T[];
+  rest: T[];
+}
+
+export function partitionOverdue<T extends Todo>(
+  todos: readonly T[],
+  now: number,
+): OverduePartition<T> {
+  const overdue: T[] = [];
+  const rest: T[] = [];
+  for (const todo of todos) {
+    if (dueMeta(todo, now)?.overdue) overdue.push(todo);
+    else rest.push(todo);
+  }
+  return { overdue, rest };
 }
 
 /* ================================================================== *
