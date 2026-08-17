@@ -99,9 +99,24 @@ pub struct TodoStore {
     ///
     /// Process-local is sufficient rather than a shortcut: RocksDB holds an
     /// exclusive file lock, so one process has this DB open and every todo
-    /// writer goes through this struct. NOT reentrant — the helpers called
-    /// while it is held (`get_todo`, `update_todo`, `settle_todo`) must not
-    /// take it again.
+    /// writer goes through this struct. NOT reentrant, so each method that both
+    /// takes the lock and is reachable from a method that already holds it is
+    /// split in two: a `pub` wrapper that locks, and a private `_locked` inner
+    /// the lock-holders call (`update_todo`/`update_todo_locked`,
+    /// `settle_todo`/`settle_todo_locked`). `get_todo`, `store_todo` and the
+    /// index helpers never take it and are safe from either side.
+    ///
+    /// # What this lock does NOT cover
+    ///
+    /// `update_todo`, `settle_todo` and `store_todo` are handed a whole record
+    /// the CALLER composed. Locking them serializes the write and keeps a
+    /// record and its indices consistent, but the caller's own read happened
+    /// outside the lock, so a concurrent commit made after that read is still
+    /// overwritten. `PUT /api/todos/{id}/update` is exactly this shape — it
+    /// reads the todo, awaits an embedding, then writes — and closing it needs
+    /// the mutation expressed as a closure applied under the lock
+    /// (`MemoryStorage::modify`'s shape), not a lock added here. The eight
+    /// methods above are immune because their read is INSIDE the lock.
     mutation_mutex: parking_lot::Mutex<()>,
 }
 
@@ -622,8 +637,26 @@ impl TodoStore {
             .find(|t| t.external_id.as_deref() == Some(external_id)))
     }
 
-    /// Update a todo
+    /// Update a todo.
+    ///
+    /// Takes `mutation_mutex`: the body reads the stored record to drop its old
+    /// indices and then writes, so without the lock that pair interleaves with
+    /// the eight locked writers and leaves the indices describing a record that
+    /// was never stored.
+    ///
+    /// This serializes the WRITE, not the caller's read. A caller that read a
+    /// todo earlier, changed a field and passes the whole record here still
+    /// overwrites anything committed in between — the snapshot is stale before
+    /// this function is entered. The lock cannot fix that; only reading inside
+    /// the lock can, which is what the eight methods above do.
     pub fn update_todo(&self, todo: &Todo) -> Result<()> {
+        let _lock = self.mutation_mutex.lock();
+        self.update_todo_locked(todo)
+    }
+
+    /// [`Self::update_todo`] for callers already holding `mutation_mutex`.
+    /// The mutex is NOT reentrant, so taking it again here would deadlock.
+    fn update_todo_locked(&self, todo: &Todo) -> Result<()> {
         // Get old todo to remove old indices
         if let Some(old_todo) = self.get_todo(&todo.user_id, &todo.id)? {
             self.remove_todo_indices(&old_todo)?;
@@ -632,8 +665,15 @@ impl TodoStore {
         self.store_todo(todo).map(|_| ())
     }
 
-    /// Delete a todo
+    /// Delete a todo.
+    ///
+    /// Takes `mutation_mutex`. The read and the deletes have to be one step:
+    /// otherwise a comment writer that read this todo just before the delete
+    /// re-stores it afterwards, resurrecting both the record and the indices
+    /// this call removed. Its only in-crate caller, `delete_project`, holds no
+    /// lock, so there is no reentrancy here.
     pub fn delete_todo(&self, user_id: &str, todo_id: &TodoId) -> Result<bool> {
+        let _lock = self.mutation_mutex.lock();
         let key = format!("{}:{}", user_id, todo_id.0);
 
         if let Some(todo) = self.get_todo(user_id, todo_id)? {
@@ -677,7 +717,7 @@ impl TodoStore {
         match self.get_todo(user_id, todo_id)? {
             Some(mut todo) => {
                 todo.complete();
-                Ok(Some(self.settle_todo(&todo)?))
+                Ok(Some(self.settle_todo_locked(&todo)?))
             }
             None => Ok(None),
         }
@@ -695,7 +735,21 @@ impl TodoStore {
     ///
     /// `todo` must already carry its settled status and stamp — use
     /// [`Todo::apply_status`] or [`Todo::complete`] before calling.
+    ///
+    /// Takes `mutation_mutex` for the same reason [`Self::update_todo`] does:
+    /// the update door reaches settlement through here directly, so without the
+    /// lock the read-then-write below would interleave with the locked writers
+    /// while `/complete` — which arrives through `complete_todo` — is
+    /// serialized. Same caveat too: this serializes the write, not the caller's
+    /// earlier read of `todo`.
     pub fn settle_todo(&self, todo: &Todo) -> Result<(Todo, Option<Todo>)> {
+        let _lock = self.mutation_mutex.lock();
+        self.settle_todo_locked(todo)
+    }
+
+    /// [`Self::settle_todo`] for callers already holding `mutation_mutex`.
+    /// The mutex is NOT reentrant, so taking it again here would deadlock.
+    fn settle_todo_locked(&self, todo: &Todo) -> Result<(Todo, Option<Todo>)> {
         if let Some(previous) = self.get_todo(&todo.user_id, &todo.id)? {
             self.remove_todo_indices(&previous)?;
         }
@@ -735,7 +789,7 @@ impl TodoStore {
             }
             let comment_clone = comment.clone();
             todo.comments.push(comment);
-            self.update_todo(&todo)?;
+            self.update_todo_locked(&todo)?;
 
             tracing::debug!(
                 todo_id = %todo_id,
@@ -754,7 +808,7 @@ impl TodoStore {
         let _lock = self.mutation_mutex.lock();
         if let Some(mut todo) = self.get_todo(user_id, todo_id)? {
             todo.add_activity(content);
-            self.update_todo(&todo)?;
+            self.update_todo_locked(&todo)?;
             Ok(true)
         } else {
             Ok(false)
@@ -775,7 +829,7 @@ impl TodoStore {
                 comment.content = content;
                 comment.updated_at = Some(chrono::Utc::now());
                 let comment_clone = comment.clone();
-                self.update_todo(&todo)?;
+                self.update_todo_locked(&todo)?;
                 Ok(Some(comment_clone))
             } else {
                 Ok(None)
@@ -797,7 +851,7 @@ impl TodoStore {
             let initial_len = todo.comments.len();
             todo.comments.retain(|c| c.id != *comment_id);
             if todo.comments.len() < initial_len {
-                self.update_todo(&todo)?;
+                self.update_todo_locked(&todo)?;
                 Ok(true)
             } else {
                 Ok(false)
@@ -834,7 +888,7 @@ impl TodoStore {
         if let Some(mut todo) = self.get_todo(user_id, todo_id)? {
             if !todo.has_related_memory(&memory_id) {
                 todo.add_related_memory(memory_id);
-                self.update_todo(&todo)?;
+                self.update_todo_locked(&todo)?;
             }
             Ok(true)
         } else {
@@ -862,7 +916,7 @@ impl TodoStore {
                 continue;
             }
             todo.remove_related_memory(memory_id);
-            self.update_todo(&todo)?;
+            self.update_todo_locked(&todo)?;
             changed += 1;
         }
         if changed > 0 {
@@ -1038,8 +1092,8 @@ impl TodoStore {
         current.updated_at = Utc::now();
         adjacent.updated_at = Utc::now();
 
-        self.update_todo(&current)?;
-        self.update_todo(&adjacent)?;
+        self.update_todo_locked(&current)?;
+        self.update_todo_locked(&adjacent)?;
 
         Ok(Some(current))
     }
