@@ -716,13 +716,62 @@ impl LegacyMemoryV2 {
 ///
 /// `decode_raw_compat` appends these one at a time, so a record missing any
 /// suffix of these fields decodes (postcard has no `#[serde(default)]` EOF
-/// tolerance). Keep in sync with any new trailing field — and note that this
-/// mechanism ONLY works for fields appended at the end of `MemoryFlat`. A field
-/// added to `Experience` instead lands mid-payload, where an old record decodes
-/// to silently wrong values rather than failing; that is why
-/// `Experience::toponyms` is `#[serde(skip)]` and carried at the `MemoryFlat`
-/// tail.
+/// tolerance). Keep in sync with any new trailing field — appending a field to
+/// `MemoryFlat` means appending its postcard default here, in the SAME ORDER as
+/// the struct declares it. The order is a contract: `toponyms` then
+/// `declared_entities`, and a third tail field (`origin`, on `fix/origin-field`)
+/// extends this to `[0x00, 0x00, 0x00]` with `origin` last, matching its
+/// position in `MemoryFlat`. Bytes appended in the wrong order default the wrong
+/// fields.
+///
+/// Note that this mechanism ONLY works for fields appended at the end of
+/// `MemoryFlat`. A field added to `Experience` instead lands mid-payload, where
+/// an old record decodes to silently wrong values rather than failing; that is
+/// why `Experience::toponyms` is `#[serde(skip)]` and carried at the
+/// `MemoryFlat` tail. `NerEntityRecord::fine_label` is what happens when that
+/// rule is broken — see [`decode_postcard_memory`].
 const MEMORY_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00];
+
+/// Decode a SHO v2 (postcard) payload, tolerating both compatible-change classes
+/// the stored format has accumulated.
+///
+/// 1. **Missing tail fields** — repaired by appending `MEMORY_DEFAULT_SUFFIX`
+///    one default at a time (see [`crate::serialization::decode_raw_compat`]).
+/// 2. **A mid-payload field added to a nested struct** — NOT repairable by any
+///    suffix, because the missing bytes are in the middle. `NerEntityRecord`
+///    gained `fine_label` in July 2026, and `Experience::ner_entities` sits
+///    ahead of `cooccurrence_pairs`, `importance_override` and the whole of
+///    `MemoryFlat` after `experience`. Every memory written before that commit
+///    with a non-empty `ner_entities` therefore desynchronises the decoder by
+///    one byte per NER record. On a live 19,394-record store that is ~5% of
+///    memories, surfacing as `Found an Option discriminant that wasn't 0 or 1`,
+///    `Tried to parse invalid utf-8`, or a spurious end-of-buffer — whichever
+///    the shifted bytes happened to hit.
+///
+/// The second class is recovered by re-running the decode under
+/// [`NerWireGeneration::PreFineLabel`]. The retry is attempted only after the
+/// current layout has failed, so a record written today never pays for it, and
+/// the error reported on total failure is the CURRENT-format one — the honest
+/// answer to "why can this store not be read by this build".
+///
+/// A record recovered through the retry is reported as needing migration, so
+/// [`MemoryStorage::get`] rewrites it in the current format and no later read
+/// has to guess again.
+fn decode_postcard_memory(payload: &[u8]) -> Result<(Memory, bool)> {
+    let current_err = match crate::serialization::decode_raw_compat::<Memory>(
+        payload,
+        MEMORY_DEFAULT_SUFFIX,
+    ) {
+        Ok((memory, defaulted)) => return Ok((memory, defaulted)),
+        Err(e) => e,
+    };
+
+    let _generation = NerWireGeneration::PreFineLabel.enter();
+    match crate::serialization::decode_raw_compat::<Memory>(payload, MEMORY_DEFAULT_SUFFIX) {
+        Ok((memory, _)) => Ok((memory, true)),
+        Err(_) => Err(current_err),
+    }
+}
 
 fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
     use crate::serialization::{SHO_VERSION_BINCODE2, SHO_VERSION_POSTCARD};
@@ -732,10 +781,10 @@ fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
         match version {
             SHO_VERSION_POSTCARD => {
                 // Current format: postcard, tolerating records written before
-                // the trailing fields listed in MEMORY_DEFAULT_SUFFIX existed.
-                let (memory, defaulted): (Memory, bool) =
-                    crate::serialization::decode_raw_compat(payload, MEMORY_DEFAULT_SUFFIX)
-                        .map_err(|e| anyhow!("SHO v2 postcard decode failed: {e}"))?;
+                // the trailing fields listed in MEMORY_DEFAULT_SUFFIX existed,
+                // and before `NerEntityRecord::fine_label` existed.
+                let (memory, defaulted) = decode_postcard_memory(payload)
+                    .map_err(|e| anyhow!("SHO v2 postcard decode failed: {e}"))?;
                 // `defaulted` marks the record for rewrite in the current schema,
                 // the same signal the legacy-format branches return.
                 Ok((memory, defaulted))

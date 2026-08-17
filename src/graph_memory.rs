@@ -196,7 +196,35 @@ fn default_salience() -> f32 {
 ///
 /// New variants are additive only — never remove existing variants to
 /// maintain backward compatibility with MessagePack-serialized data.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+///
+/// # Wire format: variants are addressed by DECLARATION INDEX
+///
+/// Postcard encodes an enum as the varint index of its variant in declaration
+/// order, so "additive only" is not enough — a variant may only be appended
+/// AFTER every variant that already exists. Inserting one anywhere else
+/// renumbers every variant below it, and every stored record that used one of
+/// them now names a different variant.
+///
+/// That happened here. `c365eef3` (2026-07-11, "extend coarse EntityLabel to
+/// the 18-type schema rollup") inserted `Norp` … `Time` *above* `Other(String)`,
+/// moving `Other` from index 23 to index 35. Stored nodes written before it
+/// encode `Other("MISC")` as `0x17` + the string; read back under the new
+/// declaration, `0x17` is `Norp` — a UNIT variant — so the string's length
+/// prefix and bytes are consumed by whatever field follows (`created_at`, whose
+/// chrono deserializer then reports `Serde Deserialization Error` on "MISC"),
+/// and the rest of the node is garbage. On a live 9,215-node graph that is
+/// **6,821 nodes (74%) unreadable**.
+///
+/// `RelationType` got this right: `Precedes` was appended AFTER
+/// `Custom(String)` precisely so `Custom`'s index could not move, and there is a
+/// test pinning it to hand-derived bytes. Do the same here — append below
+/// `Other`, never above it.
+///
+/// The 07-11 renumbering is not undone (that would break every node written
+/// since, which the same reasoning protects). Instead
+/// [`EntityLabelWireGeneration`] lets the decoder retry a node under the
+/// pre-07-11 numbering.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
 pub enum EntityLabel {
     Person,
     Organization,
@@ -261,6 +289,224 @@ pub enum EntityLabel {
     /// Times of day / durations, distinct from calendar `Date` (schema coarse: `time`)
     Time,
     Other(String),
+    // APPEND NEW VARIANTS BELOW THIS LINE, never above `Other` — see the
+    // wire-format note on this enum. `Other`'s index has already moved once
+    // (23 → 35) and cost 74% of a live graph.
+}
+
+/// Which numbering of [`EntityLabel`]'s variants the current thread is decoding.
+///
+/// See the wire-format note on [`EntityLabel`] for why two numberings exist. The
+/// mechanism mirrors [`crate::memory::types::NerWireGeneration`]: a thread-local
+/// set only by [`decode_entity_node`], for the duration of one synchronous
+/// `postcard::from_bytes` call, affecting deserialization only. Writes are
+/// always current-generation, so a node read through the legacy path and
+/// rewritten comes back in today's numbering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntityLabelWireGeneration {
+    /// Today's declaration order: `Other(String)` at index 35.
+    Current,
+    /// The order written before `c365eef3` (2026-07-11): the first 23 variants
+    /// unchanged, `Other(String)` at index 23, and nothing above it.
+    PreSchemaRollup,
+}
+
+thread_local! {
+    static ENTITY_LABEL_WIRE_GENERATION: std::cell::Cell<EntityLabelWireGeneration> =
+        const { std::cell::Cell::new(EntityLabelWireGeneration::Current) };
+}
+
+/// Restores the previous [`EntityLabelWireGeneration`] when dropped.
+#[must_use = "the generation is restored when this guard drops, so it must be held \
+              for the duration of the decode"]
+pub struct EntityLabelWireGenerationGuard(EntityLabelWireGeneration);
+
+impl EntityLabelWireGeneration {
+    /// Decode `EntityLabel` under this numbering until the returned guard drops.
+    pub fn enter(self) -> EntityLabelWireGenerationGuard {
+        let previous = ENTITY_LABEL_WIRE_GENERATION.with(|g| g.replace(self));
+        EntityLabelWireGenerationGuard(previous)
+    }
+
+    /// The numbering the current thread is decoding under.
+    pub fn current() -> Self {
+        ENTITY_LABEL_WIRE_GENERATION.with(|g| g.get())
+    }
+}
+
+impl Drop for EntityLabelWireGenerationGuard {
+    fn drop(&mut self) {
+        ENTITY_LABEL_WIRE_GENERATION.with(|g| g.set(self.0));
+    }
+}
+
+/// `EntityLabel` as declared before `c365eef3` renumbered it.
+///
+/// Only the ORDER matters — this is what postcard reads indices against. The
+/// twin is spelled out rather than generated so that a future edit to
+/// `EntityLabel` cannot silently change what "the old numbering" means.
+#[derive(Deserialize)]
+#[serde(rename = "EntityLabel")]
+enum EntityLabelPreSchemaRollup {
+    Person,
+    Organization,
+    Location,
+    Technology,
+    Concept,
+    Event,
+    Date,
+    Product,
+    Skill,
+    Keyword,
+    Project,
+    Task,
+    Document,
+    Repository,
+    Service,
+    Database,
+    Metric,
+    Configuration,
+    Environment,
+    Pipeline,
+    Team,
+    Role,
+    Module,
+    Other(String),
+}
+
+impl From<EntityLabelPreSchemaRollup> for EntityLabel {
+    fn from(legacy: EntityLabelPreSchemaRollup) -> Self {
+        use EntityLabelPreSchemaRollup as L;
+        match legacy {
+            L::Person => Self::Person,
+            L::Organization => Self::Organization,
+            L::Location => Self::Location,
+            L::Technology => Self::Technology,
+            L::Concept => Self::Concept,
+            L::Event => Self::Event,
+            L::Date => Self::Date,
+            L::Product => Self::Product,
+            L::Skill => Self::Skill,
+            L::Keyword => Self::Keyword,
+            L::Project => Self::Project,
+            L::Task => Self::Task,
+            L::Document => Self::Document,
+            L::Repository => Self::Repository,
+            L::Service => Self::Service,
+            L::Database => Self::Database,
+            L::Metric => Self::Metric,
+            L::Configuration => Self::Configuration,
+            L::Environment => Self::Environment,
+            L::Pipeline => Self::Pipeline,
+            L::Team => Self::Team,
+            L::Role => Self::Role,
+            L::Module => Self::Module,
+            L::Other(s) => Self::Other(s),
+        }
+    }
+}
+
+/// `EntityLabel` as declared today. Deriving on a twin keeps the current path
+/// byte-identical to the derived impl it replaced.
+#[derive(Deserialize)]
+#[serde(rename = "EntityLabel")]
+enum EntityLabelCurrent {
+    Person,
+    Organization,
+    Location,
+    Technology,
+    Concept,
+    Event,
+    Date,
+    Product,
+    Skill,
+    Keyword,
+    Project,
+    Task,
+    Document,
+    Repository,
+    Service,
+    Database,
+    Metric,
+    Configuration,
+    Environment,
+    Pipeline,
+    Team,
+    Role,
+    Module,
+    Norp,
+    Gpe,
+    Facility,
+    Vehicle,
+    Weapon,
+    Work,
+    Law,
+    Title,
+    Cyber,
+    Money,
+    Quantity,
+    Time,
+    Other(String),
+}
+
+impl From<EntityLabelCurrent> for EntityLabel {
+    fn from(current: EntityLabelCurrent) -> Self {
+        use EntityLabelCurrent as L;
+        match current {
+            L::Person => Self::Person,
+            L::Organization => Self::Organization,
+            L::Location => Self::Location,
+            L::Technology => Self::Technology,
+            L::Concept => Self::Concept,
+            L::Event => Self::Event,
+            L::Date => Self::Date,
+            L::Product => Self::Product,
+            L::Skill => Self::Skill,
+            L::Keyword => Self::Keyword,
+            L::Project => Self::Project,
+            L::Task => Self::Task,
+            L::Document => Self::Document,
+            L::Repository => Self::Repository,
+            L::Service => Self::Service,
+            L::Database => Self::Database,
+            L::Metric => Self::Metric,
+            L::Configuration => Self::Configuration,
+            L::Environment => Self::Environment,
+            L::Pipeline => Self::Pipeline,
+            L::Team => Self::Team,
+            L::Role => Self::Role,
+            L::Module => Self::Module,
+            L::Norp => Self::Norp,
+            L::Gpe => Self::Gpe,
+            L::Facility => Self::Facility,
+            L::Vehicle => Self::Vehicle,
+            L::Weapon => Self::Weapon,
+            L::Work => Self::Work,
+            L::Law => Self::Law,
+            L::Title => Self::Title,
+            L::Cyber => Self::Cyber,
+            L::Money => Self::Money,
+            L::Quantity => Self::Quantity,
+            L::Time => Self::Time,
+            L::Other(s) => Self::Other(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EntityLabel {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match EntityLabelWireGeneration::current() {
+            EntityLabelWireGeneration::Current => {
+                EntityLabelCurrent::deserialize(deserializer).map(Into::into)
+            }
+            EntityLabelWireGeneration::PreSchemaRollup => {
+                EntityLabelPreSchemaRollup::deserialize(deserializer).map(Into::into)
+            }
+        }
+    }
 }
 
 impl EntityLabel {
@@ -1199,10 +1445,39 @@ fn kb_identities_permit_merge(canonical: Option<&str>, member: Option<&str>) -> 
     }
 }
 
-/// Decode a stored `EntityNode`, tolerating legacy records written before trailing
-/// fields (e.g. `selectivity`, `fine_type`) existed. See [`crate::serialization::try_decode_compat`].
+/// Decode a stored `EntityNode`, tolerating both compatible-change classes the
+/// stored format has accumulated.
+///
+/// 1. **Missing trailing fields** (`selectivity`, `fine_type`, `kb_id`) —
+///    repaired by [`ENTITY_NODE_DEFAULT_SUFFIX`] via
+///    [`crate::serialization::try_decode_compat`].
+/// 2. **`EntityLabel`'s renumbered variants** — a node whose `labels` carry
+///    `Other(String)` written before 2026-07-11 encodes it at index 23, which
+///    today names the unit variant `Norp`. No suffix can repair that: the bytes
+///    are not missing, they are being read as the wrong field. See the
+///    wire-format note on [`EntityLabel`].
+///
+/// The second class is recovered by retrying under
+/// [`EntityLabelWireGeneration::PreSchemaRollup`]. The retry runs only after the
+/// current numbering has failed, so a node written today never pays for it, and
+/// the error surfaced on total failure is the current-numbering one.
+///
+/// A node recovered through the retry reports `needs_migration = true`, so
+/// callers that rewrite on migration put it back in today's numbering.
 fn decode_entity_node(data: &[u8]) -> Result<(EntityNode, bool)> {
-    crate::serialization::try_decode_compat::<EntityNode>(data, ENTITY_NODE_DEFAULT_SUFFIX)
+    let current_err = match crate::serialization::try_decode_compat::<EntityNode>(
+        data,
+        ENTITY_NODE_DEFAULT_SUFFIX,
+    ) {
+        Ok(decoded) => return Ok(decoded),
+        Err(e) => e,
+    };
+
+    let _generation = EntityLabelWireGeneration::PreSchemaRollup.enter();
+    match crate::serialization::try_decode_compat::<EntityNode>(data, ENTITY_NODE_DEFAULT_SUFFIX) {
+        Ok((entity, _)) => Ok((entity, true)),
+        Err(_) => Err(current_err),
+    }
 }
 
 fn default_last_activated() -> DateTime<Utc> {

@@ -607,7 +607,21 @@ pub enum RelationshipType {
 /// Structured NER entity record preserving type classification and confidence.
 /// Used to carry NER results from handler through to graph insertion
 /// without losing type information (Person, Organization, Location, Misc).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+///
+/// # Wire format
+///
+/// `Deserialize` is hand-written rather than derived because this struct sits
+/// MID-PAYLOAD in the stored `Memory` record (`Experience::ner_entities` is
+/// followed by `cooccurrence_pairs`, `importance_override`, and then the whole
+/// of `MemoryFlat` after `experience`). Postcard is positional, so the
+/// [`fine_label`](Self::fine_label) field appended in July 2026 shifted every
+/// byte after each NER record in every memory written before it — the exact
+/// failure mode `Experience::toponyms`' doc comment warns about, except that
+/// the tail-suffix repair in `MEMORY_DEFAULT_SUFFIX` structurally cannot fix it
+/// (a suffix repairs a missing TAIL, not a hole in the middle).
+///
+/// See [`NerWireGeneration`] for how a record written before that field is read.
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct NerEntityRecord {
     pub text: String,
     /// NER type: "PER", "ORG", "LOC", "MISC"
@@ -624,6 +638,135 @@ pub struct NerEntityRecord {
     /// and the precise primary label survive. `None` on the rule-based path.
     #[serde(default)]
     pub fine_label: Option<String>,
+}
+
+/// Which generation of the [`NerEntityRecord`] wire format the current thread is
+/// decoding.
+///
+/// A positional format has no way to discover, from the bytes alone, that a
+/// nested struct gained a field. The only recoverable signal is that decoding
+/// the whole record under the current layout FAILS — so the decoder retries
+/// under the older layout, and this flag is how the outer decode tells the inner
+/// `Deserialize` impl which layout to expect.
+///
+/// A thread-local rather than a parameter because the choice has to reach a
+/// `Deserialize` impl nested ~4 levels inside a derived one, and serde offers no
+/// channel for that. It is deliberately narrow:
+///
+/// * only [`crate::memory::storage`]'s decode path sets it, via
+///   [`NerWireGeneration::enter`], which restores the previous value on drop;
+/// * the scope is a single synchronous `postcard::from_bytes` call, so it can
+///   never be held across an `await` or observed by another request;
+/// * it affects DEserialization only. Writing is always current-generation, so a
+///   record read through the legacy path and rewritten comes back in the current
+///   format (see `needs_migration` in `deserialize_memory`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NerWireGeneration {
+    /// `NerEntityRecord` as declared today, `fine_label` included.
+    Current,
+    /// The layout written before `fine_label` existed (July 2026): five fields,
+    /// ending at `end_char`. Reading one of these under [`Current`] consumes one
+    /// byte too many per record and desynchronises the rest of the payload.
+    ///
+    /// [`Current`]: NerWireGeneration::Current
+    PreFineLabel,
+}
+
+thread_local! {
+    static NER_WIRE_GENERATION: std::cell::Cell<NerWireGeneration> =
+        const { std::cell::Cell::new(NerWireGeneration::Current) };
+}
+
+/// Restores the previous [`NerWireGeneration`] when dropped.
+///
+/// Held by value for the duration of one decode attempt; see
+/// [`NerWireGeneration::enter`].
+#[must_use = "the generation is restored when this guard drops, so it must be held \
+              for the duration of the decode"]
+pub struct NerWireGenerationGuard(NerWireGeneration);
+
+impl NerWireGeneration {
+    /// Decode `NerEntityRecord` under this generation until the returned guard
+    /// drops.
+    pub fn enter(self) -> NerWireGenerationGuard {
+        let previous = NER_WIRE_GENERATION.with(|g| g.replace(self));
+        NerWireGenerationGuard(previous)
+    }
+
+    /// The generation the current thread is decoding under.
+    pub fn current() -> Self {
+        NER_WIRE_GENERATION.with(|g| g.get())
+    }
+}
+
+impl Drop for NerWireGenerationGuard {
+    fn drop(&mut self) {
+        NER_WIRE_GENERATION.with(|g| g.set(self.0));
+    }
+}
+
+/// `NerEntityRecord` exactly as it is declared today. Deriving the impl on a
+/// twin keeps the current path byte-identical to the derived one it replaced.
+#[derive(Deserialize)]
+#[serde(rename = "NerEntityRecord")]
+struct NerEntityRecordCurrent {
+    text: String,
+    entity_type: String,
+    confidence: f32,
+    #[serde(default)]
+    start_char: Option<usize>,
+    #[serde(default)]
+    end_char: Option<usize>,
+    #[serde(default)]
+    fine_label: Option<String>,
+}
+
+/// `NerEntityRecord` as written before `fine_label` existed.
+#[derive(Deserialize)]
+#[serde(rename = "NerEntityRecord")]
+struct NerEntityRecordPreFineLabel {
+    text: String,
+    entity_type: String,
+    confidence: f32,
+    #[serde(default)]
+    start_char: Option<usize>,
+    #[serde(default)]
+    end_char: Option<usize>,
+}
+
+impl<'de> Deserialize<'de> for NerEntityRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match NerWireGeneration::current() {
+            NerWireGeneration::Current => {
+                let r = NerEntityRecordCurrent::deserialize(deserializer)?;
+                Ok(Self {
+                    text: r.text,
+                    entity_type: r.entity_type,
+                    confidence: r.confidence,
+                    start_char: r.start_char,
+                    end_char: r.end_char,
+                    fine_label: r.fine_label,
+                })
+            }
+            NerWireGeneration::PreFineLabel => {
+                let r = NerEntityRecordPreFineLabel::deserialize(deserializer)?;
+                Ok(Self {
+                    text: r.text,
+                    entity_type: r.entity_type,
+                    confidence: r.confidence,
+                    start_char: r.start_char,
+                    end_char: r.end_char,
+                    // The record predates the field. `None` is what it means:
+                    // no fine label was ever recorded, and inventing one would
+                    // give the graph a schema leaf nothing ever asserted.
+                    fine_label: None,
+                })
+            }
+        }
+    }
 }
 
 /// Raw per-episode surprise components, computed at ingest from graph
