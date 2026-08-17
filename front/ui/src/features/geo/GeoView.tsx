@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { Reachability } from "@/lib/api";
+import { outageOf, type Reachability } from "@/lib/api";
 import { corpusToRecallMemory, useCorpus } from "@/lib/api/corpus";
 import { EmptyState } from "@/components/ui/empty-state";
 import { InfoHint } from "@/components/ui/info-hint";
@@ -83,15 +83,10 @@ export function GeoView({ reach }: { reach: Reachability }) {
   const located = plotted.filter((m) => m.experience.geo_location);
   const matched = results.filter((m) => m.experience.geo_location);
 
-  if (reach.state !== "online") {
-    return (
-      <EmptyState
-        size="page"
-        title="Not connected"
-        body="The map draws from memory, which needs the server running."
-      />
-    );
-  }
+  // A REJECTED KEY IS NOT A STOPPED SERVER — see `outageOf`. The sentence
+  // below is the offline case only.
+  const outage = outageOf(reach, "The map draws from memory, which needs the server running.");
+  if (outage) return <EmptyState size="page" {...outage} />;
 
   if (profile === null) {
     return (

@@ -47,6 +47,78 @@ export type Reachability =
   | { state: "unauthorized"; status: number }
   | { state: "offline"; detail: string };
 
+/* ------------------------------------------------------------------ *
+ * WHY A SCREEN IS EMPTY
+ *
+ * THE PROBE ALREADY TELLS THESE APART AND THE SCREENS DID NOT. Every view
+ * gated on `reach.state !== "online"` and then said one thing — "…once the
+ * memory server is running" — which is the OFFLINE sentence printed over the
+ * UNAUTHORIZED state as well. Verified in the browser: with a wrong key the
+ * status strip correctly read `Key rejected — 401 — set SHODH_API_KEY to the
+ * server's key` while the body of the same screen told the reader to start a
+ * server that was already running. Two diagnoses on one screen, and the larger
+ * one was wrong.
+ *
+ * That collapse is exactly what `probeBackend` exists to prevent: it asks
+ * `/api/users` rather than `/health` precisely so that a 401 proves the key is
+ * wrong, and the distinction was being thrown away one branch later in five
+ * views at once. So the discrimination lives HERE, next to the union that
+ * carries it, and the views spend a sentence rather than a branch.
+ *
+ * THE WORDING IS THE STATUS STRIP'S. One product, one account of its
+ * connection: `Key rejected` and `Not connected` are the strip's own states,
+ * so a reader who looks up at the corner and down at the stage reads the same
+ * verdict twice rather than two competing ones.
+ *
+ * CONNECTED-AND-GENUINELY-EMPTY IS NOT THIS FUNCTION'S CASE, and deliberately.
+ * "This profile holds nothing" is a claim about a corpus, which only the view
+ * that queried it can make; it returns null here so that the view's own empty
+ * state — the one that can say what would put data there — is reached.
+ * ------------------------------------------------------------------ */
+
+export interface Outage {
+  /** The state, in the status strip's words. */
+  title: string;
+  /** What it means for this screen, in one sentence. */
+  body: string;
+  /** The evidence for the diagnosis and the fix, behind the info affordance. */
+  more: string;
+}
+
+/**
+ * The account a screen should give of itself when it cannot render.
+ *
+ * `absent` is the caller's own one-sentence description of what would be on
+ * the screen if the server were reachable — the sentence each view already
+ * wrote. It is used for the offline case ONLY, because it is only true there:
+ * over a rejected key it describes a server that is running fine.
+ *
+ * Null when the backend is reachable and authorized, which is the caller's
+ * signal to carry on and decide for itself whether it has data.
+ */
+export function outageOf(reach: Reachability, absent: string): Outage | null {
+  if (reach.state === "online") return null;
+
+  if (reach.state === "unauthorized") {
+    return {
+      title: "Key rejected",
+      // The server IS running, and saying so is the whole correction: it stops
+      // a reader from restarting a healthy backend to fix an authentication
+      // problem.
+      body: `The memory server is running and answered ${reach.status}. It did not accept this key, so nothing on this screen could be read.`,
+      more:
+        "Set SHODH_API_KEY to the same key the shodh backend was started with, and reload. " +
+        "Nothing is wrong with the profile or with what it holds — the request never got past authentication, so no part of this screen has been read yet.",
+    };
+  }
+
+  return {
+    title: "Not connected",
+    body: absent,
+    more: `The server did not answer: ${reach.detail}. Until it does, this screen has nothing to read and is not reporting an empty profile.`,
+  };
+}
+
 export async function probeBackend(signal?: AbortSignal): Promise<Reachability> {
   try {
     const profiles = await api.get<string[]>("/api/users", signal);

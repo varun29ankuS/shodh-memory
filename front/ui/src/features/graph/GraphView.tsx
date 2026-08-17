@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ChevronRight } from "lucide-react";
-import type { Reachability } from "@/lib/api";
+import { outageOf, type Reachability } from "@/lib/api";
 import { EmptyState } from "@/components/ui/empty-state";
 import { InfoHint } from "@/components/ui/info-hint";
 import { Meta, Stat } from "@/components/ui/meta";
@@ -132,15 +132,13 @@ export function GraphView({ reach }: { reach: Reachability }) {
      aggregate across many tiers and has no tier to count. */
   const tierCounts = stats.tierCounts;
 
-  if (reach.state !== "online") {
-    return (
-      <EmptyState
-        size="page"
-        title="Not connected"
-        body="The graph is built from the entity store, which needs the server running."
-      />
-    );
-  }
+  // A REJECTED KEY IS NOT A STOPPED SERVER — see `outageOf`. The sentence
+  // below is the offline case only.
+  const outage = outageOf(
+    reach,
+    "The graph is built from the entity store, which needs the server running.",
+  );
+  if (outage) return <EmptyState size="page" {...outage} />;
 
   if (profile === null) {
     return (

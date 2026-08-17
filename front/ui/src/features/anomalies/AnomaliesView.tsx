@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { MapPin, Ruler, Unlink, type LucideIcon } from "lucide-react";
-import { ApiError, NetworkError, type Reachability } from "@/lib/api";
+import { ApiError, NetworkError, outageOf, type Reachability } from "@/lib/api";
 import { useCorpus } from "@/lib/api/corpus";
 import { useSession } from "@/stores/session";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -415,15 +415,13 @@ export function AnomaliesView({ reach }: { reach: Reachability }) {
     [lenses],
   );
 
-  if (reach.state !== "online") {
-    return (
-      <EmptyState
-        size="page"
-        title="Not connected"
-        body="These measures read this profile's memory, which needs the server running."
-      />
-    );
-  }
+  // A REJECTED KEY IS NOT A STOPPED SERVER — see `outageOf`. The sentence
+  // below is the offline case only.
+  const outage = outageOf(
+    reach,
+    "These measures read this profile's memory, which needs the server running.",
+  );
+  if (outage) return <EmptyState size="page" {...outage} />;
 
   if (profile === null) {
     return (

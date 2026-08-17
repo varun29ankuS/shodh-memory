@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Search } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { ApiError, NetworkError, type Reachability } from "@/lib/api";
+import { ApiError, NetworkError, outageOf, type Reachability } from "@/lib/api";
 import { corpusToRecallMemory, useCorpus, type CorpusMemory } from "@/lib/api/corpus";
 import { EmptyState } from "@/components/ui/empty-state";
 import { InfoHint } from "@/components/ui/info-hint";
@@ -214,14 +214,10 @@ function ResultPane({ reach }: { reach: Reachability }) {
     [corpus.data],
   );
 
-  if (reach.state !== "online") {
-    return (
-      <EmptyState
-        title="Not connected"
-        body="Results appear here once the memory server is running."
-      />
-    );
-  }
+  // A REJECTED KEY IS NOT A STOPPED SERVER — see `outageOf`. The sentence
+  // below is the offline case only.
+  const outage = outageOf(reach, "Results appear here once the memory server is running.");
+  if (outage) return <EmptyState {...outage} />;
 
   if (profile === null) {
     return (

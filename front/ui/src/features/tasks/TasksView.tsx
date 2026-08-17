@@ -18,6 +18,7 @@ import {
 import {
   ApiError,
   NetworkError,
+  outageOf,
   type Reachability,
   type TodoPriority,
   type TodoStatus,
@@ -946,15 +947,10 @@ export function TasksView({ reach }: { reach: Reachability }) {
   );
   const settledPrefix = useMemo(() => hoistCommonPrefix(settled.map((t) => t.content)), [settled]);
 
-  if (reach.state !== "online") {
-    return (
-      <EmptyState
-        size="page"
-        title="Not connected"
-        body="Recorded work appears here once the memory server is running."
-      />
-    );
-  }
+  // A REJECTED KEY IS NOT A STOPPED SERVER. `outageOf` keeps the two apart in
+  // the status strip's own words; the sentence below is the offline case only.
+  const outage = outageOf(reach, "Recorded work appears here once the memory server is running.");
+  if (outage) return <EmptyState size="page" {...outage} />;
 
   if (profile === null) {
     return (
