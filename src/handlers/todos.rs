@@ -1708,8 +1708,13 @@ pub async fn update_todo(
     // the TUI cycles in_progress → done through this endpoint
     // (`tui/src/stream.rs::next_status`) and the MCP `update_todo` tool ships
     // `done` and `cancelled` in its status enum.
-    let settling = todo.status.is_settled() && !previous_status.is_settled();
-    let completed_here = settling && todo.status == TodoStatus::Done;
+    //
+    // A completion is any arrival in Done from somewhere else, including from
+    // Cancelled — `/complete` re-completes a cancelled todo and rolls it over,
+    // so this door must too. Arriving where you already are changes nothing,
+    // which is what keeps a repeated `status=done` idempotent.
+    let completed_here = todo.status == TodoStatus::Done && previous_status != TodoStatus::Done;
+    let settling = completed_here || (todo.status.is_settled() && !previous_status.is_settled());
 
     let (todo, next_recurrence) = if settling {
         state

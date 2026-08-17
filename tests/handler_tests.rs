@@ -1963,6 +1963,99 @@ async fn update_to_done_settles_and_rolls_over_recurrence() {
         live[0]["completed_at"].is_null(),
         "a freshly spawned occurrence must not carry a completion stamp: {body}"
     );
+
+    // Settlement fires on the transition, not on the value, so repeating the
+    // same update spawns nothing further. The MCP tool metadata declares
+    // update_todo idempotent; this is what that declaration rests on.
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/update"),
+            json!({"user_id": user, "status": "done"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "repeat update: {body}");
+    assert!(
+        body["next_recurrence"].is_null(),
+        "re-marking a done todo done must not spawn another occurrence: {body}"
+    );
+
+    let (_, body) = json_of(
+        h.app(),
+        authed_post("/api/todos", json!({"user_id": user})),
+    )
+    .await;
+    let live = body["todos"]
+        .as_array()
+        .expect("todos array")
+        .iter()
+        .filter(|t| t["content"] == json!("Water the plants"))
+        .count();
+    assert_eq!(
+        live, 1,
+        "a repeated done update must leave exactly one live occurrence: {body}"
+    );
+}
+
+/// The two doors must agree on every transition, not just the common one.
+/// `/complete` on a cancelled recurring todo re-completes it and rolls it
+/// over, so `/update` with `status=done` has to do the same — otherwise
+/// "revive this and mark it done" silently ends the series depending on which
+/// endpoint the client happens to use.
+#[tokio::test]
+async fn reviving_a_cancelled_todo_into_done_rolls_over_like_complete() {
+    let h = Harness::new();
+    let user = "revive-user";
+
+    let (_, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/todos/add",
+            json!({
+                "user_id": user,
+                "content": "Take out the bins",
+                "recurrence": "every 7 days",
+                "due_date": "today"
+            }),
+        ),
+    )
+    .await;
+    let todo_id = body["todo"]["id"].as_str().expect("todo id").to_string();
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/update"),
+            json!({"user_id": user, "status": "cancelled"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "cancel: {body}");
+    let cancelled_at = body["todo"]["completed_at"]
+        .as_str()
+        .expect("cancelling stamps the settlement time")
+        .to_string();
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/update"),
+            json!({"user_id": user, "status": "done"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "revive to done: {body}");
+    assert_eq!(
+        body["next_recurrence"]["content"],
+        json!("Take out the bins"),
+        "cancelled → done must roll the series over, as /complete does: {body}"
+    );
+    assert_eq!(
+        body["todo"]["completed_at"].as_str(),
+        Some(cancelled_at.as_str()),
+        "the todo settled when it was cancelled; that time must not move: {body}"
+    );
 }
 
 /// `completed_at` was written only by `Todo::complete()`, and never cleared.
