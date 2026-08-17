@@ -1947,6 +1947,24 @@ async fn update_todo_core(
         .collect();
     sync_memory_back_links(&state, &req.user_id, &todo.id, added, removed).await?;
 
+    // Settling THROUGH this endpoint rolls a recurrence over exactly as
+    // `POST /api/todos/complete` does, and the next occurrence is a clone that
+    // copies `related_memory_ids` — so it needs its own back-links here too.
+    // Without this the two settlement doors disagree again in a way neither
+    // parent branch could have had: back-link symmetry did not exist on the
+    // branch that unified settlement, and settlement-through-update did not
+    // exist on the branch that fixed back-links.
+    if let Some(ref next_todo) = next_recurrence {
+        sync_memory_back_links(
+            &state,
+            &req.user_id,
+            &next_todo.id,
+            next_todo.related_memory_ids.clone(),
+            Vec::new(),
+        )
+        .await?;
+    }
+
     let mut changes = Vec::new();
     // A completion is already recorded by `record_completion` (its own comment
     // and its own memory), so the update note covers only what else changed in
@@ -3493,6 +3511,100 @@ mod tests {
         assert!(
             related_todo_ids(&mem_b).is_empty(),
             "deleting a todo must remove its back-link, not leave a dangling id"
+        );
+    }
+
+    /// A recurrence rollover clones the todo, `related_memory_ids` included, so
+    /// the spawned occurrence needs back-links of its own. Both settlement doors
+    /// roll a recurrence over, so both must write them.
+    ///
+    /// This case belongs to neither parent branch: back-link symmetry did not
+    /// exist on the branch that made `status=done` settle through `/update`, and
+    /// settling through `/update` did not exist on the branch that fixed
+    /// back-links. It only became reachable when they were merged, which is why
+    /// it is asserted through BOTH doors on the same fixture — a test that
+    /// exercised only `/complete` would have passed while `/update` left the
+    /// spawned occurrence's links half-dead.
+    #[tokio::test]
+    async fn a_recurrence_spawned_by_either_settlement_door_gets_its_back_links() {
+        let harness = TestHarness::new();
+        let user_id = "recurrence-backlink-user";
+
+        let source = {
+            let memory = harness.manager.get_user_memory(user_id).unwrap();
+            let guard = memory.read();
+            guard
+                .remember(
+                    Experience {
+                        content: "the plants wilt without daily water".to_string(),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap()
+        };
+
+        let related_todo_ids = |mid: &MemoryId| -> Vec<TodoId> {
+            let memory = harness.manager.get_user_memory(user_id).unwrap();
+            let guard = memory.read();
+            guard.get_memory(mid).unwrap().related_todo_ids
+        };
+
+        // `door` settles the todo it is given and returns the spawned occurrence.
+        let settle = |door: &'static str, todo_id: String| {
+            let harness = &harness;
+            async move {
+                let req = match door {
+                    "update" => test_helpers::post_json(
+                        &format!("/api/todos/{todo_id}/update"),
+                        &json!({ "user_id": user_id, "status": "done" }),
+                    ),
+                    _ => test_helpers::post_json(
+                        "/api/todos/complete",
+                        &json!({ "user_id": user_id, "todo_id": todo_id }),
+                    ),
+                };
+                let (status, body) = test_helpers::send(harness.router(), req).await;
+                assert_eq!(status, StatusCode::OK, "{door}: {body}");
+                let next = body["next_recurrence"]["id"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{door} must spawn a next occurrence: {body}"))
+                    .to_string();
+                next
+            }
+        };
+
+        let req = test_helpers::post_json(
+            "/api/todos/add",
+            &json!({
+                "user_id": user_id,
+                "content": "Water the plants",
+                "recurrence": "daily",
+                "due_date": "today",
+                "related_memory_ids": [source.0.to_string()],
+            }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let first = body["todo"]["id"].as_str().unwrap().to_string();
+
+        // Door 1: PUT-style update to `done`.
+        let second = settle("update", first).await;
+        let second_id = TodoId(second.parse().unwrap());
+        assert!(
+            related_todo_ids(&source).contains(&second_id),
+            "settling through /update must give the spawned occurrence a \
+             memory-side back-link; it inherited related_memory_ids"
+        );
+
+        // Door 2: the dedicated completion endpoint, on the occurrence door 1
+        // produced — so the two doors are exercised in one chain.
+        let third = settle("complete", second).await;
+        let third_id = TodoId(third.parse().unwrap());
+        assert!(
+            related_todo_ids(&source).contains(&third_id),
+            "settling through /complete must give the spawned occurrence a \
+             memory-side back-link"
         );
     }
 }

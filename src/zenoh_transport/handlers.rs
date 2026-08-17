@@ -703,7 +703,7 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
     let anomalies_only = req.anomalies_only;
     let terrain_type = req.terrain_type.clone();
 
-    let memories = match tokio::task::spawn_blocking(move || {
+    let (memories, reinforcement_applied) = match tokio::task::spawn_blocking(move || {
         let guard = memory_for_recall.read();
         let mq = MemoryQuery {
             user_id: Some(user_id_for_recall),
@@ -721,13 +721,20 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
             terrain_type,
             ..Default::default()
         };
+        // Derived from the gate the mutation sites consult, exactly as the HTTP
+        // handler does. The Zenoh request carries no read-only flag, so this is
+        // false only under the process-wide SHODH_RECALL_READONLY pin — but a
+        // robot reading from a pinned server must still be told its read did not
+        // reinforce, or the field would be a constant dressed as an observation.
+        let reinforcement_applied = !crate::memory::recall_is_readonly(&mq);
         guard
             .recall(&mq)
+            .map(|memories| (memories, reinforcement_applied))
             .map_err(|e| anyhow::anyhow!("Recall failed: {e}"))
     })
     .await
     {
-        Ok(Ok(memories)) => memories,
+        Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             error!("Recall failed: {:?}", e);
             reply_error(&query, &format!("Recall error: {e}")).await;
@@ -894,6 +901,7 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
         reminder_count: None,
         lineage: Vec::new(),
         lineage_count: None,
+        reinforcement_applied,
     };
 
     match serde_json::to_vec(&response) {

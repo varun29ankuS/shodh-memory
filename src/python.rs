@@ -830,6 +830,12 @@ impl PyMemorySystem {
             retrieval_mode,
             offset: 0,
             layers: crate::memory::types::LayerMode::Full,
+            // The in-process binding is an ordinary product client, so it takes
+            // the product default: a read reinforces what it returns. The
+            // process-wide SHODH_RECALL_READONLY pin still overrides this — the
+            // gate ORs the two — which is what an eval embedding these bindings
+            // relies on.
+            read_only: false,
         };
 
         let memories = self
@@ -1910,6 +1916,9 @@ impl PyMemorySystem {
             retrieval_mode: RetrievalMode::Hybrid,
             offset: 0,
             layers: crate::memory::types::LayerMode::Full,
+            // See `recall()` above: product default, overridable only by the
+            // process-wide pin.
+            read_only: false,
         };
 
         let memories = self
