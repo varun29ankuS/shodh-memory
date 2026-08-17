@@ -1,6 +1,8 @@
 import { useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { MapPin, Ruler, Unlink, type LucideIcon } from "lucide-react";
 import { ApiError, NetworkError, outageOf, type Reachability } from "@/lib/api";
+import { fetchAnomalies } from "@/lib/api/anomalies";
 import { useCorpus } from "@/lib/api/corpus";
 import { useSession } from "@/stores/session";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -21,6 +23,8 @@ import {
   type LensResult,
   type Pattern,
 } from "./measures";
+import { SurpriseLens, surpriseKey } from "./SurpriseLens";
+import { readSurprise } from "./surprise";
 
 /**
  * Anomalies — what deviates from this profile's own baseline.
@@ -73,10 +77,27 @@ import {
  * value is meaningless without the ordinary ones it was judged against — and
  * changed nothing about how any of them decides.
  *
- * NO REQUEST OF ITS OWN. It reads `useCorpus`, the same single react-query
- * entry Recall and Geo already populate (lib/api/corpus.ts), so arriving here
- * from either is instant and arriving here first costs one listing the rest of
- * the app then reuses.
+ * TWO KINDS OF ANOMALY SHIP HERE, AND BOTH ARE NAMED. The three lenses above
+ * read a memory's CONTENT. The fourth, `SurpriseLens`, is `POST /api/anomalies`
+ * — the server's own five-axis deviation scoring over the extraction statistics
+ * captured at ingest, which had no client but the MCP tool while this screen
+ * computed something else under the same word. It is not a replacement: it
+ * measures a different object, against a different baseline, and a memory can be
+ * ordinary on one and far out on the other. It is last because it is the only
+ * section that cannot draw its population — the endpoint returns its ranked
+ * findings, not the set it ranked them against — and a section that cannot show
+ * its working should not lead.
+ *
+ * THE HEADER'S "no model, here or on the server" SURVIVES THE ADDITION, which
+ * is why the fourth lens could join without weakening the claim: the endpoint's
+ * own module doc commits to scoring "deterministically and without any LLM in
+ * the loop", and every number it returns is a z-score against a rolling mean.
+ *
+ * ONE REQUEST OF ITS OWN, NOW. The three client lenses still read `useCorpus`,
+ * the same single react-query entry Recall and Geo already populate
+ * (lib/api/corpus.ts), so arriving here from either is instant. The fourth
+ * fetches `/api/anomalies` on its own key and is the only network cost this
+ * destination adds over the shared listing.
  *
  * A section that cannot reach a conclusion says why, with the shortfall in
  * numbers, instead of rendering an empty box that reads as "clean". "Not enough
@@ -397,14 +418,31 @@ export function AnomaliesView({ reach }: { reach: Reachability }) {
     [memories],
   );
 
+  // The server lens's own result, off the key `SurpriseLens` uses. React-query
+  // serves both callers from one request; this one exists so the header's count
+  // spans every measure on the screen rather than only the three computed here.
+  const { data: surprise } = useQuery({
+    queryKey: surpriseKey(profile),
+    queryFn: ({ signal }) => fetchAnomalies(profile!, signal),
+    enabled: profile !== null,
+    staleTime: 60_000,
+  });
+
   const flagged = useMemo(() => {
     const ids = new Set<string>();
     for (const lens of lenses) {
       if (lens.result.state !== "findings") continue;
       for (const f of lens.result.findings) ids.add(f.memoryId);
     }
+    // A UNION, NOT A SUM. The content measures and the extraction measure can
+    // both flag the same memory, and adding their totals would count it twice
+    // under a word a reader takes to mean "how many memories here are unusual".
+    const server = surprise ? readSurprise(surprise) : null;
+    if (server?.state === "findings") {
+      for (const entry of server.flagged) ids.add(entry.memory_id);
+    }
     return ids.size;
-  }, [lenses]);
+  }, [lenses, surprise]);
 
   const patternCount = useMemo(
     () =>
@@ -484,11 +522,18 @@ export function AnomaliesView({ reach }: { reach: Reachability }) {
             because it is the product's actual claim and a claim behind an icon
             is a claim nobody reads. The icon holds only how it works. */}
         <header className="border-border flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b px-4 py-3">
+          {/* The count spans all FOUR measures. Reading the server lens's
+              result off the same react-query key it uses means this number
+              cannot drift from the section below it, and react-query dedupes
+              the two callers into one request. Counted as a union of memory
+              ids, not a sum: a memory the arithmetic and the server both flag
+              is one unusual memory, and adding the two totals would report it
+              twice under a word that means "how many things are wrong here". */}
           <Meta className="text-[12px]">
             <Stat value={flagged} label="flagged" />
             {patternCount > 0 ? <Stat value={patternCount} label="pattern" /> : null}
             <Stat value={memories.length} label="memories" />
-            <Stat value={lenses.length} label="measures" />
+            <Stat value={lenses.length + 1} label="measures" />
           </Meta>
           {/* Not "No model": the seat's egress badge already occupies that
               exact phrase in the corner of every screen, and two unrelated
@@ -507,6 +552,11 @@ export function AnomaliesView({ reach }: { reach: Reachability }) {
         {lenses.map((lens) => (
           <LensSection key={lens.id} lens={lens} />
         ))}
+
+        {/* The server's own measure, last — see the note at the top of this
+            file for why it is a fourth lens rather than a replacement for the
+            three above, and why it is the one that goes at the bottom. */}
+        <SurpriseLens profile={profile} />
       </div>
     </ScrollArea>
   );
