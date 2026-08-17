@@ -758,13 +758,11 @@ const MEMORY_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00];
 /// [`MemoryStorage::get`] rewrites it in the current format and no later read
 /// has to guess again.
 fn decode_postcard_memory(payload: &[u8]) -> Result<(Memory, bool)> {
-    let current_err = match crate::serialization::decode_raw_compat::<Memory>(
-        payload,
-        MEMORY_DEFAULT_SUFFIX,
-    ) {
-        Ok((memory, defaulted)) => return Ok((memory, defaulted)),
-        Err(e) => e,
-    };
+    let current_err =
+        match crate::serialization::decode_raw_compat::<Memory>(payload, MEMORY_DEFAULT_SUFFIX) {
+            Ok((memory, defaulted)) => return Ok((memory, defaulted)),
+            Err(e) => e,
+        };
 
     let _generation = NerWireGeneration::PreFineLabel.enter();
     match crate::serialization::decode_raw_compat::<Memory>(payload, MEMORY_DEFAULT_SUFFIX) {
@@ -4321,7 +4319,10 @@ mod tests {
             prefix < without_record.len(),
             "the two encodings must differ at the ner_entities length varint"
         );
-        assert_eq!(without_record[prefix], 0x00, "empty ner_entities is length 0");
+        assert_eq!(
+            without_record[prefix], 0x00,
+            "empty ner_entities is length 0"
+        );
         assert_eq!(with_record[prefix], 0x01, "one NER record is length 1");
 
         let tail_len = without_record.len() - prefix - 1;
@@ -4359,8 +4360,7 @@ mod tests {
             end_char: Some(29),
             fine_label: None,
         }];
-        memory.experience.cooccurrence_pairs =
-            vec![("Dali".to_string(), "Key Bridge".to_string())];
+        memory.experience.cooccurrence_pairs = vec![("Dali".to_string(), "Key Bridge".to_string())];
         memory.experience.importance_override = Some(0.9);
         let created_at = memory.created_at;
 
@@ -4370,10 +4370,7 @@ mod tests {
             .expect("a memory written before fine_label existed must still be readable");
 
         assert_eq!(decoded.id, id);
-        assert_eq!(
-            decoded.experience.content,
-            "the Dali struck the Key Bridge"
-        );
+        assert_eq!(decoded.experience.content, "the Dali struck the Key Bridge");
         assert_eq!(decoded.experience.ner_entities.len(), 1);
         assert_eq!(decoded.experience.ner_entities[0].text, "Key Bridge");
         assert_eq!(decoded.experience.ner_entities[0].end_char, Some(29));
@@ -4479,7 +4476,10 @@ mod tests {
             MEMORY_DEFAULT_SUFFIX,
         )
         .expect("a record written before declared_entities must decode");
-        assert!(defaulted, "the missing tail field must be reported as defaulted");
+        assert!(
+            defaulted,
+            "the missing tail field must be reported as defaulted"
+        );
         assert!(decoded.experience.declared_entities.is_empty());
         assert_eq!(
             decoded.experience.toponyms.len(),

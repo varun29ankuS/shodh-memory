@@ -11305,7 +11305,8 @@ mod tests {
         payload.extend_from_slice(&postcard::to_allocvec(&now).unwrap());
         payload.extend_from_slice(&postcard::to_allocvec(&7usize).unwrap());
         payload.extend_from_slice(&postcard::to_allocvec("a pre-rollup node").unwrap());
-        payload.extend_from_slice(&postcard::to_allocvec(&HashMap::<String, String>::new()).unwrap());
+        payload
+            .extend_from_slice(&postcard::to_allocvec(&HashMap::<String, String>::new()).unwrap());
         payload.extend_from_slice(&postcard::to_allocvec(&Option::<Vec<f32>>::None).unwrap());
         payload.extend_from_slice(&postcard::to_allocvec(&0.75f32).unwrap());
         payload.extend_from_slice(&postcard::to_allocvec(&true).unwrap());
@@ -11326,7 +11327,10 @@ mod tests {
         );
         assert_eq!(decoded.mention_count, 7);
         assert_eq!(decoded.summary, "a pre-rollup node");
-        assert_eq!(decoded.created_at, now, "created_at must not absorb the label's string");
+        assert_eq!(
+            decoded.created_at, now,
+            "created_at must not absorb the label's string"
+        );
         assert_eq!(decoded.selectivity, None);
         assert_eq!(decoded.fine_type, None);
         assert_eq!(decoded.kb_id, None);
