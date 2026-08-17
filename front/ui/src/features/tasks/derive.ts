@@ -832,6 +832,48 @@ export function positionOn(axis: Axis, at: number): number {
   return Math.min(1, Math.max(0, (at - axis.from) / axis.span));
 }
 
+/* ================================================================== *
+ * WHO WROTE A COMMENT, AND WHAT THAT IS WORTH
+ * ================================================================== */
+
+export type AuthorKind =
+  /** Set by the server itself. `TodoComment::system_activity`
+   *  (src/memory/types.rs:4037-4047) hardcodes it, so it is the one author
+   *  value on the wire that is evidence rather than a claim. */
+  | { kind: "server" }
+  /** Written from this dashboard, which is the only thing that sets it. */
+  | { kind: "dashboard" }
+  /** Written by a model through the seat's todo tools, which sign every
+   *  mutation `agent:…` because `Todo` has no assignee, executor or actor field
+   *  to sign in (seat/src/todo-tools.ts). `model` is whatever follows the
+   *  prefix, or null when nothing does. */
+  | { kind: "agent"; model: string | null }
+  /** Any other name. `AddCommentRequest.author` defaults to `user_id`
+   *  (src/handlers/todos.rs:2233), so most of these are just the profile name,
+   *  and none of them is verified by anything. */
+  | { kind: "caller"; name: string };
+
+/** The prefix the seat's todo tools sign with (`agentAuthor`,
+ *  seat/src/todo-tools.ts). Matched as a PREFIX rather than an exact string
+ *  deliberately: the intent there is to append the model that did the work, so
+ *  this must keep reading both the bare marker and a fuller one. */
+const AGENT_PREFIX = "agent:";
+
+/** The name this dashboard signs with. Duplicated from api.ts's
+ *  `DASHBOARD_AUTHOR` as a value comparison rather than imported, so that
+ *  derive stays free of the request layer. */
+const DASHBOARD = "shodh-dashboard";
+
+export function authorKind(author: string): AuthorKind {
+  if (author === "system") return { kind: "server" };
+  if (author === DASHBOARD) return { kind: "dashboard" };
+  if (author.startsWith(AGENT_PREFIX)) {
+    const model = author.slice(AGENT_PREFIX.length).trim();
+    return { kind: "agent", model: model.length > 0 ? model : null };
+  }
+  return { kind: "caller", name: author };
+}
+
 /**
  * How long something took, in the coarsest unit that still says something.
  *

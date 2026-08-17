@@ -26,7 +26,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import {
-  DASHBOARD_AUTHOR,
   addTodoComment,
   getMemory,
   listTriageTodos,
@@ -35,6 +34,7 @@ import {
 } from "./api";
 import {
   TASK_LIMIT,
+  authorKind,
   axisOf,
   blockerIsSatisfied,
   blockersOf,
@@ -206,22 +206,25 @@ function Blockers({ blockers }: { blockers: readonly Blocker[] }) {
 /**
  * Who did what to this task, and when — the audit trail for this domain.
  *
- * IT IS NOT THE SEAT'S TRAIL, AND /history CANNOT COVER THIS. The conversation
- * seat exposes three tools (`recall_memory`, `remember_memory`,
- * `record_seat_learning`, seat/src/memory-tools.ts) and its ledger has no todo
- * event kind at all (seat/src/ledger.ts), so no task change can ever appear in
- * the audit export /history renders. Todos are written through the MCP server
- * and the session hook, which do not pass through the seat. The record that
- * DOES exist is the todo's own `comments` array, and it ships inline with every
- * listed todo at no extra request.
+ * WHY THE TASK'S OWN COMMENTS AND NOT /history. The seat's audit export covers
+ * what passed THROUGH the seat. Its todo tools are registered as native tools
+ * (seat/src/conversation.ts), so a change a model makes with `claim_todo` or
+ * `update_todo` does emit `tool_call_start`/`tool_call_end` and does reach
+ * /history. Nothing else does: the MCP server, the session hook, an import and
+ * this dashboard all write straight to the memory server and never touch the
+ * seat, and the seat's ledger has no todo event kind at all. So /history covers
+ * one writer among several, and the todo's own `comments` array is the only
+ * record that covers all of them — which is also why the two surfaces are not
+ * merged here. It ships inline with every listed todo at no extra request.
  *
- * WHAT EACH AUTHOR IS WORTH, stated on the surface rather than flattened:
- * `system` is set by the server itself and is the only author value on the wire
- * that is evidence; this dashboard's own marker is set by nothing else; any
- * other name was chosen by whatever called the API and is unverified. Microsoft
- * HAX G9-C treats attribution and reversal as two halves of one requirement,
- * and both halves are on this row — the trail says what happened, and every
- * action below has an inverse.
+ * WHAT EACH AUTHOR IS WORTH, drawn rather than flattened. `Todo` has no
+ * assignee, executor or actor field, so `TodoComment.author` is the only place
+ * anything can sign, and it is free text that the server does not verify. Only
+ * `system` is set by the server itself and is therefore evidence; the rest are
+ * claims, and the row says which kind it is looking at rather than presenting
+ * them alike. Microsoft's HAX G9-C treats attribution and reversal as two
+ * halves of one requirement — the trail is the first half, and every action
+ * below has an inverse, which is the second.
  */
 function TaskHistory({ todo }: { todo: TriageTodo }) {
   const comments = useMemo(
@@ -243,8 +246,12 @@ function TaskHistory({ todo }: { todo: TriageTodo }) {
   return (
     <ol className="space-y-1">
       {comments.map((comment) => {
-        const server = comment.author === "system";
-        const here = comment.author === DASHBOARD_AUTHOR;
+        const who = authorKind(comment.author);
+        // Icon carries the KIND, never the trust: an agent and a person are
+        // different actors, and how much either claim is worth is said in
+        // words beside it rather than encoded in a colour nobody can decode.
+        const Icon =
+          who.kind === "server" ? Cog : who.kind === "dashboard" ? User : who.kind === "agent" ? Bot : User;
         return (
           <li key={comment.id} className="flex items-baseline gap-2 text-[11px] leading-relaxed">
             <time
@@ -253,26 +260,34 @@ function TaskHistory({ todo }: { todo: TriageTodo }) {
             >
               {new Date(comment.created_at).toLocaleDateString()}
             </time>
-            {server ? (
-              <Cog aria-hidden="true" className="text-muted-foreground/60 size-3 shrink-0" strokeWidth={1.8} />
-            ) : here ? (
-              <User aria-hidden="true" className="text-muted-foreground size-3 shrink-0" strokeWidth={1.8} />
-            ) : (
-              <Bot aria-hidden="true" className="text-muted-foreground/60 size-3 shrink-0" strokeWidth={1.8} />
-            )}
-            <span className={cn("min-w-0 flex-1", server && "text-muted-foreground")}>
+            <Icon
+              aria-hidden="true"
+              className={cn(
+                "size-3 shrink-0",
+                who.kind === "server" ? "text-muted-foreground/60" : "text-muted-foreground",
+              )}
+              strokeWidth={1.8}
+            />
+            <span className={cn("min-w-0 flex-1", who.kind === "server" && "text-muted-foreground")}>
               {comment.content}
             </span>
-            {!server ? (
+            {who.kind !== "server" ? (
               <span
                 className="text-muted-foreground/60 shrink-0 text-[10px]"
                 title={
-                  here
+                  who.kind === "dashboard"
                     ? "Written from this dashboard."
-                    : "This name was supplied by whatever wrote the comment. The server does not verify it."
+                    : "The name on this comment was chosen by whatever wrote it. The server does not verify it."
                 }
               >
-                {here ? "from this dashboard" : `${comment.author} — self-declared`}
+                {who.kind === "dashboard"
+                  ? "from this dashboard"
+                  : who.kind === "agent"
+                    ? // The seat signs its writes with a marker and is meant to
+                      // append the model that did the work. When it did not,
+                      // this says so rather than naming a model it never read.
+                      `by an agent${who.model ? ` — ${who.model}` : ", model not recorded"}`
+                    : `${who.name} — self-declared`}
               </span>
             ) : null}
           </li>

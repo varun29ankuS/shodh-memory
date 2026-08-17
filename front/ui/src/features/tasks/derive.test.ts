@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Todo } from "@/lib/api";
 import type { LinkedMemory, TodoComment, TriageProject, TriageTodo } from "./api";
 import {
+  authorKind,
   axisOf,
   blockerIsSatisfied,
   blockersOf,
@@ -761,6 +762,35 @@ describe("positionOn", () => {
     // Two writes on different clocks can settle a todo before it was recorded.
     expect(positionOn(axis, 40)).toBe(0);
     expect(positionOn(axis, 900)).toBe(1);
+  });
+});
+
+describe("authorKind", () => {
+  it("treats only the server's own marker as evidence", () => {
+    // `TodoComment::system_activity` hardcodes "system"; everything else on
+    // this field is caller-supplied and unverified.
+    expect(authorKind("system")).toEqual({ kind: "server" });
+    expect(authorKind("shodh-dashboard")).toEqual({ kind: "dashboard" });
+  });
+
+  it("reads the model out of an agent signature when one is appended", () => {
+    expect(authorKind("agent:anthropic/claude-opus-4")).toEqual({
+      kind: "agent",
+      model: "anthropic/claude-opus-4",
+    });
+  });
+
+  it("STILL RECOGNISES A BARE agent: MARKER AS AN AGENT", () => {
+    // The seat's `agentAuthor` currently returns the bare prefix with no model
+    // appended, so matching an exact "agent:<provider>/<model>" shape would
+    // classify every real agent write as an anonymous caller.
+    expect(authorKind("agent:")).toEqual({ kind: "agent", model: null });
+  });
+
+  it("does not mistake a profile name for anything trustworthy", () => {
+    // `author` defaults to `user_id`, so this is the common case and it means
+    // only "whatever called the API under that name".
+    expect(authorKind("claude-code")).toEqual({ kind: "caller", name: "claude-code" });
   });
 });
 
