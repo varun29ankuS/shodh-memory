@@ -155,10 +155,13 @@ pub struct ZenohRememberRequest {
     pub sequence_number: Option<u32>,
     #[serde(default)]
     pub preceding_memory_id: Option<String>,
+    // Caller-declared write identity, mirroring the HTTP `RememberRequest`.
     #[serde(default)]
     pub agent_id: Option<String>,
     #[serde(default)]
     pub run_id: Option<String>,
+    #[serde(default)]
+    pub actor_id: Option<String>,
     #[serde(default)]
     pub parent_id: Option<String>,
 
@@ -427,6 +430,7 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
     let memory_clone = memory.clone();
     let agent_id = req.agent_id.clone();
     let run_id = req.run_id.clone();
+    let actor_id = req.actor_id.clone();
     let created_at = req.created_at;
     let created_at_for_facts = created_at.unwrap_or_else(chrono::Utc::now);
 
@@ -437,8 +441,8 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
     // observation re-sent with a geo fix or a reward the first copy lacked.
     let outcome = match tokio::task::spawn_blocking(move || {
         let guard = memory_clone.read();
-        if agent_id.is_some() || run_id.is_some() {
-            guard.remember_with_agent_detailed(exp_clone, created_at, agent_id, run_id)
+        if agent_id.is_some() || run_id.is_some() || actor_id.is_some() {
+            guard.remember_with_agent_detailed(exp_clone, created_at, agent_id, run_id, actor_id)
         } else {
             guard.remember_detailed(exp_clone, created_at)
         }

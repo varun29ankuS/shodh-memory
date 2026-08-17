@@ -1539,18 +1539,26 @@ impl MemorySystem {
         ))
     }
 
-    /// Remember with agent context for multi-agent systems
+    /// Remember with caller-declared write identity.
     ///
-    /// Same as `remember` but tracks which agent created the memory,
-    /// enabling agent-specific retrieval and hierarchical memory tracking.
+    /// Same as `remember` but records who wrote the memory: the agent, its
+    /// run, and the principal it acted for. All three are claims the caller
+    /// makes about itself and are stored unverified — see the field docs on
+    /// [`Memory::agent_id`].
+    ///
+    /// `actor_id` was added to this signature rather than left as the
+    /// hardcoded `None` it had been since the initial release: the field is
+    /// persisted by `Memory` and served by `/api/memory/{id}`, so it was a
+    /// storable, readable value that nothing could ever set.
     pub fn remember_with_agent(
         &self,
         experience: Experience,
         created_at: Option<chrono::DateTime<chrono::Utc>>,
         agent_id: Option<String>,
         run_id: Option<String>,
+        actor_id: Option<String>,
     ) -> Result<MemoryId> {
-        self.remember_with_agent_detailed(experience, created_at, agent_id, run_id)
+        self.remember_with_agent_detailed(experience, created_at, agent_id, run_id, actor_id)
             .map(|outcome| outcome.id)
     }
 
@@ -1561,6 +1569,7 @@ impl MemorySystem {
         created_at: Option<chrono::DateTime<chrono::Utc>>,
         agent_id: Option<String>,
         run_id: Option<String>,
+        actor_id: Option<String>,
     ) -> Result<RememberOutcome> {
         // IDEMPOTENCY (issue #109): Content hash dedup + enrichment merge,
         // through the same single implementation `remember()` uses.
@@ -1602,14 +1611,14 @@ impl MemorySystem {
             }
         }
 
-        // Create memory with agent context
+        // Create memory with caller-declared write identity
         let memory = Arc::new(Memory::new(
             memory_id.clone(),
             experience,
             importance,
             agent_id,
             run_id,
-            None, // actor_id
+            actor_id,
             created_at,
         ));
 
@@ -6674,11 +6683,67 @@ impl MemorySystem {
     // Memory-Edge Tier Coupling Methods
     // =========================================================================
 
+    /// Graph entity ids a memory refers to, resolved against an already-held
+    /// graph read guard.
+    ///
+    /// [`Memory::entity_refs`] is the field this looks like it should read, and
+    /// it is empty on every memory this product has ever written: the method
+    /// that pushes to it has had no non-test caller since the field was
+    /// introduced, every constructor sets `Vec::new()`, and a live store returns
+    /// 0 populated rows out of 200.
+    ///
+    /// The authority is the graph. `process_experience_into_graph` writes an
+    /// [`crate::graph_memory::EpisodicNode`] whose `uuid` IS the memory's own
+    /// UUID and whose `entity_refs` are the resolved entity ids — and entity
+    /// canonicalization keeps that side current, whereas a denormalized copy on
+    /// the memory would drift the moment two entities merged.
+    ///
+    /// The stored field is still unioned in, because `Memory::from_legacy`
+    /// faithfully restores it for any record that carries one. The field itself
+    /// stays: it sits at position 9 of the 22 positional fields in `MemoryFlat`,
+    /// so removing it would shift every field after it and turn every stored
+    /// record into a decode that succeeds and returns garbage.
+    fn entity_ids_from_graph(
+        graph: &crate::graph_memory::GraphMemory,
+        memory: &Memory,
+    ) -> Vec<Uuid> {
+        let mut ids: Vec<Uuid> = memory.entity_refs.iter().map(|r| r.entity_id).collect();
+
+        if let Ok(Some(episode)) = graph.get_episode(&memory.id.0) {
+            for uuid in episode.entity_refs {
+                if !ids.contains(&uuid) {
+                    ids.push(uuid);
+                }
+            }
+        }
+
+        ids
+    }
+
+    /// Graph entity ids a memory refers to. See [`Self::entity_ids_from_graph`]
+    /// for why this does not simply read `Memory::entity_refs`.
+    ///
+    /// Takes the graph read lock itself, so callers that already hold it must
+    /// use [`Self::entity_ids_from_graph`] instead.
+    pub fn memory_entity_ids(&self, memory: &Memory) -> Vec<Uuid> {
+        match &self.graph_memory {
+            Some(graph) => Self::entity_ids_from_graph(&graph.read(), memory),
+            None => memory.entity_refs.iter().map(|r| r.entity_id).collect(),
+        }
+    }
+
     /// Calculate graph-adjusted importance threshold for tier promotion (Direction 3).
     ///
     /// Well-connected memories (many L2+ edges) get a discount on the promotion threshold.
     /// Isolated memories (entities but no edges) get a penalty.
     /// Memories with no entities are unaffected (no graph context to evaluate).
+    ///
+    /// The entity set is resolved through the graph rather than read off
+    /// `memory.entity_refs`. That field is empty for every memory in
+    /// production, so the guard below used to return `base_threshold`
+    /// unconditionally and everything after it was unreachable — this whole
+    /// direction of the memory-edge tier coupling has been inert since it
+    /// shipped.
     fn graph_adjusted_threshold(&self, memory: &Memory, base_threshold: f32) -> f32 {
         use crate::constants::*;
 
@@ -6687,15 +6752,17 @@ impl MemorySystem {
             None => return base_threshold,
         };
 
-        if memory.entity_refs.is_empty() {
+        let graph_guard = graph.read();
+        let entity_ids = Self::entity_ids_from_graph(&graph_guard, memory);
+
+        if entity_ids.is_empty() {
             return base_threshold;
         }
 
-        let graph_guard = graph.read();
         let mut l2_plus_count = 0usize;
 
-        for entity_ref in &memory.entity_refs {
-            if let Ok(edges) = graph_guard.get_entity_relationships(&entity_ref.entity_id) {
+        for entity_id in &entity_ids {
+            if let Ok(edges) = graph_guard.get_entity_relationships(entity_id) {
                 for edge in &edges {
                     if matches!(
                         edge.tier,
@@ -6794,6 +6861,11 @@ impl MemorySystem {
     /// When graph decay prunes edges and leaves entities orphaned, the memories
     /// referencing those entities get a small importance boost to prevent immediate
     /// decay death. This gives them one more maintenance cycle to prove value.
+    ///
+    /// "References" is resolved through the graph, not read off
+    /// `memory.entity_refs` — that field is empty for every memory in
+    /// production, so this boost had never fired for anyone. See
+    /// [`Self::entity_ids_from_graph`].
     pub fn compensate_orphaned_memories(&self, orphaned_entity_ids: &[String]) -> Result<usize> {
         use crate::constants::ORPHAN_COMPENSATORY_BOOST;
 
@@ -6812,12 +6884,18 @@ impl MemorySystem {
             self.session_memory.read().all_memories(),
         ];
 
+        // One guard for the whole scan rather than one acquisition per memory.
+        let graph_guard = self.graph_memory.as_ref().map(|g| g.read());
+
         for memories in &tiers {
             for memory in memories {
-                let entity_count = memory
-                    .entity_refs
+                let entity_ids = match &graph_guard {
+                    Some(graph) => Self::entity_ids_from_graph(graph, memory),
+                    None => memory.entity_refs.iter().map(|r| r.entity_id).collect(),
+                };
+                let entity_count = entity_ids
                     .iter()
-                    .filter(|e| orphaned_set.contains(e.entity_id.to_string().as_str()))
+                    .filter(|id| orphaned_set.contains(id.to_string().as_str()))
                     .count();
                 if entity_count > 0 {
                     let new_importance =
@@ -11325,11 +11403,16 @@ mod memory_entity_resolution_tests {
             .expect("add episode");
     }
 
+    /// `importance_override` is pinned well below 1.0 so the compensatory boost
+    /// has headroom — `compensate_orphaned_memories` caps at 1.0, so a memory
+    /// that scored 1.0 on its own would show no movement even with a correct
+    /// fix and the assertion would be measuring the cap, not the behaviour.
     fn remember(system: &MemorySystem, content: &str) -> MemoryId {
         system
             .remember(
                 Experience {
                     content: content.to_string(),
+                    importance_override: Some(0.5),
                     ..Default::default()
                 },
                 None,

@@ -1424,20 +1424,60 @@ pub struct Memory {
     /// Memories flow: Working → Session → LongTerm → Archive
     pub tier: MemoryTier,
 
-    /// Entity references - bidirectional links to GraphMemory
-    /// Populated during record() via entity extraction
-    /// Enables spreading activation without graph lookup
+    /// Entity references — a denormalized copy of the graph links for this
+    /// memory.
+    ///
+    /// NOT POPULATED IN PRODUCTION, and never has been. The field and its only
+    /// writer ([`Memory::add_entity_ref`]) were introduced together and the
+    /// writer has had no non-test caller since; every production construction
+    /// path sets `Vec::new()`, and a live store returns 0 populated rows out of
+    /// 200. The doc comment that used to sit here claimed it was "populated
+    /// during record() via entity extraction" — it is not, and four consumers
+    /// silently produced nothing for as long as it said so.
+    ///
+    /// The graph is the authority: `process_experience_into_graph` writes an
+    /// `EpisodicNode` whose `uuid` is this memory's `id` and whose
+    /// `entity_refs` are the resolved entity UUIDs. Production callers must
+    /// resolve through `MemorySystem::memory_entity_ids`, not read this field.
+    ///
+    /// It is retained rather than deleted because `MemoryFlat` is encoded
+    /// positionally by postcard and this is field 9 of 22: removing it shifts
+    /// every field after it, so every stored record would decode successfully
+    /// and return garbage. Legacy records that carry values still round-trip
+    /// through `Memory::from_legacy`, and the resolver unions them in.
     pub entity_refs: Vec<EntityRef>,
 
-    /// Retrieval tracking ID - set when memory is retrieved
-    /// Used for Hebbian feedback loop (reinforce_recall)
+    /// Retrieval tracking ID.
+    ///
+    /// ALWAYS `None` in production. Its only writer is
+    /// [`Memory::mark_retrieved`], which no non-test code calls. The previous
+    /// comment here claimed this drives "the Hebbian feedback loop
+    /// (reinforce_recall)"; it does not, and there is no route by which it
+    /// could — `MemorySystem::reinforce_recall` takes an explicit
+    /// `&[MemoryId]` from its caller and never reads this field.
+    ///
+    /// Retained for the same positional-wire-format reason as `entity_refs`
+    /// (field 11 of 22 in `MemoryFlat`).
     pub last_retrieval_id: Option<Uuid>,
 
     // ==========================================================================
     // Multi-tenancy support for enterprise deployments
+    //
+    // All three are CALLER-DECLARED identity: the writer states who it is, and
+    // the server stores the claim without verifying it. Server-observed facts
+    // about a write belong elsewhere. They are `None` on every row of a real
+    // store today, but for different reasons — `agent_id` and `run_id` are
+    // accepted by `POST /api/remember` and persisted end to end, and read as
+    // null only because no shipped client (hooks, MCP, TUI, python, UI) sends
+    // them. `actor_id` had no request field and no write path at all until it
+    // was wired alongside them.
     // ==========================================================================
+    /// The agent that wrote this memory, as declared by the writer.
     pub agent_id: Option<String>,
+    /// The run/session of the writing agent, as declared by the writer.
     pub run_id: Option<String>,
+    /// The human or upstream principal the writer acted on behalf of, as
+    /// declared by the writer.
     pub actor_id: Option<String>,
 
     // Similarity score (only populated in search results, not stored)
@@ -1660,7 +1700,13 @@ impl Memory {
         self.version > 1
     }
 
-    /// Add entity reference (bidirectional link to graph)
+    /// Add an entity reference to the denormalized [`Self::entity_refs`] copy.
+    ///
+    /// No production path calls this and none should: the graph owns this
+    /// relation, and a second copy on the memory drifts the moment entity
+    /// canonicalization merges two nodes. It exists so tests can construct
+    /// records in the legacy shape and pin the positional wire format that
+    /// still carries the field.
     pub fn add_entity_ref(&mut self, entity_id: Uuid, name: String, relation: String) {
         // Avoid duplicates
         if !self.entity_refs.iter().any(|r| r.entity_id == entity_id) {
@@ -1689,7 +1735,11 @@ impl Memory {
         self.related_todo_ids.contains(todo_id)
     }
 
-    /// Get entity IDs for graph operations
+    /// Entity IDs from the denormalized [`Self::entity_refs`] copy ONLY.
+    ///
+    /// Returns `[]` for every memory this product has written. Production
+    /// callers want `MemorySystem::memory_entity_ids`, which resolves through
+    /// the graph; this accessor is kept for tests that pin the stored field.
     pub fn entity_ids(&self) -> Vec<Uuid> {
         self.entity_refs.iter().map(|r| r.entity_id).collect()
     }
@@ -1705,7 +1755,13 @@ impl Memory {
         self.metadata.lock().activation *= decay_factor;
     }
 
-    /// Set retrieval tracking ID for Hebbian feedback
+    /// Set [`Self::last_retrieval_id`].
+    ///
+    /// No non-test code calls this, and nothing reads the field it sets.
+    /// Reinforcement (`MemorySystem::reinforce_recall`) is driven by an
+    /// explicit `&[MemoryId]` supplied by the caller, so a stored retrieval
+    /// marker has no consumer. Kept so tests can populate the field the
+    /// positional wire format still carries.
     pub fn mark_retrieved(&mut self, retrieval_id: Uuid) {
         self.last_retrieval_id = Some(retrieval_id);
         // Also record access
