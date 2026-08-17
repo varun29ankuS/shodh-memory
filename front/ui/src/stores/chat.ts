@@ -36,6 +36,14 @@ export type ChatOp = Extract<
       | "tool_call_start"
       | "tool_call_end"
       | "view_command"
+      // A QUESTION, NOT EVIDENCE, and it is here anyway. `app/useAgentView.ts`
+      // reads the live turn's `ops` and nothing else — that is the only channel
+      // between the wire and the view bus — so a probe kept out of this list is
+      // a probe that reaches no one, and `inspect_view` would time out over an
+      // answer this browser was perfectly able to give. It renders as nothing:
+      // MessageList's switch falls through to null and the evidence panel
+      // filters for the two retrieval types.
+      | "view_probe"
       | "model_changed"
       | "error";
   }
@@ -153,7 +161,7 @@ function addUsage(target: TurnUsage | null, model: ModelRef, usage: SeatEvent & 
 }
 
 /** Fold one wire event into a conversation. Pure; returns a new ConvoLive. */
-function applyEvent(convo: ConvoLive, event: SeatEvent): ConvoLive {
+export function applyEvent(convo: ConvoLive, event: SeatEvent): ConvoLive {
   const turns = convo.turns.slice();
   const last = turns[turns.length - 1];
   const replaceLast = (next: ChatTurn): ConvoLive => {
@@ -195,13 +203,14 @@ function applyEvent(convo: ConvoLive, event: SeatEvent): ConvoLive {
       const next = last ? replaceLast({ ...last, ops: [...last.ops, event] }) : { ...convo, turns };
       return { ...next, model: event.model };
     }
-    // NEITHER OF THESE IS EVIDENCE, so neither joins `ops`. A probe is the seat
-    // asking this browser a question — `app/useAgentView.ts` answers it, and the
-    // `inspect_view` tool call beside it is what the transcript shows. An
-    // outcome is what this browser itself decided; it reaches the store only as
-    // a durable row on reload, and rendering it in the evidence panel would show
-    // the reader their own click played back as something the model did.
-    case "view_probe":
+    // AN OUTCOME IS NOT EVIDENCE AND NOT NEWS. It is what this browser itself
+    // decided; it reaches the store only as a durable row on reload, and
+    // rendering it in the evidence panel would show the reader their own click
+    // played back as something the model did. The trail is where it belongs.
+    //
+    // A `view_probe` is deliberately NOT in this group. It is a question rather
+    // than evidence, but it has to travel to `app/useAgentView.ts`, which reads
+    // the live turn's `ops` and nothing else — see `ChatOp`.
     case "view_outcome":
     case "agent_end":
     case "conversation_created":
