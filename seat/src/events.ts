@@ -17,6 +17,7 @@ import type {
 	ReinforceOutcome,
 	ReinforceStats,
 } from "./backend.js";
+import type { ViewDimension, ViewOutcomeState } from "./view-link.js";
 
 /** Which memory namespace an operation touched. */
 export type MemoryScope = "user" | "harness";
@@ -117,7 +118,11 @@ export type SeatEvent =
 			 *
 			 * This is an ASK, not an outcome. Whether it applied or became a Follow
 			 * offer is decided by the authority ledger in the browser
-			 * (front/ui/src/stores/view.ts), which the seat cannot see.
+			 * (front/ui/src/stores/view.ts). The seat now LEARNS that verdict — the
+			 * browser reports it back over POST /v1/conversations/{id}/view-report
+			 * — but it learns it separately, as `view_outcome`. This event stays
+			 * exactly what it was: the ask, with no outcome field, because at the
+			 * moment it is emitted there is no outcome to have.
 			 */
 			type: "view_command";
 			tool_call_id: string;
@@ -129,6 +134,61 @@ export type SeatEvent =
 			entities: string[];
 			/** Terms that named nothing in this profile. Never silently dropped. */
 			unresolved: string[];
+			/**
+			 * The one entity to open in the inspector, or null.
+			 *
+			 * Carries the graph's `uuid` because that is what the browser selects
+			 * by (`UniverseStar.id`, src/graph_memory.rs), and the name because
+			 * that is what a person reads. Both are the graph's own, resolved by
+			 * the seat before this was emitted — the model's word never travels.
+			 */
+			focus: { id: string; name: string } | null;
+	  }
+	| {
+			/**
+			 * What the browser did with a `view_command` — the return leg.
+			 *
+			 * ONE EVENT PER DIMENSION, because one command lands on up to four
+			 * axes and they can land differently: the cue and the camera apply
+			 * while the destination waits, because the person was holding the
+			 * destination and nothing else.
+			 *
+			 * NOT STREAMED, PERSISTED DIRECTLY. An offer accepted after the turn
+			 * ends has no open stream to ride, so the route writes these to the
+			 * event store itself (server.ts) rather than through a turn's sink.
+			 * One path for every outcome, early or late, instead of two that could
+			 * disagree.
+			 *
+			 * ABSENCE IS THE UNKNOWN. There is no state meaning "no verdict": a
+			 * command the browser never answered for simply has no row, and every
+			 * reader — the audit trail, the History screen — must read the absence
+			 * as "not known" rather than as anything having happened.
+			 */
+			type: "view_outcome";
+			/** The `view_command` this answers, by its tool call id. */
+			tool_call_id: string;
+			/** One of front/ui/src/lib/view/authority.ts `VIEW_DIMENSIONS`. */
+			dimension: ViewDimension;
+			state: ViewOutcomeState;
+			/** The path the browser was on when it decided. Context for a reader
+			 *  of the trail, who otherwise cannot tell where "already" was true. */
+			at: string;
+	  }
+	| {
+			/**
+			 * The seat asking the browser what is on screen (`inspect_view`).
+			 *
+			 * A REQUEST FOR A READING, and it is the only event in this union that
+			 * carries no information about memory at all. The browser answers on
+			 * the same route the verdicts use, quoting `probe_id`.
+			 *
+			 * Deliberately NOT durable-audit material: the `inspect_view` tool call
+			 * is already a `tool_call` row in the trail, and a second row saying
+			 * the same thing at the same instant is noise in an artefact whose
+			 * value is that every line means something.
+			 */
+			type: "view_probe";
+			probe_id: string;
 	  }
 	| { type: "harness_learning_applied"; memories: { id: string; content: string; score: number }[] }
 	| {

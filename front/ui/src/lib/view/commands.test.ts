@@ -216,6 +216,7 @@ function request(
     destination: "/geo",
     entities: ["Malabar Coast", "Dali"],
     unresolved: [],
+    focus: null,
     ...over,
   };
 }
@@ -230,16 +231,19 @@ describe("commandsFromOp — view_command", () => {
         text: "Malabar Coast, Dali",
         entities: ["Malabar Coast", "Dali"],
         reason: "these 12 memories cluster on the Malabar coast",
+        origin: "call-1",
       },
       {
         dimension: "frame",
         entities: ["Malabar Coast", "Dali"],
         reason: "these 12 memories cluster on the Malabar coast",
+        origin: "call-1",
       },
       {
         dimension: "destination",
         path: "/geo",
         reason: "these 12 memories cluster on the Malabar coast",
+        origin: "call-1",
       },
     ]);
   });
@@ -282,6 +286,7 @@ describe("commandsFromOp — view_command", () => {
         dimension: "destination",
         path: "/geo",
         reason: "these 12 memories cluster on the Malabar coast",
+        origin: "call-1",
       },
     ]);
   });

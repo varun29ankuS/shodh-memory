@@ -41,10 +41,30 @@ import type { ViewDimension } from "./authority";
  * gave a reason for those, and inventing one ("because you asked about X") puts
  * words in the model's mouth that it never said.
  */
+interface Authored {
+  reason?: string;
+  /**
+   * The seat tool call this command came from, and the address its verdict is
+   * sent back to (`lib/view/outcome.ts`).
+   *
+   * ON THE COMMAND, NOT IN A SIDE TABLE, for exactly the reason `reason` is: a
+   * declined command is held as a Follow offer and may be accepted minutes
+   * later, long after whatever dispatched it has gone. An origin kept anywhere
+   * but here would be missing at the one moment it is needed — when the person
+   * finally answers.
+   *
+   * Absent on commands derived from a recall, and that absence is load-bearing:
+   * nobody asked for those, so there is nobody to report to, and inventing a
+   * recipient would put a verdict in the trail for a request that was never made.
+   */
+  origin?: string;
+}
+
 export type ViewCommand =
-  | { dimension: "cue"; text: string; entities: string[]; reason?: string }
-  | { dimension: "frame"; entities: string[]; reason?: string }
-  | { dimension: "destination"; path: string; reason?: string };
+  | ({ dimension: "cue"; text: string; entities: string[] } & Authored)
+  | ({ dimension: "frame"; entities: string[] } & Authored)
+  | ({ dimension: "destination"; path: string } & Authored)
+  | ({ dimension: "focus"; id: string; name: string } & Authored);
 
 /**
  * How many entity terms a cue carries.
@@ -183,21 +203,47 @@ function commandsFromRequest(
 
   const commands: ViewCommand[] = [];
   const entities = op.entities.filter((entity) => entity.trim().length > 0);
+  const origin = op.tool_call_id;
 
   if (entities.length > 0) {
-    commands.push({ dimension: "cue", text: entities.join(", "), entities, reason });
-    commands.push({ dimension: "frame", entities, reason });
+    commands.push({ dimension: "cue", text: entities.join(", "), entities, reason, origin });
+    commands.push({ dimension: "frame", entities, reason, origin });
   }
 
   // A destination equal to where the person already stands is not a move. The
   // guard is the same one the recall path uses, and it matters more here: the
   // model chose this surface deliberately, so a redundant navigation would
   // remount the stage under someone who was already reading it.
-  if (op.destination !== null && op.destination !== path) {
-    commands.push({ dimension: "destination", path: op.destination, reason });
+  if (op.destination !== null && !isAlreadyThere(op, path)) {
+    commands.push({ dimension: "destination", path: op.destination, reason, origin });
+  }
+
+  // The one object to open. Sent whether or not the destination moved: the
+  // inspector is part of the shell, so an entity opened from the map is open on
+  // the map.
+  if (op.focus !== null) {
+    commands.push({ dimension: "focus", id: op.focus.id, name: op.focus.name, reason, origin });
   }
 
   return commands;
+}
+
+/**
+ * Whether the destination this request names is the one already on screen.
+ *
+ * THE SAME PREDICATE THE GUARD ABOVE USES, exported rather than inlined, because
+ * the return path has to report this case and could only otherwise re-derive it.
+ * "The view was already there" is not "nothing happened": the person IS looking
+ * at what the model asked for, and a model told nothing at all would conclude
+ * its request vanished. Two copies of the condition would eventually disagree,
+ * and the disagreement would be a command silently dropped while the seat was
+ * told it applied.
+ */
+export function isAlreadyThere(
+  op: Extract<SeatEvent, { type: "view_command" }>,
+  path: string,
+): boolean {
+  return op.destination !== null && op.destination === path;
 }
 
 /**
@@ -322,6 +368,7 @@ export function describeCommands(commands: readonly ViewCommand[]): string {
   for (const command of commands) {
     if (command.dimension === "cue") parts.push(`follow its cue “${command.text}”`);
     else if (command.dimension === "frame") parts.push("frame those entities");
+    else if (command.dimension === "focus") parts.push(`open ${command.name}`);
     else parts.push(`open ${DESTINATION_NOUN[command.path] ?? command.path}`);
   }
   if (parts.length === 0) return "";

@@ -33,13 +33,20 @@
  * - `cue`         — what is lit: which entities the canvas rings and which recede.
  * - `frame`       — the camera: what the canvas is framed on.
  * - `destination` — which surface is on the stage.
+ * - `focus`       — the single object open in the inspector.
  *
- * `focus` (the selected object) and `lens` are named in the spec and are not
- * here: nothing in a `memory_recall` says which single object to open, and the
- * lens control does not exist yet. A dimension nothing can author is a dimension
- * whose authority rule cannot be checked, so it is added when its producer is.
+ * `focus` IS HERE NOW BECAUSE ITS PRODUCER ARRIVED. The note that stood in its
+ * place said a dimension nothing can author is one whose authority rule cannot
+ * be checked, and that it would be added when its producer was — that producer
+ * is `direct_view`'s `focus` argument (seat/src/view-tools.ts), which resolves
+ * one name against this profile's graph and sends the entity's own uuid. It is
+ * still true that a `memory_recall` cannot author one: an inference says what
+ * was searched for and never which single thing to open.
+ *
+ * `lens` remains absent, on the same rule and for the same reason: the control
+ * does not exist, so nothing can author it and nothing could obey it.
  */
-export const VIEW_DIMENSIONS = ["cue", "frame", "destination"] as const;
+export const VIEW_DIMENSIONS = ["cue", "frame", "destination", "focus"] as const;
 export type ViewDimension = (typeof VIEW_DIMENSIONS)[number];
 
 /** The two producers. Nothing else may author a command. */

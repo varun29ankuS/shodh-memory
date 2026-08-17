@@ -46,6 +46,7 @@ import { MEMORY_GUIDANCE } from "./memory-guidance.js";
 import { createMemoryTools } from "./memory-tools.js";
 import type { ModelRegistry } from "./models-registry.js";
 import { createTodoTools } from "./todo-tools.js";
+import type { ViewLink } from "./view-link.js";
 import { createViewTools } from "./view-tools.js";
 
 const HARNESS_SUFFIX = ".seat-harness";
@@ -249,6 +250,15 @@ export interface ConversationDeps {
 	 * rehydrated from the store rather than recreated per request.
 	 */
 	mcpTools: () => AgentTool<any>[];
+	/**
+	 * The rendezvous with the browser's view bus (view-link.ts).
+	 *
+	 * Shared with the HTTP server rather than owned here, because the two ends of
+	 * one question live in different objects: the view tools ask, and the answer
+	 * arrives on a route. One `ViewLink` per process is what makes them the same
+	 * conversation.
+	 */
+	viewLink: ViewLink;
 }
 
 export interface ConversationOptions {
@@ -425,6 +435,8 @@ export class Conversation {
 		const viewTools = createViewTools({
 			backend: deps.backend,
 			userId: this.userId,
+			conversationId: this.id,
+			viewLink: deps.viewLink,
 			emit: (event) => this.emit(event),
 		});
 

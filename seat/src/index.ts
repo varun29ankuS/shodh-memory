@@ -11,6 +11,7 @@ import { McpHost } from "./mcp.js";
 import { ModelRegistry } from "./models-registry.js";
 import { SeatServer } from "./server.js";
 import { SeatStore } from "./store.js";
+import { ViewLink } from "./view-link.js";
 
 async function loadMcpServers(configPath: string | undefined): Promise<McpServerConfig[]> {
 	if (!configPath) return [];
@@ -25,6 +26,9 @@ async function main(): Promise<void> {
 	const registry = new ModelRegistry(config, credentials);
 	const ledger = new LearningLedger(config.dataDir);
 	const store = new SeatStore(config.dataDir);
+	// One per process: the view tools register an ask on it and the view-report
+	// route resolves it. Two instances would be two conversations that never meet.
+	const viewLink = new ViewLink();
 	const mcpHost = new McpHost({
 		connectTimeoutMs: config.mcpConnectTimeoutMs,
 		log: (message) => console.warn(message),
@@ -55,7 +59,7 @@ async function main(): Promise<void> {
 	const mcpServers = await loadMcpServers(config.mcpConfigPath);
 	const mcpConnected = mcpServers.length > 0 ? mcpHost.connect(mcpServers) : Promise.resolve();
 
-	const server = new SeatServer({ config, backend, registry, ledger, mcpHost, store });
+	const server = new SeatServer({ config, backend, registry, ledger, mcpHost, store, viewLink });
 	await server.listen();
 	console.log(`[seat] listening on http://${config.host}:${config.port}`);
 

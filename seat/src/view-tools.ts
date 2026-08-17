@@ -14,8 +14,19 @@
  * `view_command` event; the authority ledger in the browser decides whether it
  * applies or waits as a Follow offer, and the person's own hand always outranks
  * it on a dimension they have touched this turn (front/ui/src/lib/view/
- * authority.ts). The seat cannot see that verdict and does not pretend to: what
- * it records is the ASK.
+ * authority.ts). What this file records is still the ASK.
+ *
+ * IT NOW WAITS TO HEAR WHAT HAPPENED, and that is the difference between this
+ * version and the one before it. The tool registers the ask with `ViewLink`
+ * (view-link.ts), emits, and waits a bounded moment for the browser to report
+ * the ledger's verdict back over `POST /v1/conversations/{id}/view-report`. The
+ * model is then told the truth: moved, waiting as an offer, refused — or, when
+ * nothing answered, that the verdict is NOT KNOWN. The one thing it is never
+ * told is that a move happened because a move was requested.
+ *
+ * KNOWING IT WAS DECLINED IS NOT A ROUTE AROUND THE PERSON. The verdict text
+ * says so explicitly, and there is nothing here that retries: the ledger is
+ * unchanged, and an offer is the person's to accept.
  *
  * THE TOOL MUST NOT LIE TO THE MODEL, because a model that is told the view
  * moved will tell the person the view moved. Two honesty rules follow, and they
@@ -36,6 +47,13 @@ import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import type { ShodhBackend } from "./backend.js";
 import type { SeatEvent } from "./events.js";
+import {
+	composeVerdict,
+	composeViewReport,
+	VIEW_REPLY_TIMEOUT_MS,
+	type ViewLink,
+	type ViewOutcome,
+} from "./view-link.js";
 
 /**
  * The surfaces, transcribed from front/ui/src/components/layout/destinations.ts.
@@ -103,6 +121,20 @@ export const DESTINATION_IDS: readonly string[] = WORKBENCH_DESTINATIONS.map((d)
  */
 export function resolveDestination(id: string): Destination | null {
 	const entry = WORKBENCH_DESTINATIONS.find((d) => d.id === id.trim().toLowerCase());
+	if (!entry) return null;
+	return { id: entry.id, path: entry.path, noun: entry.noun, framesEntities: ENTITY_SURFACES.has(entry.id) };
+}
+
+/**
+ * The other direction: a router path, as the surface it names.
+ *
+ * Needed because the browser reports where the person IS as a path, and a model
+ * reading "/geo" has to know that means the map. Null when the path is not one
+ * of the ten — a surface added to the router before it is added to this table —
+ * and the caller then quotes the raw path rather than inventing a name for it.
+ */
+export function destinationForPath(path: string): Destination | null {
+	const entry = WORKBENCH_DESTINATIONS.find((d) => d.path === path);
 	if (!entry) return null;
 	return { id: entry.id, path: entry.path, noun: entry.noun, framesEntities: ENTITY_SURFACES.has(entry.id) };
 }
@@ -207,11 +239,14 @@ export function composeDirectViewReport(input: {
 	resolved: readonly ResolvedTerm[];
 	unresolved: readonly string[];
 	overflow: number;
+	/** The entity to open in the inspector, as the graph names it, or null. */
+	focus: { id: string; name: string } | null;
 }): string {
 	const lines: string[] = [];
-	const { destination, resolved, unresolved, overflow } = input;
+	const { destination, resolved, unresolved, overflow, focus } = input;
 
 	if (destination) lines.push(`Asked the workbench to open ${destination.noun}.`);
+	if (focus) lines.push(`Asked it to open ${focus.name} in the inspector.`);
 
 	if (resolved.length > 0) {
 		const renamed = resolved.filter((term) => term.name.toLowerCase() !== term.asked.toLowerCase());
@@ -265,6 +300,10 @@ export interface ViewToolContext {
 	backend: ShodhBackend;
 	/** The person's memory namespace — the graph the entities are checked against. */
 	userId: string;
+	/** Which conversation's browser is being asked. The link is per-process and
+	 *  keyed on this, so one tab's verdict can never answer another's ask. */
+	conversationId: string;
+	viewLink: ViewLink;
 	emit(event: SeatEvent): void;
 }
 
@@ -298,7 +337,26 @@ const directViewParameters = Type.Object({
 				"that name nothing are reported back to you rather than framed. Visible on the graph and the map only.",
 		}),
 	),
+	focus: Type.Optional(
+		Type.String({
+			minLength: 1,
+			maxLength: 120,
+			description:
+				"ONE entity name to open in the inspector — the detail panel showing its type and what it is connected " +
+				"to. Use it when the answer is about a single thing; `highlight` is for a set. Checked against this " +
+				"profile's graph like the highlights are, and reported back unopened if it names nothing.",
+		}),
+	),
 });
+
+/**
+ * No parameters, and that is the guarantee.
+ *
+ * A read tool with a filter, a destination or an id would be a tool whose
+ * arguments could ask for something; this one can only ask "what is there".
+ * There is nothing in the request for a browser to misread as an instruction.
+ */
+const inspectViewParameters = Type.Object({});
 
 export function createViewTools(context: ViewToolContext): AgentTool<any>[] {
 	const directViewTool: AgentTool<typeof directViewParameters> = {
@@ -309,7 +367,8 @@ export function createViewTools(context: ViewToolContext): AgentTool<any>[] {
 			"is about. Use it when the shape of the answer has a place — a relational answer belongs on the graph, a " +
 			"geographic one on the map, a question about where something came from on sources. " +
 			"Requires a reason, which is shown to the user. The user always outranks you: if they have moved that part " +
-			"of the view during this turn, your request waits as an offer they can accept.",
+			"of the view during this turn, your request waits as an offer they can accept. " +
+			"The result tells you what actually happened — moved, waiting as an offer, refused, or not known.",
 		parameters: directViewParameters,
 		execute: async (toolCallId, params) => {
 			const reason = params.reason.trim();
@@ -333,9 +392,10 @@ export function createViewTools(context: ViewToolContext): AgentTool<any>[] {
 			}
 
 			const { terms, overflow } = normalizeHighlights(params.highlight ?? []);
-			if (destination === null && terms.length === 0) {
+			const focusTerm = params.focus?.trim() ?? "";
+			if (destination === null && terms.length === 0 && focusTerm.length === 0) {
 				throw new Error(
-					"Nothing to do: give a destination, or entities to highlight, or both. A reason alone moves nothing.",
+					"Nothing to do: give a destination, entities to highlight, or one to focus. A reason alone moves nothing.",
 				);
 			}
 
@@ -351,28 +411,136 @@ export function createViewTools(context: ViewToolContext): AgentTool<any>[] {
 			);
 			const { resolved, unresolved } = collectHighlights(lookups);
 
+			// THE FOCUS CARRIES A UUID, NOT A NAME, because the browser selects by
+			// `UniverseStar.id` and that id is this node's `uuid`. Resolving it
+			// here is the same rule the highlights follow — the graph's identity
+			// travels, never the model's word — and it is the only way the
+			// inspector can open on the thing that was meant.
+			let focus: { id: string; name: string } | null = null;
+			let focusUnresolved: string | null = null;
+			if (focusTerm.length > 0) {
+				const node = await context.backend.findEntity(context.userId, focusTerm);
+				if (node && node.name.trim().length > 0) focus = { id: node.uuid, name: node.name };
+				else focusUnresolved = focusTerm;
+			}
+
 			const entities = resolved.map((term) => term.name);
+
+			// REGISTERED BEFORE THE EVENT LEAVES. The browser answers on a
+			// separate HTTP request, and on a loopback bind that request can be
+			// handled before this call returns — a waiter opened after the emit
+			// would miss the verdict it exists to catch and report "not known"
+			// over an answer that had already arrived.
+			context.viewLink.open(context.conversationId, toolCallId);
 			context.emit({
 				type: "view_command",
 				tool_call_id: toolCallId,
 				reason,
 				destination: destination?.path ?? null,
 				entities,
-				unresolved,
+				unresolved: focusUnresolved === null ? unresolved : [...unresolved, focusUnresolved],
+				focus,
 			});
+
+			const outcomes = await context.viewLink.await(toolCallId);
 
 			// Every term named something imaginary AND there was nowhere to go:
 			// nothing was asked for, so the model must not be told a command was
 			// issued. The event above is still emitted — it carries the empty
 			// outcome and the unresolved terms, which is the durable record that
 			// this was attempted and found nothing.
-			const text = composeDirectViewReport({ destination, resolved, unresolved, overflow });
+			const text = [
+				composeDirectViewReport({
+					destination,
+					resolved,
+					unresolved: focusUnresolved === null ? unresolved : [...unresolved, focusUnresolved],
+					overflow,
+					focus,
+				}),
+				composeVerdict(outcomes),
+			].join("\n\n");
 			return {
 				content: [{ type: "text", text }],
-				details: { destination: destination?.path ?? null, entities, unresolved },
-			} satisfies AgentToolResult<{ destination: string | null; entities: string[]; unresolved: string[] }>;
+				details: {
+					destination: destination?.path ?? null,
+					entities,
+					unresolved,
+					focus,
+					// Null, not an empty array: "the browser said nothing" and "the
+					// browser said nothing changed" are different facts, and a
+					// consumer of `details` must be able to tell them apart.
+					outcomes,
+				},
+			} satisfies AgentToolResult<{
+				destination: string | null;
+				entities: string[];
+				unresolved: string[];
+				focus: { id: string; name: string } | null;
+				outcomes: ViewOutcome[] | null;
+			}>;
 		},
 	};
 
-	return [directViewTool];
+	/**
+	 * Perception: what is the person actually looking at.
+	 *
+	 * WHY IT PROBES RATHER THAN READS A CACHE. The seat holds the last state the
+	 * browser reported, but "last reported" is not "current" — the person may
+	 * have navigated three times since, and a stale picture served as a fresh one
+	 * is the same class of falsehood as an assumed verdict. So this asks, waits
+	 * the same bounded moment `direct_view` waits, and only falls back to the
+	 * cached snapshot WITH ITS AGE STATED when nothing answers.
+	 *
+	 * IT CANNOT CHANGE ANYTHING. It emits a probe, which the browser answers by
+	 * reading its own store; there is no dimension in the request, no path, no
+	 * entity, nothing the browser could apply even if it wanted to. That matters
+	 * because a getter that could smuggle a change would let the model move the
+	 * view without an ask ever appearing in the audit trail, which is exactly the
+	 * hole the authority ledger was built to close.
+	 */
+	const inspectViewTool: AgentTool<typeof inspectViewParameters> = {
+		name: "inspect_view",
+		label: "Look at the workbench",
+		description:
+			"See what the user is looking at right now: which surface is open, which memory profile, what is narrowed, " +
+			"what is open in the inspector, and which parts of the view the user is holding this turn. " +
+			"Read-only — it changes nothing. Call it before direct_view when you want to know whether your request " +
+			"would apply or would only become an offer, and to avoid moving someone who is already where you would send them.",
+		parameters: inspectViewParameters,
+		execute: async () => {
+			// Same order rule as the command path: the probe must be known before
+			// the event carrying its id leaves.
+			const probeId = context.viewLink.openProbe(context.conversationId);
+			context.emit({ type: "view_probe", probe_id: probeId });
+			const live = await context.viewLink.awaitProbe(probeId);
+
+			// The cache is consulted ONLY when the probe went unanswered, and what
+			// it yields is labelled with its age rather than presented as a
+			// reading. A snapshot from before the person's last three navigations
+			// is still useful — it is where they were — but only if it is offered
+			// as that.
+			const cached = live === null ? context.viewLink.lastSnapshot(context.conversationId) : null;
+			const view = live ?? cached?.view ?? null;
+			if (view === null) {
+				throw new Error(
+					`The workbench did not answer within ${VIEW_REPLY_TIMEOUT_MS / 1000}s and has never reported its ` +
+						"state, so nothing here knows what is on screen. Either no browser is watching this conversation " +
+						"or the tab is closed. Do not describe the view; answer from what you know and let the person look.",
+				);
+			}
+
+			const ageMs = cached?.ageMs ?? null;
+			const text = composeViewReport({
+				view,
+				ageMs,
+				destinationNoun: destinationForPath(view.destination)?.noun ?? null,
+			});
+			return {
+				content: [{ type: "text", text }],
+				details: { view, live: live !== null, age_ms: ageMs },
+			} satisfies AgentToolResult<{ view: typeof view; live: boolean; age_ms: number | null }>;
+		},
+	};
+
+	return [directViewTool, inspectViewTool];
 }

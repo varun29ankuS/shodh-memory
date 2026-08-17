@@ -16,6 +16,8 @@ import type {
   RecallMemory,
   RecallTodo,
 } from "@/lib/api/types";
+import type { ViewDimension } from "@/lib/view/authority";
+import type { ViewOutcomeState } from "@/lib/view/outcome";
 
 export type {
   RecallFact,
@@ -155,6 +157,38 @@ export type SeatEvent =
       destination: string | null;
       entities: string[];
       unresolved: string[];
+      /** The one entity to open in the inspector, or null. `id` is the graph's
+       *  `uuid`, which is what `UniverseStar.id` and therefore
+       *  `selectedEntityId` are — the seat resolved it, so it selects directly. */
+      focus: { id: string; name: string } | null;
+    }
+  | {
+      /**
+       * The seat asking this browser what is on screen (`inspect_view`).
+       *
+       * Carries nothing but a correlation id, and that is the guarantee: there
+       * is no dimension, no path and no entity in it, so there is nothing a
+       * probe could be misread as instructing. The answer goes back on
+       * `POST /v1/conversations/{id}/view-report` quoting `probe_id`.
+       */
+      type: "view_probe";
+      probe_id: string;
+    }
+  | {
+      /**
+       * What this browser did with a view command — written by the seat's
+       * view-report route, never streamed.
+       *
+       * It appears in a conversation's stored events (and so in `buildTurns`)
+       * because it is durable audit material; it is not something the browser
+       * learns from the wire, since the browser is what produced it.
+       */
+      type: "view_outcome";
+      tool_call_id: string;
+      dimension: ViewDimension;
+      state: ViewOutcomeState;
+      /** The path the browser was on when it decided. */
+      at: string;
     }
   | { type: "harness_learning_applied"; memories: { id: string; content: string; score: number }[] }
   | { type: "model_changed"; model: ModelRef }
@@ -362,8 +396,35 @@ export type LedgerActor = "user" | "agent" | "system";
  */
 export type LedgerActorView = LedgerActor | "unknown";
 
-/** seat/src/audit.ts `AuditSource` — which store a row came from. */
+/** seat/src/audit.ts `AuditSource` — which store a row came from. `view` covers
+ *  both the ask (`kind: "view_command"`) and what the browser did about it
+ *  (`kind: "view_outcome"`); they are one source and two kinds, because they
+ *  come from the same event store and are told apart by what they claim. */
 export type AuditSource = "ledger" | "tool_call" | "retrieval" | "view";
+
+/**
+ * seat/src/view-link.ts `ViewSnapshot` — what this browser tells the seat is on
+ * screen, and the shape `inspect_view` answers with.
+ *
+ * The absences are the contract: no memory text, no recall results, no
+ * conversation content, no credentials, no pixels. See the seat-side note.
+ */
+export interface ViewSnapshotWire {
+  destination: string;
+  profile: string | null;
+  cue: { text: string; entities: string[]; author: "user" | "agent" } | null;
+  focus: { id: string; name: string | null } | null;
+  claimed: ViewDimension[];
+  offers: { dimension: ViewDimension; reason: string }[];
+}
+
+/** One `POST /seat/v1/conversations/{id}/view-report` body — seat/src/view-link.ts
+ *  `parseViewReport`, which rejects anything outside these closed sets. */
+export interface ViewReportWire {
+  probe_id: string | null;
+  outcomes: { tool_call_id: string; dimension: ViewDimension; state: ViewOutcomeState }[];
+  view: ViewSnapshotWire;
+}
 
 /**
  * seat/src/audit.ts `AuditRow` — one line of the audit trail, flat and uniform

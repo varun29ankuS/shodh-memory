@@ -15,6 +15,7 @@
  *   PATCH  /v1/conversations/{id}                 { title } — rename
  *   DELETE /v1/conversations/{id}
  *   POST   /v1/conversations/{id}/messages        { text }  → SSE stream of SeatEvents
+ *   POST   /v1/conversations/{id}/view-report     browser → seat: view verdicts + state
  *   PATCH  /v1/conversations/{id}/model           { provider, model }
  *   GET    /v1/learning/events[?limit&conversation_id]
  *   POST   /v1/learning/revert                    { event_id }
@@ -67,6 +68,7 @@ import {
 	type StoredEvent,
 	type UsageTotals,
 } from "./store.js";
+import { parseViewReport, type ViewLink } from "./view-link.js";
 
 const MAX_BODY_BYTES = 1_048_576;
 const SSE_HEARTBEAT_MS = 15_000;
@@ -78,6 +80,13 @@ const SSE_HEARTBEAT_MS = 15_000;
  * a caller see that it did.
  */
 const MAX_AUDIT_EXPORT_EVENTS = 50_000;
+/**
+ * How far back a view report may reach to prove its ask was real, when the
+ * in-memory registry has forgotten it (a restart). Generous, because the only
+ * cost is one indexed read per unrecognised outcome, and the failure it prevents
+ * is refusing to record a person accepting an offer.
+ */
+const MAX_VIEW_ASK_LOOKBACK = 2_000;
 
 interface CreateConversationBody {
 	user_id?: string;
@@ -164,6 +173,9 @@ export interface SeatServerDeps {
 	ledger: LearningLedger;
 	mcpHost: McpHost;
 	store: SeatStore;
+	/** Shared with every conversation's view tools: the tools ask, this route
+	 *  answers, and one instance is what makes those the same exchange. */
+	viewLink: ViewLink;
 }
 
 /** Wire shape of one conversation in list/detail responses. */
@@ -314,6 +326,7 @@ export class SeatServer {
 			ledger: this.deps.ledger,
 			// Passed as a getter, not a snapshot: see ConversationDeps.mcpTools.
 			mcpTools: () => this.deps.mcpHost.getTools(),
+			viewLink: this.deps.viewLink,
 		};
 	}
 
@@ -407,6 +420,10 @@ export class SeatServer {
 				const live = this.conversations.get(conversationId);
 				if (live?.isStreaming) throw new HttpError(409, "Conversation is busy — abort or wait, then delete");
 				this.conversations.delete(conversationId);
+				// The pending asks and the last known view belong to a conversation
+				// that no longer exists; a verdict for one of them could only be
+				// recorded against a row the cascade just removed.
+				this.deps.viewLink.forget(conversationId);
 				this.deps.store.deleteConversation(conversationId);
 				sendJson(response, 200, { deleted: true });
 				return;
@@ -417,6 +434,10 @@ export class SeatServer {
 			}
 			if (method === "PATCH" && segments[3] === "model" && segments.length === 4) {
 				await this.handleModelChange(conversationId, request, response);
+				return;
+			}
+			if (method === "POST" && segments[3] === "view-report" && segments.length === 4) {
+				await this.handleViewReport(conversationId, request, response);
 				return;
 			}
 		}
@@ -820,6 +841,99 @@ export class SeatServer {
 			clearInterval(heartbeat);
 			if (!response.writableEnded) response.end();
 		}
+	}
+
+	/**
+	 * The browser reporting what it did with a view command, and what is on
+	 * screen — the return leg of the view loop (view-link.ts).
+	 *
+	 * WHY A ROUTE AND NOT THE STREAM. The SSE stream is one-way, and the reports
+	 * that matter most arrive when there is no stream at all: a Follow offer sits
+	 * on screen and is accepted after the turn has ended. So the answer comes back
+	 * the way everything else the browser sends does — an HTTP request on the
+	 * conversation resource.
+	 *
+	 * OUTCOMES ARE PERSISTED HERE, NOT STREAMED THROUGH A TURN'S SINK. A late
+	 * outcome has no turn to ride, and giving early ones a different path from
+	 * late ones would leave two writers for one kind of row, which is how a trail
+	 * ends up with duplicates in one window and gaps in another.
+	 *
+	 * AN OUTCOME FOR AN ASK THIS SEAT NEVER ISSUED IS REFUSED. The registry is
+	 * checked first and the durable event store second — the seat can restart
+	 * while an offer is still on screen, and the persisted `view_command` is then
+	 * the only evidence the ask was real. Only when neither knows the id is the
+	 * report rejected, because at that point it is a claim about an act with no
+	 * record, and writing it would put a verdict in the trail for a command that
+	 * appears nowhere in it.
+	 */
+	private async handleViewReport(
+		conversationId: string,
+		request: http.IncomingMessage,
+		response: http.ServerResponse,
+	): Promise<void> {
+		const stored = this.storedConversation(conversationId);
+		const parsed = parseViewReport(parseJson<unknown>(await readBody(request)));
+		if ("error" in parsed) throw new HttpError(400, parsed.error);
+		const report = parsed.report;
+
+		// The turn a late outcome is filed under is the one in progress when it
+		// arrived — where a reader scanning the timeline would look for it. What
+		// joins it to the command it answers is the tool call id in its payload,
+		// never its position.
+		const live = this.conversations.get(conversationId);
+		const turn = Math.max(1, live?.turnCount ?? stored.turns);
+		const at = report.view.destination;
+
+		const unrecognised: string[] = [];
+		let recorded = 0;
+		for (const outcome of report.outcomes) {
+			if (!this.deps.viewLink.knows(outcome.tool_call_id) && !this.askWasIssued(conversationId, outcome.tool_call_id)) {
+				unrecognised.push(outcome.tool_call_id);
+				continue;
+			}
+			const written = this.deps.store.appendEvent(conversationId, {
+				turn,
+				ts: new Date().toISOString(),
+				event: {
+					type: "view_outcome",
+					tool_call_id: outcome.tool_call_id,
+					dimension: outcome.dimension,
+					state: outcome.state,
+					at,
+				},
+			});
+			if (written) recorded += 1;
+		}
+
+		if (report.outcomes.length > 0 && recorded === 0 && unrecognised.length > 0) {
+			throw new HttpError(
+				404,
+				`No view command with ${unrecognised.length === 1 ? "id" : "ids"} ${unrecognised.join(", ")} was issued for this conversation`,
+			);
+		}
+
+		// Handed over AFTER the durable write, so a tool can never be told a
+		// verdict the trail does not contain.
+		this.deps.viewLink.report(conversationId, report);
+
+		// `unrecognised` is returned rather than swallowed: a partially accepted
+		// report is a client bug, and a 200 that hid it would let the browser go
+		// on reporting into a void.
+		sendJson(response, 200, { recorded, unrecognised });
+	}
+
+	/**
+	 * Whether a `view_command` with this tool call id is in the durable store for
+	 * this conversation.
+	 *
+	 * The registry's memory dies with the process; the store's does not. This is
+	 * the only thing that lets a Follow offer accepted after a seat restart be
+	 * recorded rather than rejected as a fabrication.
+	 */
+	private askWasIssued(conversationId: string, toolCallId: string): boolean {
+		return this.deps.store
+			.queryEvents({ conversationId, types: ["view_command"], limit: MAX_VIEW_ASK_LOOKBACK })
+			.some((row) => row.event.type === "view_command" && row.event.tool_call_id === toolCallId);
 	}
 
 	/**

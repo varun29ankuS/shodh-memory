@@ -20,6 +20,7 @@ import type {
   SeatHealthResponse,
   SeatModelInfo,
   SeatReachability,
+  ViewReportWire,
 } from "./types";
 
 export async function probeSeat(signal?: AbortSignal): Promise<SeatReachability> {
@@ -130,6 +131,35 @@ export async function renameConversation(id: string, title: string): Promise<voi
 export async function deleteConversation(id: string): Promise<void> {
   const res = await fetch(`/seat/v1/conversations/${encodeURIComponent(id)}`, { method: "DELETE" });
   if (!res.ok) throw new ApiError(res.status, await res.text().catch(() => ""));
+}
+
+/**
+ * Tell the seat what this browser did with a view command, and what is on
+ * screen — the return leg of the view loop.
+ *
+ * FIRE AND FORGET, DELIBERATELY. The caller is the view bus, running inside a
+ * store transition; it cannot wait for a network round trip and there is nothing
+ * useful it could do with a failure. Losing a report costs the model its verdict
+ * and the seat's answer for that is already "not known", which is the honest
+ * outcome of a report that did not arrive. What must NOT happen is a rejected
+ * promise escaping into a store subscriber and tearing down the dispatch that
+ * moved the view, so the failure is swallowed here and logged.
+ *
+ * A 404 is expected and is not an error worth shouting about: a conversation
+ * deleted while an offer was still on screen will refuse the verdict for it.
+ */
+export function reportView(conversationId: string, report: ViewReportWire): void {
+  void fetch(`/seat/v1/conversations/${encodeURIComponent(conversationId)}/view-report`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(report),
+    // The page can be closing as the last verdict goes out — a turn ending on a
+    // tab the person is shutting. `keepalive` is what lets that request outlive
+    // the document instead of being cancelled on unload.
+    keepalive: true,
+  }).catch((error: unknown) => {
+    console.warn("[view] could not report the workbench's verdict to the seat:", error);
+  });
 }
 
 export async function changeModel(id: string, provider: string, model: string): Promise<ModelRef> {

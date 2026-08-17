@@ -354,6 +354,24 @@ function viewRow(overrides = {}) {
 			destination: "/geo",
 			entities: ["Malabar Coast", "Dali"],
 			unresolved: ["Atlantis"],
+			focus: null,
+		},
+		...overrides,
+	};
+}
+
+function outcomeRow(overrides = {}) {
+	return {
+		conversation_id: "conv-1",
+		user_id: "demo",
+		turn: 1,
+		ts: "2026-08-16T10:00:00.300Z",
+		event: {
+			type: "view_outcome",
+			tool_call_id: "call-9",
+			dimension: "destination",
+			state: "offered",
+			at: "/chat",
 		},
 		...overrides,
 	};
@@ -381,13 +399,84 @@ test("the row records the VALIDATED outcome, which its tool_call row cannot", ()
 	assert.equal(detail.reason, "these 12 memories cluster on the Malabar coast");
 });
 
-test("the row claims no verdict, because the seat never learns one", () => {
-	// Whether the command applied or waited as a Follow is decided by the
-	// authority ledger in the browser and reported to nobody. A field asserting
-	// it would be the trail inventing the one fact it cannot have.
+test("the ask row states what was requested and NEVER what came of it", () => {
+	// The pin, updated deliberately. `focus` joined the ask when direct_view
+	// gained it: like the destination and the entities, it is a seat-VALIDATED
+	// request, resolved against this profile's graph before the event was
+	// emitted. What the pin exists to forbid is unchanged and is now asserted
+	// directly rather than implied by a key count — no field on this row may
+	// claim an outcome, because the outcome is a separate row the browser
+	// reports and may never send at all.
 	const [row] = buildAuditRows({ entries: [], events: [viewRow()] }).filter((r) => r.source === "view");
 	const detail = JSON.parse(row.detail);
-	assert.deepEqual(Object.keys(detail).sort(), ["destination", "entities", "reason", "unresolved"]);
+	assert.deepEqual(
+		Object.keys(detail).sort(),
+		["destination", "entities", "focus", "reason", "unresolved"],
+	);
+	for (const forbidden of ["applied", "verdict", "outcome", "state", "followed", "declined"]) {
+		assert.equal(forbidden in detail, false, `an ask row must not carry "${forbidden}"`);
+	}
+});
+
+// -- The verdict, which the seat now does learn ------------------------------
+
+test("an outcome becomes its own row, joined to the ask by the tool call id", () => {
+	const rows = buildAuditRows({ entries: [], events: [viewRow(), outcomeRow()] });
+	const view = rows.filter((row) => row.source === "view");
+	assert.deepEqual(view.map((row) => row.kind), ["view_command", "view_outcome"]);
+	assert.equal(view[0].ref, view[1].ref, "the ask and its answer must share a ref");
+});
+
+test("the outcome is attributed to the PERSON, not to the model that asked", () => {
+	// The model authored the ask. The authority ledger authored the answer, and
+	// that ledger exists to enforce the person's precedence -- "declined" is a
+	// fact about a human. Filing it under the agent would credit the model with
+	// the person's own decisions.
+	const [row] = buildAuditRows({ entries: [], events: [outcomeRow()] }).filter((r) => r.kind === "view_outcome");
+	assert.equal(row.actor, "user");
+	assert.equal(row.source, "view");
+});
+
+test("the outcome row carries the state, the dimension and where it was decided", () => {
+	const [row] = buildAuditRows({ entries: [], events: [outcomeRow()] }).filter((r) => r.kind === "view_outcome");
+	const detail = JSON.parse(row.detail);
+	assert.deepEqual(Object.keys(detail).sort(), ["at", "dimension", "state"]);
+	assert.equal(detail.state, "offered");
+	assert.equal(detail.dimension, "destination");
+	// Where the browser stood when it decided. Without it a reader cannot tell
+	// why "already" was true for one row and not the next.
+	assert.equal(detail.at, "/chat");
+});
+
+test("an ask with no outcome row stays an ask -- absence is how the trail says 'not known'", () => {
+	const rows = buildAuditRows({ entries: [], events: [viewRow()] });
+	assert.equal(rows.filter((row) => row.kind === "view_outcome").length, 0);
+	assert.equal(rows.filter((row) => row.kind === "view_command").length, 1);
+});
+
+test("several outcomes of ONE command sort deterministically, sharing ts, source and ref", () => {
+	// They differ only inside `detail`, so without the last two sort keys their
+	// order would be whatever the store happened to return -- and two exports of
+	// the same window would stop being byte-identical.
+	const ts = "2026-08-16T10:00:00.300Z";
+	const cue = outcomeRow({ ts, event: { ...outcomeRow().event, dimension: "cue", state: "applied" } });
+	const dest = outcomeRow({ ts, event: { ...outcomeRow().event, dimension: "destination", state: "offered" } });
+	const forward = buildAuditRows({ entries: [], events: [cue, dest] });
+	const reverse = buildAuditRows({ entries: [], events: [dest, cue] });
+	assert.deepEqual(forward.map((r) => r.detail), reverse.map((r) => r.detail));
+});
+
+test("an ask sorts above the outcome that answers it, even in the same millisecond", () => {
+	const ts = "2026-08-16T10:00:00.100Z";
+	const rows = buildAuditRows({
+		entries: [],
+		events: [outcomeRow({ ts }), viewRow({ ts })],
+	});
+	assert.deepEqual(rows.map((row) => row.kind), ["view_command", "view_outcome"]);
+});
+
+test("view_outcome is in the store filter, or the verdict is built and never fetched", () => {
+	assert.ok(AUDIT_EVENT_TYPES.includes("view_outcome"));
 });
 
 test("view_command is in the store filter, or the export would query past it", () => {

@@ -195,6 +195,14 @@ function applyEvent(convo: ConvoLive, event: SeatEvent): ConvoLive {
       const next = last ? replaceLast({ ...last, ops: [...last.ops, event] }) : { ...convo, turns };
       return { ...next, model: event.model };
     }
+    // NEITHER OF THESE IS EVIDENCE, so neither joins `ops`. A probe is the seat
+    // asking this browser a question — `app/useAgentView.ts` answers it, and the
+    // `inspect_view` tool call beside it is what the transcript shows. An
+    // outcome is what this browser itself decided; it reaches the store only as
+    // a durable row on reload, and rendering it in the evidence panel would show
+    // the reader their own click played back as something the model did.
+    case "view_probe":
+    case "view_outcome":
     case "agent_end":
     case "conversation_created":
       return convo;
@@ -253,6 +261,10 @@ export function buildTurns(detail: ConversationDetail): ChatTurn[] {
       case "conversation_created":
       case "text_delta":
       case "thinking_delta":
+      // See `applyEvent`: a reloaded conversation replays its stored outcomes,
+      // and they belong in the audit trail rather than in the evidence panel.
+      case "view_probe":
+      case "view_outcome":
         break;
       default:
         turn.ops.push(event);

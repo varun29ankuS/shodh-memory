@@ -94,9 +94,17 @@ export interface EventQuery {
 /** Default read ceiling for {@link SeatStore.queryEvents}. */
 export const DEFAULT_EVENT_QUERY_LIMIT = 5000;
 
-/** Event types that are NOT persisted: their content is transient (deltas are
- *  superseded by the transcript's final text). Everything else is durable. */
-const TRANSIENT_EVENT_TYPES = new Set<SeatEvent["type"]>(["text_delta", "thinking_delta"]);
+/**
+ * Event types that are NOT persisted.
+ *
+ * The deltas are transient because the transcript holds their final text.
+ * `view_probe` is transient for a different reason: it is a QUESTION the seat
+ * asked the browser, and the `inspect_view` tool call that produced it is
+ * already a durable row in the audit trail. Storing the probe as well would put
+ * two lines in the artefact for one act, in a file whose whole value is that
+ * each line is a distinct thing that happened.
+ */
+const TRANSIENT_EVENT_TYPES = new Set<SeatEvent["type"]>(["text_delta", "thinking_delta", "view_probe"]);
 
 export function isDurableEvent(event: SeatEvent): boolean {
 	return !TRANSIENT_EVENT_TYPES.has(event.type);
@@ -393,6 +401,40 @@ export class SeatStore {
 			ts: row.ts,
 			event: JSON.parse(row.payload) as SeatEvent,
 		}));
+	}
+
+	/**
+	 * Persist one event on its own, outside a turn's commit.
+	 *
+	 * WHY THIS EXISTS SEPARATELY FROM `persistTurn`. Everything a turn produces
+	 * is written when the turn ends, because the seat is what produces it. A view
+	 * outcome is produced by the BROWSER and can arrive at any time — including
+	 * after the turn is closed, when a person finally accepts a Follow offer that
+	 * has been sitting on screen. There is no open turn to attach that to, and
+	 * holding it until the next one would mean losing it on a restart and
+	 * reordering it behind events that happened later.
+	 *
+	 * `turn` is the turn the caller says this belongs to. For a late outcome that
+	 * is the turn in progress when it arrived, which is where a reader looking at
+	 * the timeline would expect to find it; the link back to the act it answers
+	 * is the `tool_call_id` in its payload, not its position.
+	 *
+	 * Returns false when the conversation does not exist — the foreign key would
+	 * reject the insert, and a caller writing outcomes for a deleted conversation
+	 * should be told rather than have the failure surface as a thrown constraint.
+	 */
+	appendEvent(conversationId: string, stored: StoredEvent): boolean {
+		if (!this.getConversation(conversationId)) return false;
+		this.db
+			.prepare(`INSERT INTO events (conversation_id, turn, ts, type, payload) VALUES (?, ?, ?, ?, ?)`)
+			.run(
+				conversationId,
+				stored.turn,
+				stored.ts,
+				stored.event.type,
+				JSON.stringify(stored.event),
+			);
+		return true;
 	}
 
 	/**

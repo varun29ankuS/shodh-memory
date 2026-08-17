@@ -266,10 +266,11 @@ function retrievalRows(row: StoredEventRow): AuditRow[] {
  * and only the second one describes what the person could have been shown.
  *
  * IT IS STILL AN ASK, NOT A VERDICT, and the trail must not be read as more.
- * Whether the command applied or waited as a Follow offer is decided by the
- * authority ledger in the browser against dimensions the person had touched;
- * the seat never learns which. `detail` therefore states what was requested and
- * says nothing about what appeared on screen.
+ * `detail` states what was REQUESTED and says nothing about what appeared on
+ * screen — no `applied`, no `verdict`, no outcome of any name. What happened
+ * next is a separate `view_outcome` row the browser reported, and the two are
+ * kept apart on purpose: a reader must be able to see an ask that was never
+ * answered, and a single merged row could not express one.
  */
 function viewRow(row: StoredEventRow): AuditRow | null {
 	if (row.event.type !== "view_command") return null;
@@ -290,6 +291,43 @@ function viewRow(row: StoredEventRow): AuditRow | null {
 			destination: event.destination,
 			entities: event.entities,
 			unresolved: event.unresolved,
+			focus: event.focus,
+		}),
+	};
+}
+
+/**
+ * What the browser did with a view command — the row the trail could not have.
+ *
+ * THE ACTOR IS THE PERSON, NOT THE MODEL, and that is the whole point of the
+ * row. The model authored the ask; the authority ledger authored the answer, and
+ * that ledger exists to enforce the person's precedence. `applied` means the
+ * person was not holding that axis, `declined` means they refused, `expired`
+ * means they never saw it — every one of those is a fact about the human, and
+ * filing them under `actor: "agent"` would credit the model with the person's
+ * own decisions.
+ *
+ * `ref` is the ask's tool call id, which is what joins this row to the
+ * `view_command` and the `tool_call` rows above it. The three together read as
+ * one action: what was called, what was requested after validation, and what the
+ * person's workbench did about it.
+ */
+function viewOutcomeRow(row: StoredEventRow): AuditRow | null {
+	if (row.event.type !== "view_outcome") return null;
+	const event = row.event;
+	return {
+		ts: row.ts,
+		source: "view",
+		actor: "user",
+		kind: "view_outcome",
+		user_id: row.user_id,
+		conversation_id: row.conversation_id,
+		turn: row.turn,
+		ref: event.tool_call_id,
+		detail: JSON.stringify({
+			dimension: event.dimension,
+			state: event.state,
+			at: event.at,
 		}),
 	};
 }
@@ -301,16 +339,27 @@ export const AUDIT_EVENT_TYPES = [
 	"memory_recall",
 	"proactive_context",
 	"view_command",
+	"view_outcome",
 ] as const satisfies readonly SeatEvent["type"][];
 
 /**
  * Merge the ledger and the seat event store into one sorted trail.
  *
- * Sort key is (ts, source, ref): a total order over rows, so the same inputs
- * always serialize identically. Ties on `ts` are real — a ledger entry and the
- * event announcing it are written in the same millisecond — and resolving them
- * by a stable, content-derived key rather than by input order is what makes
- * two exports of the same window comparable.
+ * Sort key is (ts, source, ref, kind, detail): a total order over rows, so the
+ * same inputs always serialize identically. Ties on `ts` are real — a ledger
+ * entry and the event announcing it are written in the same millisecond — and
+ * resolving them by a stable, content-derived key rather than by input order is
+ * what makes two exports of the same window comparable.
+ *
+ * THE LAST TWO KEYS WERE ADDED WITH `view_outcome` and are not decoration. An
+ * ask and its answer share a source and a ref, and the several outcomes of one
+ * command share all three of the first keys and differ only in their dimension,
+ * which lives inside `detail`. Without these the order of those rows would fall
+ * back to the order the store happened to return them in, and the one property
+ * this function exists for — two exports of the same window are byte-identical —
+ * would hold everywhere except on the newest rows in the file. `kind` precedes
+ * `detail` so an ask always sorts above the outcome that answers it
+ * ("view_command" < "view_outcome"), which is also the order they happened in.
  */
 export function buildAuditRows(input: {
 	entries: readonly LedgerEntry[];
@@ -321,7 +370,7 @@ export function buildAuditRows(input: {
 	for (const call of pairToolCalls(input.events)) rows.push(toolCallRow(call));
 	for (const event of input.events) rows.push(...retrievalRows(event));
 	for (const event of input.events) {
-		const row = viewRow(event);
+		const row = viewRow(event) ?? viewOutcomeRow(event);
 		if (row) rows.push(row);
 	}
 
@@ -329,6 +378,8 @@ export function buildAuditRows(input: {
 		if (a.ts !== b.ts) return a.ts < b.ts ? -1 : 1;
 		if (a.source !== b.source) return a.source < b.source ? -1 : 1;
 		if (a.ref !== b.ref) return a.ref < b.ref ? -1 : 1;
+		if (a.kind !== b.kind) return a.kind < b.kind ? -1 : 1;
+		if (a.detail !== b.detail) return a.detail < b.detail ? -1 : 1;
 		return 0;
 	});
 	return rows;
