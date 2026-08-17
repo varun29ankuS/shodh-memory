@@ -5908,6 +5908,9 @@ impl GraphMemory {
         let mut all_entities: Vec<TraversedEntity> = Vec::new();
         let mut all_edges = Vec::new();
         let mut edges_to_strengthen = Vec::new();
+        // Neighbours skipped because their stored node could not be decoded.
+        // Logged and summarised rather than propagated — see the skip site below.
+        let mut unreadable_neighbours = 0usize;
 
         visited_entities.insert(*start_uuid);
         if let Some(entity) = self.get_entity(start_uuid)? {
@@ -5973,12 +5976,28 @@ impl GraphMemory {
                         let next_hop = depth + 1;
                         let decay = hop_decay_factor.powi(next_hop as i32);
 
-                        if let Some(entity) = self.get_entity(&connected_uuid)? {
-                            all_entities.push(TraversedEntity {
+                        // A NEIGHBOUR that cannot be decoded costs the traversal
+                        // that one node, not the whole request. The starting
+                        // entity is different — it is what the caller asked for,
+                        // so `get_entity` there stays strict and the request
+                        // fails honestly. Here, propagating would let any single
+                        // unreadable node in the graph fail every traversal that
+                        // happens to reach it.
+                        match self.get_entity(&connected_uuid) {
+                            Ok(Some(entity)) => all_entities.push(TraversedEntity {
                                 entity,
                                 hop_distance: next_hop,
                                 decay_factor: decay,
-                            });
+                            }),
+                            Ok(None) => {}
+                            Err(e) => {
+                                unreadable_neighbours += 1;
+                                tracing::warn!(
+                                    uuid = %connected_uuid,
+                                    error = %e,
+                                    "traversal skipped a neighbour whose node could not be decoded"
+                                );
+                            }
                         }
                         next_level.push((connected_uuid, next_hop));
                     }
@@ -6006,6 +6025,15 @@ impl GraphMemory {
                     tracing::debug!("Failed to batch strengthen synapses: {}", e);
                 }
             }
+        }
+
+        if unreadable_neighbours > 0 {
+            tracing::warn!(
+                skipped = unreadable_neighbours,
+                start = %start_uuid,
+                "traversal completed with unreadable neighbours skipped — the \
+                 returned subgraph is incomplete"
+            );
         }
 
         Ok(GraphTraversal {
@@ -11135,6 +11163,220 @@ mod tests {
             "re-mention without a fine type must preserve the existing one"
         );
         assert_eq!(merged.mention_count, 2);
+    }
+
+    #[test]
+    fn one_undecodable_neighbour_does_not_fail_the_whole_traversal() {
+        // The blast radius that turned a data-compatibility bug into an
+        // outage: a single node this build cannot read used to propagate its
+        // decode error out of `traverse_from_entity` (and out of `recall`'s
+        // graph leg), so one bad record in a 9,000-node graph failed EVERY
+        // request that walked past it. A traversal must lose that one node and
+        // keep the rest.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(dir.path(), None).unwrap();
+
+        let start = graph.add_entity(universe_entity("Dali")).unwrap();
+        let neighbour = graph.add_entity(universe_entity("Key Bridge")).unwrap();
+        let now = Utc::now();
+        graph
+            .add_relationship(RelationshipEdge {
+                uuid: Uuid::new_v4(),
+                from_entity: start,
+                to_entity: neighbour,
+                relation_type: RelationType::RelatedTo,
+                strength: 0.9,
+                created_at: now,
+                valid_at: now,
+                invalidated_at: None,
+                source_episode_id: None,
+                context: String::new(),
+                last_activated: now,
+                activation_count: 1,
+                ltp_status: LtpStatus::None,
+                activation_timestamps: None,
+                tier: EdgeTier::L1Working,
+                entity_confidence: None,
+                forman_curvature: None,
+                endpoint_selectivity: None,
+                provenance: Vec::new(),
+                promoted_at: None,
+            })
+            .unwrap();
+
+        // Poison the neighbour's stored bytes: a well-formed format tag over a
+        // payload no generation can decode. This stands in for a record written
+        // by a build whose layout this one does not know.
+        graph
+            .db
+            .put_cf(
+                graph.entities_cf(),
+                neighbour.as_bytes(),
+                [0x50u8, 0x02, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            )
+            .unwrap();
+
+        // A single-id read is still strict: asking for THIS node by id must
+        // fail rather than answer "no such entity".
+        assert!(
+            graph.get_entity(&neighbour).is_err(),
+            "a direct read of an undecodable node must fail honestly"
+        );
+
+        let traversal = graph
+            .traverse_from_entity(&start, 2)
+            .expect("an undecodable neighbour must not fail the traversal");
+
+        let names: Vec<&str> = traversal
+            .entities
+            .iter()
+            .map(|t| t.entity.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"Dali"),
+            "the readable start node must still be returned: {names:?}"
+        );
+        assert!(
+            !names.contains(&"Key Bridge"),
+            "the unreadable neighbour must be skipped, not fabricated: {names:?}"
+        );
+    }
+
+    #[test]
+    fn pre_rollup_other_label_decodes_from_hand_derived_bytes() {
+        // `EntityLabel::Other(String)` sat at DECLARATION INDEX 23 until
+        // c365eef3 (2026-07-11) inserted twelve variants above it and moved it
+        // to 35. These bytes are what a pre-07-11 build wrote and are derived by
+        // hand, NOT regenerated by this test — encoding with today's code would
+        // pass even if a future edit shifted encoder and decoder together, which
+        // is exactly the failure being pinned:
+        //   - byte 0 = 0x17 (23): the varint variant index of `Other` in the
+        //     PRE-ROLLUP declaration. Counting the pre-rollup variants in order
+        //     (Person=0, Organization=1, ..., Module=22) puts Other at 23.
+        //   - byte 1 = 0x04: varint length of the following UTF-8 string.
+        //   - bytes 2..=5 = "MISC".
+        // This is a real byte sequence: it is the label payload observed on
+        // live graph nodes that fail to decode under today's numbering.
+        let pre_rollup_other_misc: [u8; 6] = [0x17, 0x04, 0x4d, 0x49, 0x53, 0x43];
+
+        // Under today's numbering index 23 is the UNIT variant `Norp`, so the
+        // string is left in the buffer for the next field to misread — the
+        // decode "succeeds" here only because a bare label has no next field.
+        let as_current: EntityLabel =
+            crate::serialization::decode_raw(&pre_rollup_other_misc).unwrap();
+        assert_eq!(
+            as_current,
+            EntityLabel::Norp,
+            "index 23 names Norp today — this is the renumbering that broke the store"
+        );
+
+        let _generation = EntityLabelWireGeneration::PreSchemaRollup.enter();
+        let as_legacy: EntityLabel =
+            crate::serialization::decode_raw(&pre_rollup_other_misc).unwrap();
+        assert_eq!(
+            as_legacy,
+            EntityLabel::Other("MISC".to_string()),
+            "under the pre-rollup numbering index 23 is Other(String)"
+        );
+    }
+
+    #[test]
+    fn pre_rollup_entity_node_with_other_label_decodes() {
+        // A whole node as a pre-07-11 build wrote it: `Other(String)` at index
+        // 23, and none of the three trailing fields that came later. Both
+        // compatibility mechanisms have to cooperate — the generation retry for
+        // the label, the default suffix for the tail.
+        //
+        // The payload is assembled field by field rather than by serializing a
+        // replica struct, because today's encoder cannot produce the old label
+        // index at all — that byte has to be written by hand (see the
+        // derivation in `pre_rollup_other_label_decodes_from_hand_derived_bytes`).
+        let now = Utc::now();
+        let uuid = Uuid::new_v4();
+
+        // Head: uuid + name, then the hand-encoded labels vector.
+        let mut payload = postcard::to_allocvec(&uuid).unwrap();
+        payload.extend_from_slice(&postcard::to_allocvec("Baltimore Bridge").unwrap());
+        // labels: Vec length 1, then Other("MISC") at the PRE-ROLLUP index 23.
+        payload.extend_from_slice(&[0x01, 0x17, 0x04, 0x4d, 0x49, 0x53, 0x43]);
+        // Tail: everything after `labels`, in declaration order, stopping before
+        // `selectivity` / `fine_type` / `kb_id` (which did not exist yet).
+        payload.extend_from_slice(&postcard::to_allocvec(&now).unwrap());
+        payload.extend_from_slice(&postcard::to_allocvec(&now).unwrap());
+        payload.extend_from_slice(&postcard::to_allocvec(&7usize).unwrap());
+        payload.extend_from_slice(&postcard::to_allocvec("a pre-rollup node").unwrap());
+        payload.extend_from_slice(&postcard::to_allocvec(&HashMap::<String, String>::new()).unwrap());
+        payload.extend_from_slice(&postcard::to_allocvec(&Option::<Vec<f32>>::None).unwrap());
+        payload.extend_from_slice(&postcard::to_allocvec(&0.75f32).unwrap());
+        payload.extend_from_slice(&postcard::to_allocvec(&true).unwrap());
+
+        // Wrap in the 2-byte format tag every non-Memory record carries.
+        let mut bytes = vec![0x50, 0x02];
+        bytes.extend_from_slice(&payload);
+
+        let (decoded, needs_migration) = decode_entity_node(&bytes)
+            .expect("a node written before the EntityLabel renumbering must still be readable");
+
+        assert_eq!(decoded.uuid, uuid);
+        assert_eq!(decoded.name, "Baltimore Bridge");
+        assert_eq!(
+            decoded.labels,
+            vec![EntityLabel::Other("MISC".to_string())],
+            "the pre-rollup label must come back as Other(\"MISC\"), not Norp"
+        );
+        assert_eq!(decoded.mention_count, 7);
+        assert_eq!(decoded.summary, "a pre-rollup node");
+        assert_eq!(decoded.created_at, now, "created_at must not absorb the label's string");
+        assert_eq!(decoded.selectivity, None);
+        assert_eq!(decoded.fine_type, None);
+        assert_eq!(decoded.kb_id, None);
+        assert!(
+            needs_migration,
+            "a node recovered through the legacy numbering must be flagged for rewrite"
+        );
+
+        // The mechanism must not leak: the guard inside decode_entity_node is
+        // scoped to that call, so the next decode is back on today's numbering.
+        assert_eq!(
+            EntityLabelWireGeneration::current(),
+            EntityLabelWireGeneration::Current,
+            "the decode generation must be restored when the guard drops"
+        );
+    }
+
+    #[test]
+    fn current_entity_node_is_unaffected_by_the_legacy_retry() {
+        // A node written today, carrying one of the variants that only exists
+        // AFTER the renumbering, must decode on the first attempt with no
+        // migration flag — the retry is a fallback, not a second opinion.
+        let now = Utc::now();
+        let node = EntityNode {
+            uuid: Uuid::new_v4(),
+            name: "Dali".to_string(),
+            labels: vec![EntityLabel::Vehicle, EntityLabel::Other("MISC".to_string())],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 2,
+            summary: "current-generation node".to_string(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.6,
+            is_proper_noun: true,
+            selectivity: Some(0.3),
+            fine_type: Some("vessel".to_string()),
+            kb_id: Some("Q123".to_string()),
+        };
+
+        let bytes = crate::serialization::encode(&node).unwrap();
+        let (decoded, needs_migration) = decode_entity_node(&bytes).unwrap();
+
+        assert_eq!(decoded.labels, node.labels);
+        assert_eq!(decoded.fine_type.as_deref(), Some("vessel"));
+        assert_eq!(decoded.kb_id.as_deref(), Some("Q123"));
+        assert!(
+            !needs_migration,
+            "a current-format node must not be flagged for rewrite"
+        );
     }
 
     #[test]

@@ -1297,16 +1297,38 @@ pub fn spreading_activation_retrieve_with_stats(
     // First pass: collect entities with their salience values
     let mut entity_data: Vec<(Uuid, String, f32, f32)> = Vec::new(); // (uuid, name, ic_weight, salience)
 
+    // A node this build cannot decode must cost the query that ONE seed, not the
+    // whole request. The seed lookup used to propagate the decode error straight
+    // out of `recall`, so a single unreadable node in a 9,000-node graph turned
+    // every default/hybrid/associative recall into a 500 while semantic and
+    // temporal — which never touch the graph leg — kept working.
+    //
+    // Skipping is not the same as hiding: each skip is logged with the name that
+    // could not be resolved, counted, and returned to the caller as
+    // `RetrievalStats::unreadable_graph_nodes`, so a degraded answer is
+    // distinguishable from a complete one.
+    let mut unreadable_graph_nodes = 0usize;
+
     for entity in &analysis.focal_entities {
-        if let Some(entity_node) = graph.find_entity_by_name(&entity.text)? {
-            entity_data.push((
+        match graph.find_entity_by_name(&entity.text) {
+            Ok(Some(entity_node)) => entity_data.push((
                 entity_node.uuid,
                 entity.text.clone(),
                 entity.ic_weight,
                 entity_node.salience,
-            ));
-        } else {
-            tracing::debug!("  ✗ Entity '{}' not found in graph", entity.text);
+            )),
+            Ok(None) => {
+                tracing::debug!("  ✗ Entity '{}' not found in graph", entity.text);
+            }
+            Err(e) => {
+                unreadable_graph_nodes += 1;
+                tracing::warn!(
+                    entity = %entity.text,
+                    error = %e,
+                    "graph seed skipped: its node could not be decoded — this query \
+                     answers without it"
+                );
+            }
         }
     }
 
@@ -1326,15 +1348,26 @@ pub fn spreading_activation_retrieve_with_stats(
             if name.trim().len() < 2 {
                 continue;
             }
-            if let Some(entity_node) = graph.find_entity_by_name(name)? {
-                if !seen.contains(&entity_node.uuid) {
-                    entity_data.push((
-                        entity_node.uuid,
-                        name.clone(),
-                        QUERY_NER_SEED_IC,
-                        entity_node.salience,
-                    ));
-                    added += 1;
+            match graph.find_entity_by_name(name) {
+                Ok(Some(entity_node)) => {
+                    if !seen.contains(&entity_node.uuid) {
+                        entity_data.push((
+                            entity_node.uuid,
+                            name.clone(),
+                            QUERY_NER_SEED_IC,
+                            entity_node.salience,
+                        ));
+                        added += 1;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    unreadable_graph_nodes += 1;
+                    tracing::warn!(
+                        entity = %name,
+                        error = %e,
+                        "query-NER graph seed skipped: its node could not be decoded"
+                    );
                 }
             }
         }
@@ -1384,6 +1417,9 @@ pub fn spreading_activation_retrieve_with_stats(
     } else {
         0.0
     };
+
+    // Tell the caller the answer was assembled without some of its seeds.
+    stats.unreadable_graph_nodes = unreadable_graph_nodes;
 
     if activation_map.is_empty() {
         tracing::warn!("No entities found in graph, falling back to semantic search");

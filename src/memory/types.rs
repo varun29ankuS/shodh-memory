@@ -3666,6 +3666,24 @@ pub struct RetrievalStats {
     /// Per-memory score attribution (only when debug=true)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_attributions: Option<Vec<ScoreAttribution>>,
+
+    /// Graph seeds this query could not use because their stored node failed to
+    /// decode.
+    ///
+    /// Zero is the normal case and is omitted from the response. A non-zero
+    /// value means the answer is INCOMPLETE in a specific, nameable way: the
+    /// query's entity resolved to a node in the name index, but the node's bytes
+    /// could not be read by this build, so the graph leg ran without that seed.
+    /// The names are in the WARN log; this is the count the caller gets, and it
+    /// exists so a degraded answer is never indistinguishable from a complete
+    /// one. Previously the same condition failed the whole request with a 500.
+    #[serde(default, skip_serializing_if = "crate::memory::types::is_zero_usize")]
+    pub unreadable_graph_nodes: usize,
+}
+
+/// `skip_serializing_if` helper: omit a count that is zero.
+pub(crate) fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
 }
 
 /// Per-stage timing breakdown in microseconds.
