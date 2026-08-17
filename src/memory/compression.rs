@@ -368,6 +368,14 @@ impl CompressionPipeline {
             // drop resolved places and LZ4 compression would stop being
             // lossless, contrary to `is_lossless`.
             experience.toponyms = memory.experience.toponyms.clone();
+            // `Experience::declared_entities` is `#[serde(skip)]` for the same
+            // reason and is likewise absent from the blob. Without this line
+            // decompression would silently retract every caller assertion the
+            // memory carried, and the graph would stop being able to tell a
+            // name the user declared from a keyphrase an extractor guessed —
+            // for compressed memories only, which is the majority of an aged
+            // store.
+            experience.declared_entities = memory.experience.declared_entities.clone();
             // `Experience::origin` is `#[serde(skip)]` for the same reason and
             // is likewise absent from the blob. Without this line every
             // compressed memory would decompress as `Unknown` — a silent
@@ -1783,6 +1791,64 @@ mod tests {
             None, // actor_id
             created_at,
         )
+    }
+
+    /// Every `#[serde(skip)]` field on `Experience` is invisible to the LZ4
+    /// blob, which encodes `experience` STANDALONE. There are three of them now
+    /// — `toponyms`, `declared_entities`, `origin` — and each has to be carried
+    /// across explicitly on decompress or it is silently retracted.
+    ///
+    /// They arrived on separate branches, and `declared_entities` reached this
+    /// file without its carry-across while the other two had one. So this test
+    /// asserts all three together rather than one per field: a fourth skipped
+    /// field added without a carry-across fails HERE, next to the code, instead
+    /// of being noticed only if someone thinks to write a fourth test.
+    #[test]
+    fn lz4_decompression_carries_every_skipped_experience_field() {
+        let pipeline = CompressionPipeline::new();
+
+        let mut memory = create_test_memory(
+            &"Coordination between the Baltimore and London teams".repeat(20),
+            // High importance selects the lossless LZ4 strategy — the one that
+            // encodes `experience` standalone and so loses skipped fields.
+            0.95,
+        );
+        memory.experience.toponyms = vec![Toponym {
+            mention: "Baltimore".to_string(),
+            name: "Baltimore".to_string(),
+            lat: 39.2904,
+            lon: -76.6122,
+            country: "US".to_string(),
+            population: 585_708,
+        }];
+        memory.experience.declared_entities = vec!["Baltimore".to_string()];
+        memory.experience.origin = MemoryOrigin::GithubConnector;
+
+        let compressed = pipeline.compress(&memory).expect("compress");
+        assert_eq!(
+            pipeline.get_strategy(&compressed),
+            Some("lz4"),
+            "precondition: this memory must take the LZ4 path"
+        );
+
+        let restored = pipeline.decompress(&compressed).expect("decompress");
+        assert_eq!(
+            restored.experience.toponyms.len(),
+            1,
+            "decompression dropped the resolved places"
+        );
+        assert_eq!(
+            restored.experience.declared_entities,
+            vec!["Baltimore".to_string()],
+            "decompression retracted the caller's entity assertions — the graph \
+             can no longer tell a declared name from an extracted keyphrase"
+        );
+        assert_eq!(
+            restored.experience.origin,
+            MemoryOrigin::GithubConnector,
+            "decompression wiped the origin"
+        );
+        assert_eq!(restored.experience.content, memory.experience.content);
     }
 
     #[test]
