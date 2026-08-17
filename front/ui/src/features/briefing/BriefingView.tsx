@@ -672,7 +672,7 @@ export function BriefingView({ reach }: { reach: Reachability }) {
 
               Gated on `online` like every other read here, so an unreachable
               store does not repeat what the standfirst already said. */}
-          {online ? <Standing profile={profile} /> : null}
+          {online ? <Standing profile={profile} now={now} /> : null}
 
           {/* ------------------------------------------------ is it learning
               The ontology band above says what was extracted; this says what

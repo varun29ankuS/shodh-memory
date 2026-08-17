@@ -20,18 +20,21 @@ import {
 
 const NOW = Date.parse("2026-08-17T12:00:00Z");
 
+/**
+ * The live shape, taken from `POST /api/reminders` on `claude-code`: two rows,
+ * both `context`-triggered, both `pending`, `due_at` and `triggered_at` null on
+ * both, asked for on 2026-03-20 and 2026-02-13. The timed cases below are
+ * synthetic because this instance holds none — which is exactly why they are
+ * tested rather than assumed.
+ */
 const reminder = (extra: Partial<ReminderItem> = {}): ReminderItem => ({
   id: "r1",
-  content: "check the RocksDB lock fix",
+  content: "Check if mrmartan confirmed the RocksDB lock fix works (PR #117/#118)",
   trigger_type: "context",
   status: "pending",
   due_at: null,
-  created_at: "2026-03-20T09:00:00Z",
+  created_at: "2026-03-20T16:18:36.279482Z",
   triggered_at: null,
-  dismissed_at: null,
-  priority: 3,
-  tags: [],
-  overdue_seconds: null,
   ...extra,
 });
 
@@ -85,7 +88,10 @@ describe("lateBy", () => {
 
 describe("reminderMeta", () => {
   it("says when a context reminder fires, and never a date", () => {
-    expect(reminderMeta(reminder(), NOW)).toEqual(["when it comes up", "asked 5 months ago"]);
+    // Floored, never rounded up: this ask is 4 months and 28 days old and the
+    // gutter says four. A span may under-report its age; it may never claim to
+    // be older than it is.
+    expect(reminderMeta(reminder(), NOW)).toEqual(["when it comes up", "asked 4 months ago"]);
   });
 
   it("states lateness for a timed reminder", () => {

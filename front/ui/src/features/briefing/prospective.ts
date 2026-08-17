@@ -34,13 +34,30 @@ export type ReminderTriggerType = "time" | "duration" | "context";
 export type ReminderStatus = "pending" | "triggered" | "dismissed" | "expired";
 
 /**
- * `ReminderItem` — src/handlers/todos.rs:92-104, read off the struct.
+ * `ReminderItem` — src/handlers/todos.rs:92-104 — reduced to what is read.
  *
- * NOTE WHAT IS NOT HERE. The `OnContext` variant carries `keywords` and a
- * `threshold`, and neither survives into this response: the handler collapses
- * the whole trigger to a single word. So this surface can say a reminder is
- * context-triggered and can never say WHAT it listens for, and no phrasing here
- * may imply otherwise.
+ * WHAT THE SERVER SENDS AND THIS DOES NOT DECLARE, each for its own reason,
+ * on the precedent `features/tasks/api.ts` set for `todo_counts`: declaring a
+ * field is a claim that something renders it.
+ *
+ *   - `overdue_seconds` — a snapshot of the server's clock at response time.
+ *     Lateness is computed from `due_at` against the screen's own clock (see
+ *     the header above), so reading this would be a second answer to a question
+ *     already answered, free to drift from the first.
+ *   - `dismissed_at` — carries nothing `status === "dismissed"` does not, and
+ *     a dismissed reminder is not drawn at all.
+ *   - `priority` — a 1-5 integer with no editor anywhere in the product and no
+ *     effect on when a reminder fires. A front page that ranked four rows by an
+ *     unmaintained number would be inventing an order.
+ *   - `tags` — empty on every reminder this instance holds. Two rows is not
+ *     enough to call the field dead, so this claims only that there is nothing
+ *     to draw, not that nothing could ever write one.
+ *
+ * AND NOTE WHAT THE SERVER ITSELF DROPS. The `OnContext` variant carries
+ * `keywords` and a `threshold`, and neither survives into this response: the
+ * handler collapses the whole trigger to the single word `"context"`
+ * (todos.rs:681). So this surface can say a reminder is context-triggered and
+ * can never say WHAT it listens for, and no phrasing here may imply otherwise.
  */
 export interface ReminderItem {
   id: string;
@@ -50,10 +67,6 @@ export interface ReminderItem {
   due_at: string | null;
   created_at: string;
   triggered_at: string | null;
-  dismissed_at: string | null;
-  priority: number;
-  tags: string[];
-  overdue_seconds: number | null;
 }
 
 const MINUTE = 60_000;

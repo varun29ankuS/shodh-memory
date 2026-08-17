@@ -40,19 +40,22 @@ import { standingReminders } from "./prospective";
 const HEADING =
   "mono text-muted-foreground w-[8.5rem] shrink-0 text-[10px] tracking-[0.14em] uppercase opacity-80";
 
-export function Standing({ profile }: { profile: string }) {
+export function Standing({ profile, now }: { profile: string; now: number }) {
   const { data, error } = useQuery({
     queryKey: ["reminders", profile],
     queryFn: ({ signal }) => listReminders(profile, signal),
     staleTime: 60_000,
   });
 
-  // The screen's dateline clock is a minute-resolution interval in the view
-  // above; this is sampled once per arriving payload for the same reason Tasks
-  // samples one clock per load — the gutter and the alarm marker on a row are
-  // one judgement, and two `Date.now()` calls in one render can straddle a due
-  // instant and disagree.
-  const board = data ? standingReminders(data.reminders, Date.now()) : null;
+  // THE PAGE'S CLOCK, NOT ONE OF ITS OWN. `now` is the same minute-resolution
+  // state the dateline is printed from, passed in rather than sampled here for
+  // the reason Tasks passes its clock down to every row: a gutter reading "3
+  // days late" and a marker deciding whether the row is late are ONE judgement,
+  // and a second `Date.now()` in this component could straddle a due instant
+  // and disagree with the dateline above it. It also means these rows re-read
+  // themselves once a minute, so a reminder that falls due while the page is
+  // open changes without a refetch.
+  const board = data ? standingReminders(data.reminders, now) : null;
 
   if (error) {
     return (
