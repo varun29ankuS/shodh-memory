@@ -150,7 +150,8 @@ export interface StandingRow {
   /**
    * A timed reminder whose instant has passed. THE ONLY THING ON THIS SECTION
    * THAT MAY TAKE `--destructive`: the token means late-or-wrong across the
-   * product, and a context reminder sitting quietly for five months is neither.
+   * product, and a context reminder that has sat quietly since February is
+   * neither.
    */
   late: boolean;
 }
@@ -164,9 +165,9 @@ export interface StandingRow {
  *
  * SECOND TOKEN: WHEN YOU ASKED, or when it was raised if it has been. This is
  * the quiet finding on the live profile and it costs no prose to state — a
- * reminder reading "asked 5 months ago" with no "raised" beside it has been
- * standing since March without ever surfacing, and that is the whole reason
- * this section exists.
+ * reminder reading "asked 4 months ago" with no "raised" beside it has been
+ * standing since March and has never once surfaced, and that is the whole
+ * reason this section exists. Both of `claude-code`'s reminders read that way.
  */
 export function reminderMeta(item: ReminderItem, now: number): string[] {
   const meta: string[] = [];
