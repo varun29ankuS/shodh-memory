@@ -808,12 +808,19 @@ export function composeViewNews(news: readonly ViewNews[]): string | null {
 				return `- LAPSED: your offer to change ${noun} was still on screen when the turn ended; they neither accepted nor refused it${because}.`;
 			case "superseded":
 				return `- REPLACED: a later request of your own took over ${noun} before they answered this one${because}.`;
-			// `applied` and `already` reach here only when the ask timed out and
-			// the model was told NOT KNOWN. Saying so is the correction.
+			// SAYS WHEN IT HAPPENED, NOT WHAT YOU WERE TOLD. These two normally
+			// reach here because the ask timed out and the model read VERDICT NOT
+			// KNOWN — but not always: an ask this process no longer holds (a seat
+			// restart mid-call, or a duplicate report arriving after eviction)
+			// produces the same line with no record of what the tool said. So the
+			// sentence states the only thing true on every path, which is that the
+			// verdict landed after the call returned. Asserting the model's prior
+			// belief would be this file inventing an observation, which is the one
+			// habit everything else here exists to prevent.
 			case "applied":
-				return `- MOVED after all: ${noun} changed, though you were told at the time that the verdict was not known${because}.`;
+				return `- MOVED: ${noun} changed, and the workbench said so only after your call had returned${because}.`;
 			case "already":
-				return `- ALREADY THERE after all: ${noun} needed no change, though you were told at the time that the verdict was not known${because}.`;
+				return `- ALREADY THERE: ${noun} needed no change, and the workbench said so only after your call had returned${because}.`;
 			// Not reachable: only terminal states are queued. Kept so a state
 			// added to the closed set cannot be silently dropped from this block.
 			case "offered":

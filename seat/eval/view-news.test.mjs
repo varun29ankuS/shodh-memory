@@ -198,9 +198,18 @@ test("a lapse is not reported as a refusal", () => {
 	assert.doesNotMatch(text, /REFUSED/);
 });
 
-test("a verdict that arrives after a NOT KNOWN says it is a correction", () => {
+test("a late move says WHEN it landed, never what the model had been told", () => {
+	// `applied` normally reaches news because the ask timed out and the model
+	// read VERDICT NOT KNOWN — but not always: an ask this process no longer
+	// holds produces the same line with no record of what the tool said. So the
+	// sentence must state only what is true on every path.
 	const text = composeViewNews([{ tool_call_id: "c1", dimension: "destination", state: "applied", reason: "r" }]);
-	assert.match(text, /you were told at the time that the verdict was not known/);
+	assert.match(text, /after your call had returned/);
+	assert.doesNotMatch(
+		text,
+		/you were told/,
+		"this function cannot know what the tool reported, so it must not say",
+	);
 });
 
 test("every state in the closed set produces a line, so none can be silently dropped", () => {
