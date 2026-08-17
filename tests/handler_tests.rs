@@ -824,7 +824,7 @@ async fn memory_history_is_user_scoped() {
         h.app(),
         authed_put(
             &format!("/api/memory/{id}"),
-            json!({"user_id": "audit-owner", "content": "Revised."}),
+            json!({"user_id": "audit-owner", "content": "Revised by the owner."}),
         ),
     )
     .await;
