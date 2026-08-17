@@ -12,8 +12,8 @@ use std::sync::Arc;
 use super::state::MultiUserMemoryManager;
 use super::{
     ab_testing, anomalies, compression, consolidation, crud, export, facts, files, graph, health,
-    integrations, lineage, mif, recall, remember, search, sessions, todos, users, visualization,
-    webhooks,
+    integrations, integrity, lineage, mif, recall, remember, search, sessions, todos, users,
+    visualization, webhooks,
 };
 
 /// Application state type alias
@@ -183,6 +183,12 @@ pub fn build_protected_routes(state: AppState) -> Router {
             post(consolidation::cleanup_corrupted),
         )
         .route("/api/storage/migrate", post(consolidation::migrate_legacy))
+        // Read-only wire-level scrub: classifies every stored record as clean,
+        // legacy-generation, undecodable, or decoding-into-implausible-values.
+        // Complementary to /api/index/verify, which only compares membership
+        // between storage and the vector index and cannot see a record that
+        // decodes successfully into the wrong thing.
+        .route("/api/integrity/scrub", post(integrity::scrub))
         // =================================================================
         // CONSOLIDATION & BACKUPS
         // =================================================================

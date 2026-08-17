@@ -716,7 +716,7 @@ impl LegacyMemoryV2 {
 /// to silently wrong values rather than failing; that is why
 /// `Experience::toponyms` is `#[serde(skip)]` and carried at the `MemoryFlat`
 /// tail.
-const MEMORY_DEFAULT_SUFFIX: &[u8] = &[0x00];
+pub(crate) const MEMORY_DEFAULT_SUFFIX: &[u8] = &[0x00];
 
 fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
     use crate::serialization::{SHO_VERSION_BINCODE2, SHO_VERSION_POSTCARD};
@@ -1186,6 +1186,15 @@ pub struct MemoryStorage {
 }
 
 impl MemoryStorage {
+    /// Raw handle to the underlying database, for read-only maintenance passes
+    /// that must classify records at the wire level rather than through
+    /// [`Self::get`] — which lazily *rewrites* anything it decodes via a legacy
+    /// path, and would therefore persist a pseudo-decode over the original
+    /// bytes. Used by [`crate::integrity`].
+    pub(crate) fn raw_db(&self) -> &Arc<DB> {
+        &self.db
+    }
+
     /// CF accessor for the memory_index column family
     fn index_cf(&self) -> &ColumnFamily {
         self.db

@@ -1138,6 +1138,18 @@ fn decode_entity_node(data: &[u8]) -> Result<(EntityNode, bool)> {
     crate::serialization::try_decode_compat::<EntityNode>(data, ENTITY_NODE_DEFAULT_SUFFIX)
 }
 
+/// [`decode_entity_node`] exposed to the read-only integrity scrub.
+///
+/// The scrub must classify graph nodes through the *same* decoder that serves
+/// reads — a second copy would drift, and then the scrub would be measuring a
+/// decoder nobody uses. Returns `(node, needs_migration)`.
+pub(crate) fn decode_entity_node_for_scrub(data: &[u8]) -> Result<(EntityNode, bool)> {
+    decode_entity_node(data)
+}
+
+/// Name of the column family holding entity nodes, for the read-only scrub.
+pub(crate) const ENTITIES_CF_NAME: &str = CF_ENTITIES;
+
 fn default_last_activated() -> DateTime<Utc> {
     Utc::now()
 }
