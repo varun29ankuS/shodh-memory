@@ -85,9 +85,24 @@ pub struct TodoStore {
     storage_path: std::path::PathBuf,
     /// Mutex for atomic sequence number allocation (prevents TOCTOU race)
     seq_mutex: parking_lot::Mutex<()>,
-    /// Serializes read-modify-write mutations that can run concurrently with
-    /// user-initiated updates (e.g. async memory linking after remember()).
-    link_mutex: parking_lot::Mutex<()>,
+    /// Serializes every read-modify-write of a todo record.
+    ///
+    /// Handlers hold no per-todo lock, so an async memory link-back after
+    /// `remember()`, a comment and an activity entry can all land on the same
+    /// todo at once; each one reads the whole record, changes a field and
+    /// writes the whole record back, so whichever read first is erased.
+    ///
+    /// It must be taken by ALL of them. It previously guarded only
+    /// `add_related_memory`, which serialized that method against itself and
+    /// against nothing else — a lock one writer takes and the others ignore
+    /// prevents no interleaving at all.
+    ///
+    /// Process-local is sufficient rather than a shortcut: RocksDB holds an
+    /// exclusive file lock, so one process has this DB open and every todo
+    /// writer goes through this struct. NOT reentrant — the helpers called
+    /// while it is held (`get_todo`, `update_todo`, `settle_todo`) must not
+    /// take it again.
+    mutation_mutex: parking_lot::Mutex<()>,
 }
 
 impl TodoStore {
@@ -138,7 +153,7 @@ impl TodoStore {
             db,
             storage_path: todos_path,
             seq_mutex: parking_lot::Mutex::new(()),
-            link_mutex: parking_lot::Mutex::new(()),
+            mutation_mutex: parking_lot::Mutex::new(()),
         })
     }
 
@@ -707,6 +722,7 @@ impl TodoStore {
         content: String,
         comment_type: Option<TodoCommentType>,
     ) -> Result<Option<TodoComment>> {
+        let _lock = self.mutation_mutex.lock();
         if let Some(mut todo) = self.get_todo(user_id, todo_id)? {
             let mut comment = TodoComment::new(todo_id.clone(), author, content);
             if let Some(ct) = comment_type {
@@ -730,6 +746,7 @@ impl TodoStore {
 
     /// Add a system activity entry to a todo
     pub fn add_activity(&self, user_id: &str, todo_id: &TodoId, content: String) -> Result<bool> {
+        let _lock = self.mutation_mutex.lock();
         if let Some(mut todo) = self.get_todo(user_id, todo_id)? {
             todo.add_activity(content);
             self.update_todo(&todo)?;
@@ -747,6 +764,7 @@ impl TodoStore {
         comment_id: &TodoCommentId,
         content: String,
     ) -> Result<Option<TodoComment>> {
+        let _lock = self.mutation_mutex.lock();
         if let Some(mut todo) = self.get_todo(user_id, todo_id)? {
             if let Some(comment) = todo.comments.iter_mut().find(|c| c.id == *comment_id) {
                 comment.content = content;
@@ -769,6 +787,7 @@ impl TodoStore {
         todo_id: &TodoId,
         comment_id: &TodoCommentId,
     ) -> Result<bool> {
+        let _lock = self.mutation_mutex.lock();
         if let Some(mut todo) = self.get_todo(user_id, todo_id)? {
             let initial_len = todo.comments.len();
             todo.comments.retain(|c| c.id != *comment_id);
@@ -796,8 +815,9 @@ impl TodoStore {
     // MEMORY LINKS ("why does this task exist")
     // =========================================================================
 
-    /// Link a memory to a todo (idempotent). Serialized via `link_mutex` so the
-    /// async link-back after `remember()` cannot lose a concurrent update.
+    /// Link a memory to a todo (idempotent). Serialized via `mutation_mutex`
+    /// against every other read-modify-write on the same todo, so the async
+    /// link-back after `remember()` cannot lose one or be lost.
     /// Returns true if the todo exists (whether or not the link was new).
     pub fn add_related_memory(
         &self,
@@ -805,7 +825,7 @@ impl TodoStore {
         todo_id: &TodoId,
         memory_id: MemoryId,
     ) -> Result<bool> {
-        let _lock = self.link_mutex.lock();
+        let _lock = self.mutation_mutex.lock();
         if let Some(mut todo) = self.get_todo(user_id, todo_id)? {
             if !todo.has_related_memory(&memory_id) {
                 todo.add_related_memory(memory_id);
@@ -815,6 +835,40 @@ impl TodoStore {
         } else {
             Ok(false)
         }
+    }
+
+    /// Drop every reference to `memory_id` from this user's todos.
+    ///
+    /// Called when a memory is deleted. Without it the link is one-way
+    /// durable: `verify_memory_ids` proves a memory exists when the link is
+    /// written and deleting a todo takes its links with it, but deleting the
+    /// MEMORY left `related_memory_ids` pointing at nothing and `get_todo`
+    /// went on rendering "Linked memories: <uuid>" for a memory that is gone.
+    ///
+    /// Returns the number of todos changed. Idempotent, and scoped to one
+    /// user — memory ids are per-user, so another user's identical link is
+    /// none of this call's business.
+    pub fn remove_memory_links(&self, user_id: &str, memory_id: &MemoryId) -> Result<usize> {
+        let _lock = self.mutation_mutex.lock();
+        let todos = self.list_todos_for_user(user_id, None)?;
+        let mut changed = 0;
+        for mut todo in todos {
+            if !todo.has_related_memory(memory_id) {
+                continue;
+            }
+            todo.remove_related_memory(memory_id);
+            self.update_todo(&todo)?;
+            changed += 1;
+        }
+        if changed > 0 {
+            tracing::debug!(
+                user_id = %user_id,
+                memory_id = %memory_id.0,
+                todos_updated = changed,
+                "Cleared todo links to a deleted memory"
+            );
+        }
+        Ok(changed)
     }
 
     // =========================================================================
@@ -2057,5 +2111,127 @@ mod tests {
         // And the new serialized form carries the new field explicitly
         let new_json = serde_json::to_string(&reread).unwrap();
         assert!(new_json.contains("\"blocked_by\":[]"));
+    }
+
+    // =========================================================================
+    // CONCURRENT READ-MODIFY-WRITE
+    // =========================================================================
+
+    /// `link_mutex` claimed to stop the async link-back after `remember()`
+    /// losing a concurrent update, but it was one-sided: only
+    /// `add_related_memory` ever took it. Every other read-modify-write on a
+    /// todo — comments, activity — read and wrote outside it, so a link and a
+    /// comment landing at the same time still lost one of the two. A mutex one
+    /// writer takes and the other ignores serializes nothing.
+    ///
+    /// Both writers here mutate append-only collections, so nothing may be
+    /// lost: four links and four comments must survive four of each.
+    #[test]
+    fn concurrent_link_and_comment_writes_all_survive() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = open_test_shared_db(temp_dir.path());
+        let store = Arc::new(TodoStore::new(db, temp_dir.path()).unwrap());
+
+        let todo = Todo::new("test_user".to_string(), "Contended todo".to_string());
+        store.store_todo(&todo).unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let store = Arc::clone(&store);
+            let id = todo.id.clone();
+            handles.push(std::thread::spawn(move || {
+                store
+                    .add_related_memory("test_user", &id, MemoryId(Uuid::new_v4()))
+                    .expect("add_related_memory");
+            }));
+        }
+        for i in 0..4 {
+            let store = Arc::clone(&store);
+            let id = todo.id.clone();
+            handles.push(std::thread::spawn(move || {
+                store
+                    .add_comment(
+                        "test_user",
+                        &id,
+                        "tester".to_string(),
+                        format!("comment {i}"),
+                        None,
+                    )
+                    .expect("add_comment");
+            }));
+        }
+        for h in handles {
+            h.join().expect("writer thread");
+        }
+
+        let stored = store.get_todo("test_user", &todo.id).unwrap().unwrap();
+        assert_eq!(
+            stored.related_memory_ids.len(),
+            4,
+            "a memory link was lost to a concurrent todo write"
+        );
+        assert_eq!(
+            stored.comments.len(),
+            4,
+            "a comment was lost to a concurrent todo write"
+        );
+    }
+
+    // =========================================================================
+    // MEMORY DELETION LEAVES NO DANGLING LINKS
+    // =========================================================================
+
+    /// Deleting a memory used to leave every `todo.related_memory_ids` entry
+    /// pointing at nothing: the todo -> memory direction is verified on write
+    /// (`verify_memory_ids` in the handler) and repaired when a todo is
+    /// deleted, but nothing ran in the other direction, so `get_todo` kept
+    /// rendering "Linked memories: <uuid>" for a memory that no longer exists.
+    #[test]
+    fn scrubbing_a_deleted_memory_clears_dangling_links() {
+        let (store, _temp) = setup_store();
+
+        let doomed = MemoryId(Uuid::new_v4());
+        let kept = MemoryId(Uuid::new_v4());
+
+        let linked = Todo::new("test_user".to_string(), "Has both links".to_string());
+        store.store_todo(&linked).unwrap();
+        store
+            .add_related_memory("test_user", &linked.id, doomed.clone())
+            .unwrap();
+        store
+            .add_related_memory("test_user", &linked.id, kept.clone())
+            .unwrap();
+
+        let untouched = Todo::new("test_user".to_string(), "No links".to_string());
+        store.store_todo(&untouched).unwrap();
+
+        // A different user's todo linked to the same id must not be touched:
+        // the scrub is scoped to the user whose memory was deleted.
+        let other_user = Todo::new("other_user".to_string(), "Other user".to_string());
+        store.store_todo(&other_user).unwrap();
+        store
+            .add_related_memory("other_user", &other_user.id, doomed.clone())
+            .unwrap();
+
+        let scrubbed = store
+            .remove_memory_links("test_user", &doomed)
+            .expect("remove_memory_links");
+        assert_eq!(scrubbed, 1, "exactly one todo referenced the deleted memory");
+
+        let after = store.get_todo("test_user", &linked.id).unwrap().unwrap();
+        assert_eq!(
+            after.related_memory_ids,
+            vec![kept],
+            "the scrub must drop only the deleted memory's link"
+        );
+        assert!(store
+            .get_todo("other_user", &other_user.id)
+            .unwrap()
+            .unwrap()
+            .related_memory_ids
+            .contains(&doomed));
+
+        // Idempotent: a second pass finds nothing left to do.
+        assert_eq!(store.remove_memory_links("test_user", &doomed).unwrap(), 0);
     }
 }
