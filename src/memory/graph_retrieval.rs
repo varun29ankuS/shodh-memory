@@ -2832,10 +2832,9 @@ mod tests {
         assert!(min_threshold < 1.0);
     }
 
-    /// Process-global lock for tests that manipulate `SHODH_RECALL_READONLY`.
-    /// `env::set_var`/`remove_var` are not thread-safe against concurrent
-    /// readers on other test threads (same pattern as `auth.rs`'s `ENV_LOCK`).
-    static RECALL_READONLY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Shared with every other test in the crate that touches this flag — the
+    /// variable is process-global, so the lock guarding it has to be too.
+    use crate::memory::RECALL_READONLY_ENV_LOCK;
 
     /// Regression test for the measurement-integrity bug: spreading activation's
     /// Hebbian reinforcement (`graph.batch_strengthen_synapses` on the traversed
