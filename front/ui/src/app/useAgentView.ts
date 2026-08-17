@@ -238,6 +238,15 @@ export function useAgentView(): void {
           // through the same batch as the commands beside it, so one call gets
           // one answer.
           if (op.type === "view_command" && isAlreadyThere(op, pathRef.current)) {
+            // TOLD TO BOTH PARTIES, AND THIS IS THE HALF THAT USED TO BE
+            // MISSING. The seat learns the fate of its ask; the person learns
+            // WHY the model brought it up, which for a request whose only
+            // content was this destination is otherwise never shown anywhere —
+            // no command is produced, so no notice records the reason and the
+            // block that renders it has nothing to render. Called before the
+            // dispatch loop, so commands from the same request join this notice
+            // on their shared reason rather than replacing it.
+            useView.getState().alreadyThere("destination", op.reason);
             report.current([{ origin: op.tool_call_id, dimension: "destination", state: "already" }]);
           }
 

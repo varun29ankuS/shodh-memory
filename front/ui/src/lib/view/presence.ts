@@ -24,11 +24,16 @@ import type { ViewCommand } from "./commands";
  * WHY THERE IS NO "UNKNOWN" AXIS. `stores/view.ts` decides synchronously, in the
  * same call that performs the transition — by the time anything can render,
  * every axis this browser was asked about has a verdict, and an axis it was
- * never asked about has no row. Absence is how this file says "not known",
- * exactly as `lib/view/outcome.ts` refuses a wire state spelling it. The unknown
- * that DOES exist in this loop is the seat's, not the browser's: the seat waits
- * a bounded moment for a report it may never get. That is unobservable from
- * here — `lib/seat/client.ts` `reportView` is fire-and-forget and does not check
+ * never asked about has no row. Absence here means the axis was never in
+ * question, never that its fate is unknown: an axis the model DID ask about and
+ * that produced no command — the stage the person is already standing on — gets
+ * a row of its own rather than being folded into that silence. Absence is how
+ * this file says "not known", exactly as `lib/view/outcome.ts` refuses a wire
+ * state spelling it.
+ *
+ * The unknown that DOES exist in this loop is the seat's, not the browser's: the
+ * seat waits a bounded moment for a report it may never get. That is
+ * unobservable from here — `lib/seat/client.ts` `reportView` is fire-and-forget and does not check
  * `res.ok` — so nothing on this side may claim the conversation was told.
  *
  * Pure, and separate from the component, because these are the rules that must
@@ -62,8 +67,15 @@ export const TRACE_DWELL_MS = 9_000;
  * they answer or the turn ends. `--warn` is the token for waiting-on-someone and
  * this is what it is for; `--destructive` would say the request was wrong, which
  * is a different and false claim.
+ *
+ * `already` IS NOT A KIND OF NOTHING. The model named the stage the person is
+ * standing on, so no command was produced and the view did not move — but the
+ * ask was real, the browser computed the answer (`isAlreadyThere`) and told the
+ * seat. Leaving it off the block would hide a fact this browser holds, which is
+ * the opposite of what absence means everywhere else here. It is the only state
+ * with no action beside it, because the thing being asked for is on screen.
  */
-export type AxisState = "applied" | "waiting";
+export type AxisState = "applied" | "waiting" | "already";
 
 export interface TraceAxis {
   dimension: ViewDimension;
@@ -101,7 +113,7 @@ export interface Trace {
  * nothing here to show and the header's own line remains the whole of it.
  */
 export function traceOf(
-  notice: { reason: string; dimensions: readonly ViewDimension[] } | null,
+  notice: NoticeReading | null,
   offers: Partial<Record<ViewDimension, ViewCommand>>,
 ): Trace | null {
   let reason: string | null = null;
@@ -119,8 +131,12 @@ export function traceOf(
   for (const dimension of VIEW_DIMENSIONS) {
     if (offers[dimension]?.reason?.trim() === reason) {
       axes.push({ dimension, state: "waiting" });
-    } else if (notice?.reason.trim() === reason && notice.dimensions.includes(dimension)) {
+    } else if (notice?.reason.trim() !== reason) {
+      continue;
+    } else if (notice.dimensions.includes(dimension)) {
       axes.push({ dimension, state: "applied" });
+    } else if (notice.already.includes(dimension)) {
+      axes.push({ dimension, state: "already" });
     }
   }
   if (axes.length === 0) return null;
@@ -151,9 +167,18 @@ export function traceKey(trace: Trace): string {
   return JSON.stringify([trace.reason, axes]);
 }
 
+/** The model's account of the view, as this module reads it. */
+export interface NoticeReading {
+  reason: string;
+  /** Axes a command moved. */
+  dimensions: readonly ViewDimension[];
+  /** Axes the model asked for and found already as it wanted. */
+  already: readonly ViewDimension[];
+}
+
 /** The parts of the bus that say a command has just landed. */
 export interface ViewArrival {
-  seq: number;
+  notice: NoticeReading | null;
   offers: Partial<Record<ViewDimension, ViewCommand>>;
 }
 
@@ -168,10 +193,16 @@ export interface ViewArrival {
  * the app twitching — the failure this feature exists to replace, reproduced by
  * the feature itself.
  *
- * TWO SIGNALS, BECAUSE THE STORE HAS TWO OUTCOMES. An applied command bumps
- * `seq`; a held one does not touch it and appears as an offer instead. Watching
- * only the sequence would miss every declined request, which is the half of this
- * that the person most needs to see.
+ * TWO SIGNALS, BECAUSE THE STORE RECORDS TWO KINDS OF OUTCOME. A request the bus
+ * acted on — applied, or found already as asked — replaces the notice record
+ * with a fresh object; a held one leaves the notice alone and appears as an
+ * offer. Watching only the notice would miss every declined request, which is
+ * the half of this that the person most needs to see.
+ *
+ * NOT THE SEQUENCE NUMBER, which is what this watched first. `seq` counts moves
+ * including the ones nobody accounted for — a cue inferred from a recall bumps
+ * it and carries no reason, so there is no trace to open and the signal was
+ * inert. The notice is the account, and the account is what this block renders.
  *
  * Offers are compared BY IDENTITY. `dispatch` builds a fresh offers object and
  * carries unchanged commands across by reference, so a differing reference is
@@ -180,7 +211,7 @@ export interface ViewArrival {
  * fields make two asks the same ask.
  */
 export function arrived(previous: ViewArrival, next: ViewArrival): boolean {
-  if (next.seq > previous.seq) return true;
+  if (next.notice !== null && next.notice !== previous.notice) return true;
   for (const dimension of VIEW_DIMENSIONS) {
     const command = next.offers[dimension];
     if (command !== undefined && command !== previous.offers[dimension]) return true;
@@ -258,7 +289,9 @@ export function viewDimensionLabel(dimension: string): string {
  * fact that makes the whole authority ledger visible rather than theoretical.
  */
 export function axisStateLabel(state: AxisState): string {
-  return state === "applied" ? "applied" : "waiting on you";
+  if (state === "applied") return "applied";
+  if (state === "already") return "already here";
+  return "waiting on you";
 }
 
 /** A list, as a person would say it. */
@@ -290,8 +323,13 @@ export function traceAnnouncement(trace: Trace): string {
     .filter((axis) => axis.state === "waiting")
     .map((axis) => viewDimensionLabel(axis.dimension));
 
+  const already = trace.axes
+    .filter((axis) => axis.state === "already")
+    .map((axis) => viewDimensionLabel(axis.dimension));
+
   const parts = [`The conversation: “${trace.reason}”.`];
   if (applied.length > 0) parts.push(`It moved ${list(applied)}.`);
+  if (already.length > 0) parts.push(`It found ${list(already)} already as it asked.`);
   if (waiting.length > 0) parts.push(`It is waiting on you for ${list(waiting)}.`);
   return parts.join(" ");
 }

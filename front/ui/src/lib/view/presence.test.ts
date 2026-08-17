@@ -30,7 +30,7 @@ function offer(over: Partial<Extract<ViewCommand, { dimension: "destination" }>>
 describe("traceOf", () => {
   it("shows an applied axis and a waiting axis together, under one reason", () => {
     const trace = traceOf(
-      { reason: REASON, dimensions: ["cue", "frame", "focus"] },
+      { reason: REASON, dimensions: ["cue", "frame", "focus"], already: [] },
       { destination: offer() },
     );
     expect(trace).toEqual({
@@ -45,12 +45,12 @@ describe("traceOf", () => {
   });
 
   it("orders axes canonically rather than by how the store happens to hold them", () => {
-    const trace = traceOf({ reason: REASON, dimensions: ["focus", "cue"] }, {});
+    const trace = traceOf({ reason: REASON, dimensions: ["focus", "cue"], already: [] }, {});
     expect(trace?.axes.map((axis) => axis.dimension)).toEqual(["cue", "focus"]);
   });
 
   it("accounts for an applied move with no offer standing", () => {
-    expect(traceOf({ reason: REASON, dimensions: ["destination"] }, {})).toEqual({
+    expect(traceOf({ reason: REASON, dimensions: ["destination"], already: [] }, {})).toEqual({
       reason: REASON,
       axes: [{ dimension: "destination", state: "applied" }],
     });
@@ -65,7 +65,7 @@ describe("traceOf", () => {
 
   it("lets the waiting reason outrank an applied one from a different request", () => {
     const trace = traceOf(
-      { reason: OTHER, dimensions: ["cue"] },
+      { reason: OTHER, dimensions: ["cue"], already: [] },
       { destination: offer({ reason: REASON }) },
     );
     expect(trace?.reason).toBe(REASON);
@@ -79,22 +79,49 @@ describe("traceOf", () => {
   });
 
   it("is null when a reason is present but blank", () => {
-    expect(traceOf({ reason: "   ", dimensions: ["cue"] }, {})).toBeNull();
+    expect(traceOf({ reason: "   ", dimensions: ["cue"], already: [] }, {})).toBeNull();
   });
 
   it("is null when a notice covers no axis", () => {
-    expect(traceOf({ reason: REASON, dimensions: [] }, {})).toBeNull();
+    expect(traceOf({ reason: REASON, dimensions: [], already: [] }, {})).toBeNull();
   });
 
   it("matches an untrimmed offer reason against the trimmed notice", () => {
     const trace = traceOf(
-      { reason: REASON, dimensions: ["cue"] },
+      { reason: REASON, dimensions: ["cue"], already: [] },
       { destination: offer({ reason: `  ${REASON}  ` }) },
     );
     expect(trace?.axes).toEqual([
       { dimension: "cue", state: "applied" },
       { dimension: "destination", state: "waiting" },
     ]);
+  });
+});
+
+describe("traceOf — the axis nothing moved", () => {
+  it("gives the stage the person is already on a row of its own", () => {
+    expect(traceOf({ reason: REASON, dimensions: [], already: ["destination"] }, {})).toEqual({
+      reason: REASON,
+      axes: [{ dimension: "destination", state: "already" }],
+    });
+  });
+
+  it("reads it beside the axes the same request did move", () => {
+    const trace = traceOf(
+      { reason: REASON, dimensions: ["cue", "frame"], already: ["destination"] },
+      {},
+    );
+    expect(trace?.axes).toEqual([
+      { dimension: "cue", state: "applied" },
+      { dimension: "frame", state: "applied" },
+      { dimension: "destination", state: "already" },
+    ]);
+  });
+
+  it("never lists it under another request's words", () => {
+    expect(
+      traceOf({ reason: OTHER, dimensions: [], already: ["destination"] }, { cue: { dimension: "cue", text: "x", entities: [], reason: REASON, origin: "c" } }),
+    ).toEqual({ reason: REASON, axes: [{ dimension: "cue", state: "waiting" }] });
   });
 });
 
@@ -130,34 +157,47 @@ describe("traceKey", () => {
 });
 
 describe("arrived", () => {
-  it("fires when a command applies", () => {
-    expect(arrived({ seq: 3, offers: {} }, { seq: 4, offers: {} })).toBe(true);
+  it("fires when the conversation's account of the view is replaced", () => {
+    const before = { reason: REASON, dimensions: ["cue"] as const, already: [] };
+    const after = { reason: REASON, dimensions: ["cue", "frame"] as const, already: [] };
+    expect(arrived({ notice: before, offers: {} }, { notice: after, offers: {} })).toBe(true);
+  });
+
+  it("fires for a request that moved nothing because the view was already right", () => {
+    const after = { reason: REASON, dimensions: [], already: ["destination"] as const };
+    expect(arrived({ notice: null, offers: {} }, { notice: after, offers: {} })).toBe(true);
   });
 
   it("fires when a command is held as an offer, which never touches the sequence", () => {
-    expect(arrived({ seq: 3, offers: {} }, { seq: 3, offers: { destination: offer() } })).toBe(true);
+    expect(arrived({ notice: null, offers: {} }, { notice: null, offers: { destination: offer() } })).toBe(true);
   });
 
   it("fires when a later request replaces a standing offer on the same axis", () => {
-    const previous = { seq: 3, offers: { destination: offer() } };
-    const next = { seq: 3, offers: { destination: offer({ origin: "call-2", reason: OTHER }) } };
+    const previous = { notice: null, offers: { destination: offer() } };
+    const next = { notice: null, offers: { destination: offer({ origin: "call-2", reason: OTHER }) } };
     expect(arrived(previous, next)).toBe(true);
   });
 
+  it("does not fire when the account is dropped by a hand on an axis", () => {
+    const notice = { reason: REASON, dimensions: ["cue"] as const, already: [] };
+    expect(arrived({ notice, offers: {} }, { notice: null, offers: {} })).toBe(false);
+  });
+
   it("does not fire when an offer expires at a turn boundary", () => {
-    expect(arrived({ seq: 3, offers: { destination: offer() } }, { seq: 3, offers: {} })).toBe(false);
+    expect(arrived({ notice: null, offers: { destination: offer() } }, { notice: null, offers: {} })).toBe(false);
   });
 
   it("does not fire when an offer is refused", () => {
     const held = offer();
-    expect(arrived({ seq: 7, offers: { destination: held } }, { seq: 7, offers: {} })).toBe(false);
+    expect(arrived({ notice: null, offers: { destination: held } }, { notice: null, offers: {} })).toBe(false);
   });
 
   it("does not fire when an unchanged offer is carried across a set", () => {
     const held = offer();
-    expect(arrived({ seq: 3, offers: { destination: held } }, { seq: 3, offers: { destination: held } })).toBe(
-      false,
-    );
+    const notice = { reason: REASON, dimensions: ["cue"] as const, already: [] };
+    expect(
+      arrived({ notice, offers: { destination: held } }, { notice, offers: { destination: held } }),
+    ).toBe(false);
   });
 });
 
@@ -199,6 +239,10 @@ describe("words", () => {
     expect(axisStateLabel("waiting")).toBe("waiting on you");
     expect(axisStateLabel("applied")).toBe("applied");
   });
+
+  it("says an axis was already right rather than calling it a move", () => {
+    expect(axisStateLabel("already")).toBe("already here");
+  });
 });
 
 describe("traceAnnouncement", () => {
@@ -233,6 +277,21 @@ describe("traceAnnouncement", () => {
       axes: [{ dimension: "focus", state: "applied" }],
     });
     expect(spoken).toBe(`The conversation: “${REASON}”. It moved the opened entity.`);
+  });
+
+  it("speaks an axis that was already right without claiming a move", () => {
+    const spoken = traceAnnouncement({
+      reason: REASON,
+      axes: [{ dimension: "destination", state: "already" }],
+    });
+    expect(spoken).not.toContain("moved");
+    expect(spoken).toContain("It found the destination already as it asked.");
+  });
+
+  it("says nothing about an axis that was already right when none was", () => {
+    expect(
+      traceAnnouncement({ reason: REASON, axes: [{ dimension: "cue", state: "applied" }] }),
+    ).not.toContain("already");
   });
 
   it("does not put a conjunction in a list of one", () => {

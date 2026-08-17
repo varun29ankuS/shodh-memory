@@ -95,6 +95,21 @@ export interface AgentNoticeRecord {
   reason: string;
   /** The axes this reason accounts for, accumulated across one request's commands. */
   dimensions: ViewDimension[];
+  /**
+   * Axes the request named and found already as it wanted.
+   *
+   * SEPARATE FROM `dimensions` BECAUSE THEY ARE DIFFERENT CLAIMS. An axis in
+   * `dimensions` moved; an axis here did not, because it was already where the
+   * model asked for it. Folded together, the block would say the view moved on
+   * an axis nothing touched — the same overclaim `features/history/derive.ts`
+   * refuses when it keeps "Asked to move the view" and "The view was already
+   * there" as two labels.
+   *
+   * It is the only part of this record with no command behind it: a destination
+   * equal to the current path produces none (`commandsFromRequest`), so without
+   * this the request's reason would never reach the screen at all.
+   */
+  already: ViewDimension[];
   seq: number;
 }
 
@@ -129,6 +144,8 @@ interface ViewState {
   dispatch: (command: ViewCommand, author: ViewAuthor) => Verdict;
   /** The human moved this dimension themselves. */
   touch: (dimension: ViewDimension) => void;
+  /** The model named this axis and the view was already as it asked. */
+  alreadyThere: (dimension: ViewDimension, reason: string) => void;
   /** Accept every waiting offer. */
   follow: () => void;
   /** Refuse them, visibly and once. */
@@ -207,6 +224,11 @@ export const useView = create<ViewState>((set, get) => ({
     // Applied on a USER-authored dispatch too, and that is deliberate: Follow
     // re-dispatches the model's held command as the person, and the reason is
     // still the model's. A user's own hand never carries one.
+    //
+    // A FRESH OBJECT ON EVERY REASONED DISPATCH, even when its contents are
+    // unchanged. `lib/view/presence.ts` `arrived` reads a new notice as "the
+    // conversation just acted", which is what opens the block; an object reused
+    // because nothing in it differed would be a request that landed in silence.
     const reason = command.reason?.trim();
     const notice: AgentNoticeRecord | null = reason
       ? state.notice?.reason === reason
@@ -215,9 +237,10 @@ export const useView = create<ViewState>((set, get) => ({
             dimensions: state.notice.dimensions.includes(command.dimension)
               ? state.notice.dimensions
               : [...state.notice.dimensions, command.dimension],
+            already: state.notice.already,
             seq,
           }
-        : { reason, dimensions: [command.dimension], seq }
+        : { reason, dimensions: [command.dimension], already: [], seq }
       : state.notice;
 
     switch (command.dimension) {
@@ -281,13 +304,57 @@ export const useView = create<ViewState>((set, get) => ({
         // put it and still there for the stated reason, so dropping the words
         // would leave a moved view with no account of itself, which is the
         // state this record exists to abolish.
-        notice: s.notice?.dimensions.includes(dimension) ? null : s.notice,
+        //
+        // `already` counts as covered for exactly the same reason `dimensions`
+        // does. "I opened sources because of the March import" is an account of
+        // the stage the reader is on; the moment they leave it by hand, it
+        // describes a screen that is no longer in front of them.
+        notice:
+          s.notice?.dimensions.includes(dimension) || s.notice?.already.includes(dimension)
+            ? null
+            : s.notice,
         // The model's selection goes the way its cue does when the person takes
         // that axis: a record naming the entity the model opened, sitting behind
         // one the person clicked, would attribute their choice to it.
         focus: dimension === "focus" ? null : s.focus,
       };
     });
+  },
+
+  /**
+   * The model asked for the stage the person is already standing on.
+   *
+   * NO COMMAND EXISTS FOR THIS and that is the whole reason it needs its own
+   * door into the store. `commandsFromRequest` refuses to emit a destination
+   * equal to the current path — a redundant navigation would remount the stage
+   * under someone already reading it — so a request whose ONLY content was that
+   * destination produced nothing at all, and its reason, which is the payload
+   * this whole feature exists to deliver, never reached the screen. The browser
+   * knew the answer and told the seat; the person was the only party left out.
+   *
+   * JOINED ON THE REASON, like every other part of this record, so the axes of
+   * one `direct_view` end up on one notice whether they moved or were already
+   * right. Called before the commands from the same request are dispatched
+   * (`app/useAgentView.ts`), so those find this notice and extend it.
+   *
+   * The sequence is NOT bumped: nothing moved. `seq` counts moves, and a
+   * consumer keying an effect on it must not be woken by a view that stayed
+   * exactly where it was.
+   */
+  alreadyThere: (dimension, reason) => {
+    const trimmed = reason.trim();
+    if (trimmed.length === 0) return;
+    set((s) => ({
+      notice:
+        s.notice?.reason === trimmed
+          ? {
+              ...s.notice,
+              already: s.notice.already.includes(dimension)
+                ? s.notice.already
+                : [...s.notice.already, dimension],
+            }
+          : { reason: trimmed, dimensions: [], already: [dimension], seq: s.seq },
+    }));
   },
 
   follow: () => {

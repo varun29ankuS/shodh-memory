@@ -231,3 +231,104 @@ describe("back", () => {
     expect(reported).toEqual([]);
   });
 });
+
+/**
+ * The axis the model asked for and did not have to move.
+ *
+ * A destination equal to the current path produces NO command, so before this
+ * the request's reason — the whole payload of the feature — reached the seat and
+ * never reached the person. These pin that it lands on the same record the rest
+ * of the request lands on, and that it is never mistaken for a move.
+ */
+describe("alreadyThere", () => {
+  beforeEach(() => {
+    useView.setState({ claimed: [], offers: {}, destination: null, notice: null, seq: 0 });
+  });
+
+  it("records the reason for a request that moved nothing", () => {
+    useView.getState().alreadyThere("destination", REASON);
+    expect(useView.getState().notice).toEqual({
+      reason: REASON,
+      dimensions: [],
+      already: ["destination"],
+      seq: 0,
+    });
+  });
+
+  it("never counts it as a move", () => {
+    useView.getState().alreadyThere("destination", REASON);
+    expect(useView.getState().notice?.dimensions).toEqual([]);
+  });
+
+  it("does not advance the sequence, because nothing moved", () => {
+    useView.getState().alreadyThere("destination", REASON);
+    expect(useView.getState().seq).toBe(0);
+  });
+
+  it("joins the commands of the same request on their shared reason", () => {
+    useView.getState().alreadyThere("destination", REASON);
+    useView.getState().dispatch(
+      { dimension: "frame", entities: ["Dali"], reason: REASON, origin: "call-1" },
+      "agent",
+    );
+    expect(useView.getState().notice).toMatchObject({
+      reason: REASON,
+      dimensions: ["frame"],
+      already: ["destination"],
+    });
+  });
+
+  it("is replaced by a later request rather than merged into it", () => {
+    useView.getState().alreadyThere("destination", REASON);
+    useView.getState().alreadyThere("destination", "a different account entirely");
+    expect(useView.getState().notice).toMatchObject({
+      reason: "a different account entirely",
+      already: ["destination"],
+    });
+  });
+
+  it("does not list the same axis twice when a request repeats it", () => {
+    useView.getState().alreadyThere("destination", REASON);
+    useView.getState().alreadyThere("destination", REASON);
+    expect(useView.getState().notice?.already).toEqual(["destination"]);
+  });
+
+  it("records nothing for a reason that is only whitespace", () => {
+    useView.getState().alreadyThere("destination", "   ");
+    expect(useView.getState().notice).toBeNull();
+  });
+
+  it("dies when the person takes the axis it accounted for", () => {
+    useView.getState().alreadyThere("destination", REASON);
+    useView.getState().touch("destination");
+    expect(useView.getState().notice).toBeNull();
+  });
+
+  it("survives a hand on an axis it never claimed", () => {
+    useView.getState().alreadyThere("destination", REASON);
+    useView.getState().touch("frame");
+    expect(useView.getState().notice?.reason).toBe(REASON);
+  });
+});
+
+/**
+ * More than one axis can be already-right under one account, and the store is
+ * the wrong place to assume otherwise.
+ *
+ * Only the destination reaches `alreadyThere` today — it is the one axis whose
+ * command is suppressed when it names where the person already is. But this is a
+ * public action on the bus, and a store that quietly dropped the second axis
+ * handed to it would fail silently the day a second producer appears, in the
+ * one part of this feature whose whole job is not to under-report.
+ */
+describe("alreadyThere across axes", () => {
+  beforeEach(() => {
+    useView.setState({ claimed: [], offers: {}, destination: null, notice: null, seq: 0 });
+  });
+
+  it("records more than one axis under one reason", () => {
+    useView.getState().alreadyThere("destination", REASON);
+    useView.getState().alreadyThere("frame", REASON);
+    expect(useView.getState().notice?.already).toEqual(["destination", "frame"]);
+  });
+});

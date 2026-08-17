@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { destinationNoun } from "@/lib/view/commands";
 import {
   TRACE_DWELL_MS,
+  type AxisState,
   arrived,
   axisStateLabel,
   returnTarget,
@@ -59,6 +60,20 @@ import { useView } from "@/stores/view";
 /** The label column, wide enough for the longest axis name at 11px. */
 const AXIS_COLUMN = "w-[92px]";
 
+/**
+ * One tone per state, in a table, so no row can be coloured by hand.
+ *
+ * `applied` and `already` share the label colour because neither is anything to
+ * do: one moved, one was already right, and both are statements of fact. Only
+ * the axis that is waiting on a person is marked, and the WORD carries it — the
+ * colour is a second channel, never the only one.
+ */
+const AXIS_TONE: Record<AxisState, string> = {
+  applied: "text-muted-foreground",
+  already: "text-muted-foreground",
+  waiting: "text-warn font-medium",
+};
+
 export function AgentTrace() {
   const notice = useView((s) => s.notice);
   const offers = useView((s) => s.offers);
@@ -103,6 +118,18 @@ export function AgentTrace() {
   const trace = useMemo(() => traceOf(notice, offers), [notice, offers]);
   const key = trace === null ? null : traceKey(trace);
   const live = key !== null && key === shown;
+
+  /**
+   * A new trace starts unheld, and that is a bug fix rather than tidiness.
+   *
+   * `held` is set by focus and cleared by blur — but activating `Follow` from
+   * the keyboard UNMOUNTS the button under the focus that is holding the clock,
+   * and a removed element fires no blur. The hold would then never clear: the
+   * block would sit open forever AND the header line would stay suppressed
+   * behind it, so its `Back` and `Release` were unreachable too. A mouse user
+   * recovers on the next `mouseleave`; a keyboard user had no way out at all.
+   */
+  useEffect(() => setHeld(false), [key]);
 
   useEffect(() => {
     if (!live || held) return;
@@ -161,11 +188,7 @@ export function AgentTrace() {
                       `--destructive` would say the request was wrong, which is a
                       different and false claim about a model that asked
                       correctly and was told to wait. */}
-                  <span
-                    className={
-                      axis.state === "waiting" ? "text-warn font-medium" : "text-muted-foreground"
-                    }
-                  >
+                  <span className={AXIS_TONE[axis.state]}>
                     {axisStateLabel(axis.state)}
                   </span>
                 </li>
