@@ -44,6 +44,7 @@ import {
   TASK_LIMIT,
   authorKind,
   axisOf,
+  blockedNote,
   blockerIsSatisfied,
   blockersOf,
   boardOf,
@@ -53,10 +54,12 @@ import {
   lanesOf,
   lifelineOf,
   originOf,
+  overdueAlarm,
   partitionOverdue,
   priorityLabel,
   provenanceOf,
   recurrenceLabel,
+  scheduleTokens,
   settledReason,
   shortId,
   subtaskProgress,
@@ -728,10 +731,16 @@ function LedgerLine({
   status,
   count,
   note,
+  /** `warn` is work waiting on something — the one hue this screen allows for
+   *  that, and the reason a note may carry it: a profile with a live
+   *  `blocked_on` and nothing in the blocked STATUS would otherwise render
+   *  every part of that fact in grey. */
+  noteTone = "muted",
 }: {
   status: TodoStatus;
   count: number;
   note?: string;
+  noteTone?: "muted" | "warn";
 }) {
   const meta = STATUS_META[status];
   const Icon = meta.icon;
@@ -744,7 +753,16 @@ function LedgerLine({
         strokeWidth={1.8}
       />
       <span className={cn("min-w-0 flex-1", empty && "text-muted-foreground/50")}>{meta.label}</span>
-      {note ? <span className="text-muted-foreground/60 shrink-0 text-[10px]">{note}</span> : null}
+      {note ? (
+        <span
+          className={cn(
+            "shrink-0 text-[10px]",
+            noteTone === "warn" ? "text-warn" : "text-muted-foreground/60",
+          )}
+        >
+          {note}
+        </span>
+      ) : null}
       {/* Right-aligned and tabular, so the column can be read down as a shape
           rather than as five sentences. */}
       <span
@@ -759,11 +777,33 @@ function LedgerLine({
   );
 }
 
+/**
+ * ARE WE BLOCKED — ANSWERED ON THE LINE THAT HOLDS THE NUMBER.
+ *
+ * This used to be a thirty-two-word paragraph under the ledger: "Nothing is
+ * marked blocked. No task in this profile has ever recorded a dependency on
+ * another either, so that is the absence of a signal rather than evidence the
+ * work is clear." Its first sentence was `Blocked 0` written out in words —
+ * the same fact twice, and the scannable copy was already on screen. Its
+ * second sentence was the part that could not be read off any number, and it
+ * qualifies that number directly, so it stays visible and moves onto the same
+ * line: `Blocked · no blocker named · 0`.
+ *
+ * It is a note rather than a footnote for the same reason `Dismissed` carries
+ * "no longer wanted": a reader scanning the column down learns what the zero
+ * is worth without leaving it.
+ */
 function StateLedger({ board }: { board: Board }) {
   return (
     <div>
       {LEDGER_ORDER.map((status) => (
-        <LedgerLine key={status} status={status} count={ledgerCount(board, status)} />
+        <LedgerLine
+          key={status}
+          status={status}
+          count={ledgerCount(board, status)}
+          note={status === "blocked" ? blockedNote(board) : undefined}
+          noteTone={board.dependencies > 0 || board.waiting > 0 ? "warn" : "muted"}
+        />
       ))}
       <div className="border-border/70 mt-1.5 border-t pt-1.5">
         <LedgerLine status="done" count={board.done} />
@@ -782,6 +822,14 @@ function StateLedger({ board }: { board: Board }) {
  * whatever order the server returned them, with no figure anywhere that a
  * reader could have arrived at without reading every row.
  *
+ * IT NOW SITS ABOVE THE LEDGER, WHICH IS THE WHOLE CHANGE. It was rendered
+ * under the five status counts, at y=233 in a rail that ran to 584px, with two
+ * grey paragraphs beneath it — the single most urgent thing on the screen,
+ * fourth in reading order and set in the same weight as everything around it.
+ * A person landing on this screen should meet the alarm before the census.
+ * When nothing is late this renders nothing at all, so the ledger simply
+ * becomes the first thing, which is the right answer for that profile.
+ *
  * `--destructive` IS THE RIGHT TOKEN AND IS NOW UNCONTESTED. This screen
  * reserves exactly two hues: `--warn` for work waiting on something, and
  * `--destructive` for late. Priority used to take both and was moved off them
@@ -790,68 +838,43 @@ function StateLedger({ board }: { board: Board }) {
  *
  * IT SAYS HOW LATE, NOT ONLY HOW MANY. "5 overdue" is a number a reader has no
  * scale for. "the oldest by 118 days" is what turns it into a judgement, and it
- * is the same arithmetic the row badges use — `lateDays`, shared, so the
- * summary and the rows cannot disagree by a day.
- *
- * A FLOOR RATHER THAN A SUPPRESSION WHEN THE LIST IS TRUNCATED. Every RATIO on
- * this screen is withheld while `board.truncated`, because the server paginates
- * across projects and no lane's denominator would be its own. A count of late
- * work has no denominator to be wrong about — it can only be an undercount — so
- * it is stated as "at least n" rather than hidden. Withholding an alarm is a
- * worse failure than stating a lower bound on it.
+ * is the same arithmetic the row badges use — `lateDays`, shared through
+ * `board.overdueDays`, so the summary and the rows cannot disagree by a day.
+ * The wording, its plural agreement and the truncation floor are all
+ * `overdueAlarm`, which is pinned by tests; nothing is re-derived here.
  * -------------------------------------------------------------------------- */
 
-function ScheduleLine({ board }: { board: Board }) {
-  // Nothing dated at all is the state of the `claude` profile and of most of
-  // this instance. It is said once, quietly, so that "0 overdue" cannot be
-  // read as "everything is on time".
-  if (board.dated === 0 && board.recurring === 0) {
-    return (
-      <p className="text-muted-foreground/70 mt-2 text-[11px] leading-relaxed">
-        No open task carries a due date, so nothing here is early or late. Dates and repeats are
-        set where a task is created; this screen does not add them.
-      </p>
-    );
-  }
-
-  const atLeast = board.truncated ? "at least " : "";
-
+function Alarm({ board }: { board: Board }) {
+  const alarm = overdueAlarm(board);
+  if (!alarm) return null;
   return (
-    <div className="mt-2 space-y-1">
-      {board.overdue > 0 ? (
-        <p className="border-destructive text-destructive border-l-2 pl-2.5 text-[12px] leading-relaxed">
-          <span className="font-medium">
-            {atLeast}
-            {board.overdue} {board.overdue === 1 ? "task is" : "tasks are"} past{" "}
-            {board.overdue === 1 ? "its" : "their"} due date
-          </span>
-          {board.overdueDays !== null && board.overdueDays >= 1
-            ? ` — the oldest by ${board.overdueDays} ${board.overdueDays === 1 ? "day" : "days"}.`
-            : "."}
-        </p>
-      ) : null}
+    <p className="border-destructive text-destructive mt-1.5 border-l-2 pl-2.5 text-[12px] leading-relaxed">
+      <span className="font-medium">{alarm.headline}</span>
+      {alarm.detail ? ` — ${alarm.detail}.` : "."}
+    </p>
+  );
+}
 
-      <Meta className="text-[11px]">
-        {board.overdue === 0 && board.dated > 0 ? (
-          <span>
-            nothing overdue, of {board.dated} dated
-          </span>
-        ) : null}
-        {board.dueSoon > 0 ? (
-          <span className="text-warn">
-            {board.dueSoon} due within 3 days
-          </span>
-        ) : null}
-        {board.recurring > 0 ? (
-          <span>
-            {board.recurring} {board.recurring === 1 ? "repeats" : "repeat"}
-          </span>
-        ) : null}
-        {board.dated > 0 && board.recurring === 0 ? (
-          <span className="text-muted-foreground/60">nothing repeats</span>
-        ) : null}
-      </Meta>
-    </div>
+/**
+ * The schedule, in tokens rather than in sentences.
+ *
+ * These are read as a strip, not as prose: "nothing overdue, of 7 dated ·
+ * nothing repeats". Each is a fact about this profile that no count elsewhere
+ * on the screen carries, and the thirty-word paragraph that used to open this
+ * block — half of it about how the product works rather than about these rows
+ * — is down to four words and a disclosure entry. See `scheduleTokens`.
+ */
+function Schedule({ board }: { board: Board }) {
+  const tokens = scheduleTokens(board);
+  if (tokens.length === 0) return null;
+  return (
+    <Meta className="mt-1.5 text-[11px]">
+      {tokens.map((token) => (
+        <span key={token.text} className={token.tone === "warn" ? "text-warn" : undefined}>
+          {token.text}
+        </span>
+      ))}
+    </Meta>
   );
 }
 
@@ -1279,10 +1302,37 @@ export function TasksView({ reach }: { reach: Reachability }) {
           wide. `@container` asks the pane. */}
       <div className="@container mx-auto w-full max-w-[1680px] pb-16">
         <div className="grid items-start gap-x-7 @min-[1180px]:grid-cols-[minmax(300px,340px)_minmax(0,1fr)]">
-        {/* WHAT IS IN HERE. Figures first, then the two limits that change how
-            they should be read — on the surface, not behind the info
-            affordance. HAX G11 warns that an explanation increases trust by its
-            mere presence, so the caveats sit where the numbers are.
+        {/* WHAT IS IN HERE, AND IN WHAT ORDER: the alarm, the census, the
+            schedule, and one line of what the screen is.
+
+            THIS RAIL WAS A DISCLOSURE DOCUMENT WITH A TASK LIST UNDER IT.
+            Measured live at 1920×945 on the `claude` profile it ran to 166
+            words in five prose blocks, and four of the first five sentences a
+            reader met were about something ABSENT — no due dates, nothing
+            blocked, no dependency, no origin field, nothing extracted. All
+            true, and together far larger than the claim they qualified. The
+            screen says "here is recorded work"; it was attaching a page of
+            disclaimer to that.
+
+            THE RULE NOW: a caveat is PROPORTIONATE to the claim it qualifies,
+            and AVAILABLE rather than FIRST. Nothing was deleted. Each caveat
+            was tested against one question — does it change how a number ON
+            SCREEN should be read? Those that do stayed visible and were cut to
+            the size of the number they sit beside (`blockedNote` on the
+            ledger's own line, `scheduleTokens` under it). Those that describe
+            the PRODUCT rather than these rows moved one level down, behind the
+            single disclosure affordance, leaving the two facts that are this
+            screen's whole differentiator — it cannot say who recorded a task,
+            and nothing here is drawn out of memory — on the surface in
+            sixteen words.
+
+            HAX G11 IS STILL HONOURED, JUST NOT LITERALLY. Its finding is that
+            an explanation raises trust by its mere presence, which argues for
+            the caveat being VISIBLE — not for it being long. A sixteen-word
+            line that is actually read beats seventy-eight words that are
+            scrolled past, and NN/g's own rule against putting a
+            number-changing caveat behind a tip is why the two load-bearing
+            negatives did not move.
 
             STICKY ON A WIDE STAGE. Every claim in here qualifies every row
             below it, and a caveat that has scrolled off the top of a fifty-row
@@ -1309,87 +1359,88 @@ export function TasksView({ reach }: { reach: Reachability }) {
             ) : null}
           </div>
 
+          {/* THE ALARM, BEFORE THE CENSUS. Late work is the only thing on this
+              screen that cannot wait for a reader to finish counting, and it
+              was fourth in reading order. It renders nothing at all when
+              nothing is late, so a profile with no dates simply opens on the
+              ledger. */}
+          <Alarm board={board} />
+
           {/* The list's own grouping, named — including the buckets holding
               nothing, which is the only way the scheme is visible on a profile
-              whose tasks all sit in one state. */}
+              whose tasks all sit in one state. The Blocked line carries the
+              caveat that makes its zero weak evidence, on the same line as the
+              zero. */}
           <div className="mt-1.5">
             <StateLedger board={board} />
           </div>
 
-          <ScheduleLine board={board} />
+          <Schedule board={board} />
 
-          {/* "ARE WE BLOCKED" IS ANSWERED EVERY TIME, INCLUDING WHEN THE ANSWER
-              IS NO — it is one of the questions this screen exists for, and a
-              silence would be indistinguishable from a screen that cannot tell.
-              It is TWO claims when the answer is no, because the second is what
-              makes the first weak evidence. */}
-          <p className="text-muted-foreground mt-1.5 text-[12px] leading-relaxed">
-            {board.blocked > 0 || board.waiting > 0 ? (
-              <>
-                <span className="text-warn">
-                  {board.blocked > 0
-                    ? `${board.blocked} ${board.blocked === 1 ? "task is" : "tasks are"} blocked`
-                    : `${board.waiting} ${board.waiting === 1 ? "task names" : "tasks name"} something it is waiting on`}
-                </span>
-                {board.dependencies > 0
-                  ? ` — ${board.dependencies} ${board.dependencies === 1 ? "names another task" : "name other tasks"} as the blocker.`
-                  : " — none of it names another task as the blocker, so the chain cannot be walked."}
-              </>
-            ) : (
-              <>
-                Nothing is marked blocked. No task in this profile has ever recorded a dependency on
-                another either, so that is the absence of a signal rather than evidence the work is
-                clear.
-              </>
-            )}
+          {/* WHAT THIS SCREEN IS, IN ONE LINE.
+
+              This was a three-term `<dl>` — Proves / Cannot prove / Does not
+              cover — running to 78 words and three of the six prose blocks
+              above the fold. Every word of it was true and it was the first
+              thing a reader met, which made a modest claim read as a heavily
+              qualified one.
+
+              WHAT STAYED VISIBLE IS EXACTLY WHAT WOULD MAKE THIS AN ORDINARY
+              PRODUCT IF IT WERE LOST: that the screen cannot say who recorded
+              a task, and that nothing here was drawn out of memory. Every
+              other tracker implies the first and most memory products claim
+              the opposite of the second. The elaboration — the missing origin
+              field, the activity-log provenance, how the ratios are counted —
+              is mechanism, which is what the disclosure affordance is for.
+
+              POSITIVE FIRST. "Recorded work only" is what the screen HAS; the
+              two limits qualify it rather than opening it. Four of the five
+              sentences this rail used to lead with described an absence, and
+              that ordering is most of why it was exhausting to read. */}
+          <p className="text-muted-foreground border-border mt-2.5 border-l-2 pl-2.5 text-[11px] leading-relaxed">
+            Recorded work only — who recorded it is not stored, and nothing was drawn out of memory.
+            <InfoHint
+              label="what this screen shows, and what it counts"
+              className="ml-1.5 translate-y-[2px]"
+            >
+              <span className="text-foreground font-medium">What it proves.</span> What was
+              recorded, what state each task is in now, and — from the server&apos;s own activity
+              log — when it started and when it settled.
+              <br />
+              <br />
+              <span className="text-foreground font-medium">What it cannot.</span> Who recorded any
+              of it. There is no origin field on a task, so this screen cannot tell a person from an
+              agent and does not guess.
+              <br />
+              <br />
+              <span className="text-foreground font-medium">What it does not cover.</span> Anything
+              not written down as a task. Nothing is extracted from memory — a task exists only
+              because something called the API to create one, so a profile can hold a great deal of
+              memory and no tasks at all.
+              <br />
+              <br />
+              <span className="text-foreground font-medium">&ldquo;No blocker named&rdquo;.</span>{" "}
+              No task in this profile has recorded a dependency on another, or named anything else
+              it is waiting on. That is the absence of a signal rather than evidence the work is
+              clear. Where a dependency does exist the chain can be walked, and the row draws it.
+              <br />
+              <br />
+              <span className="text-foreground font-medium">Dates.</span> Due dates and repeats are
+              set where a task is created; this screen does not add them.
+              <br />
+              <br />
+              <span className="text-foreground font-medium">How it counts.</span> Progress is a
+              count of tasks, because the model has no estimate or size field to weight by. A
+              project&apos;s figure is settled tasks over the tasks in this profile, counted here
+              rather than read from the server&apos;s own per-project counters, which are never
+              populated and ship as zeros. Done and dismissed both count as settled — a dropped task
+              is not outstanding work — and are reported apart in the Settled section, because
+              finishing something and abandoning it are different outcomes. No individual task gets
+              a percentage: a number appears only where there is a real population behind it, a
+              project or a task&apos;s own subtasks. The curves stop at today; nothing is projected
+              forward, there being no estimate, cycle or velocity here to extrapolate from.
+            </InfoHint>
           </p>
-
-          {/* TWO COLUMNS WHERE THERE IS ROOM, STACKED IN THE RAIL. An 86px
-              label column against a 230px value column sets these three
-              sentences four words to the line, which is where a considered
-              caveat starts reading as fine print. Stacked, each keeps the
-              rail's full measure and the label becomes a heading over it. */}
-          <dl
-            className={cn(
-              "border-border mt-2.5 grid grid-cols-[86px_1fr] gap-x-2 gap-y-1 border-l-2 pl-2.5 text-[11px] leading-relaxed",
-              "@min-[1180px]:grid-cols-1 @min-[1180px]:gap-y-0",
-            )}
-          >
-            <dt className="text-muted-foreground/70 @min-[1180px]:mt-2.5 @min-[1180px]:text-[10px] @min-[1180px]:font-medium @min-[1180px]:tracking-wide @min-[1180px]:uppercase @min-[1180px]:first:mt-0">Proves</dt>
-            <dd>
-              what was recorded, what state each task is in now, and — from the server&apos;s own
-              activity log — when it started and when it settled.
-            </dd>
-            <dt className="text-muted-foreground/70 @min-[1180px]:mt-2.5 @min-[1180px]:text-[10px] @min-[1180px]:font-medium @min-[1180px]:tracking-wide @min-[1180px]:uppercase @min-[1180px]:first:mt-0">Cannot prove</dt>
-            <dd className="text-muted-foreground">
-              who recorded any of it. There is no origin field on a task, so this screen cannot tell
-              a person from an agent and does not guess.
-            </dd>
-            <dt className="text-muted-foreground/70 @min-[1180px]:mt-2.5 @min-[1180px]:text-[10px] @min-[1180px]:font-medium @min-[1180px]:tracking-wide @min-[1180px]:uppercase @min-[1180px]:first:mt-0">Does not cover</dt>
-            <dd className="text-muted-foreground">
-              anything not written down as a task. Nothing is extracted from memory — a task exists
-              only because something called the API to create one.
-              <InfoHint label="what this screen counts and how" className="ml-1.5 translate-y-[2px]">
-                Progress is a count of tasks, because the model has no estimate or size field to
-                weight by. A project&apos;s figure is settled tasks over the tasks in this profile,
-                counted here rather than read from the server&apos;s own per-project counters, which
-                are never populated and ship as zeros.
-                <br />
-                <br />
-                Done and dismissed both count as settled: a dropped task is not outstanding work.
-                They are reported apart in the Settled section, because finishing something and
-                abandoning it are different outcomes.
-                <br />
-                <br />
-                No individual task gets a percentage. A number appears only where there is a real
-                population behind it — a project, or a task&apos;s own subtasks.
-                <br />
-                <br />
-                The curves stop at today. Nothing is projected forward: there is no estimate, cycle
-                or velocity here to extrapolate from.
-              </InfoHint>
-            </dd>
-          </dl>
 
           {board.truncated ? (
             <p className="border-warn/40 text-muted-foreground/80 mt-2 border-l pl-2.5 text-[11px] leading-relaxed">
@@ -1422,15 +1473,21 @@ export function TasksView({ reach }: { reach: Reachability }) {
                 profile all 50 tasks were recorded inside 33 minutes on one day
                 and not one has ever changed state. A timeline there would plot
                 the instants rows were written and read as a picture of
-                progress, so it says the thing instead. */}
+                progress, so it says the thing instead.
+
+                THE FACT LEADS, NOT THE ABSENCE. This opened "Nothing in this
+                profile has ever changed state" and then gave the evidence,
+                which is the shape that made this screen exhausting: it is a
+                FINDING about the corpus — one import, one sitting — and it was
+                phrased as a disclaimer about the screen. The stillness is
+                still stated, second, where it belongs as the consequence. */}
             {!axis && board.from !== null && board.to !== null ? (
               <p className="text-muted-foreground border-warn/40 mx-4 mb-1.5 border-l pl-2.5 text-[11px] leading-relaxed">
-                Nothing in this profile has ever changed state.{" "}
                 {board.shown === 1 ? "The one task was" : `All ${board.shown} tasks were`} recorded
                 {board.to - board.from < 3_600_000
                   ? ` within ${elapsedLabel(board.from, board.to) ?? "moments"} on ${dateOf(board.from)}`
                   : ` between ${dateOf(board.from)} and ${dateOf(board.to)}`}
-                , and none has been started, finished or dismissed since.
+                . None has been started, finished or dismissed since.
               </p>
             ) : null}
 
