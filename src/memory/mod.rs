@@ -3497,6 +3497,17 @@ impl MemorySystem {
                     sa_stats.graph_candidates,
                 );
 
+                // Carry the graph leg's degradation count out to the caller. The
+                // leg now skips a query seed whose stored node this build cannot
+                // decode instead of failing the request, and a skipped seed
+                // changes the ANSWER — so the count has to leave this function,
+                // not just the log. Everything else in `sa_stats` is recomputed
+                // by the fusion stages below from their own candidate sets; this
+                // is the one fact only the graph leg knows.
+                if let Some(s) = stats.as_mut() {
+                    s.unreadable_graph_nodes += sa_stats.unreadable_graph_nodes;
+                }
+
                 // Map ActivatedMemory → (MemoryId, activation, hebbian_factor) for RRF fusion
                 let mut r: Vec<(MemoryId, f32, f32)> = activated_memories
                     .into_iter()
