@@ -310,15 +310,20 @@ pub struct ServerConfig {
     /// checks whether stored records still decode into what was written until
     /// somebody calls `POST /api/integrity/scrub` by hand.
     ///
-    /// Justified against measurement: the largest live profile sweeps in ~14.2s
-    /// and the other three in 25-400ms, so an hourly pass over every profile on
-    /// disk costs ~15s per 3600s — a 0.4% duty cycle of `fill_cache(false)`
-    /// sequential reads that evict nothing and take no lock the serving path
-    /// needs. Set against a defect class that has twice survived over a month
-    /// unnoticed, buying a mean detection latency of thirty minutes for 0.4% of
-    /// one core is not a close call. A daily interval would cost 24x less and
-    /// buy a twelve-hour mean latency, which is not meaningfully better than
-    /// the accident that found the last one.
+    /// Justified against measurement, re-measured after the merge because the
+    /// merge changed the cost. On the four live profiles the full pass takes
+    /// 18.0s + 28ms + 511ms + 473ms = ~19s, of which claude-code is 17.5s. The
+    /// pre-merge figure was 14.2s; the difference is the two legacy-generation
+    /// retries, which now run on nearly every record because every record on
+    /// disk predates the `origin` field.
+    ///
+    /// ~19s per 3600s is a 0.53% duty cycle of `fill_cache(false)` sequential
+    /// reads that evict nothing and take no lock the serving path needs.
+    /// Against a defect class that has twice survived over a month unnoticed,
+    /// buying a thirty-minute mean detection latency for half a percent of one
+    /// core is not a close call. Daily would cost 24x less and buy a
+    /// twelve-hour mean latency, which is not meaningfully better than the
+    /// accident that found the last one.
     pub integrity_scrub_interval_secs: u64,
 
     /// Maximum entities extracted per memory for graph insertion (default: 10)

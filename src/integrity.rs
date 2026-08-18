@@ -1112,9 +1112,13 @@ fn decide(memories: &ClassCounts, nodes: &ClassCounts, complete: bool) -> Verdic
 ///
 /// # Cost, measured
 ///
-/// On the live claude-code store (190MB, cold cache, read-only handle) the
-/// memory sweep takes ~12.8s and the graph sweep ~0.5s. The other three
-/// profiles finish in 25–400ms. That cost is *not* record decoding: it is
+/// On the live claude-code store (cold cache, read-only handle) the memory
+/// sweep takes ~17.5s and the graph sweep ~0.5s; the other three profiles
+/// finish in 28–511ms. The memory figure was 12.8s before the merge — the
+/// two legacy-generation retries (`NerWireGeneration::PreFineLabel` and
+/// `EntityLabelWireGeneration::PreSchemaRollup`) now run on nearly every
+/// record, because every record on disk predates the `origin` field and so
+/// fails the current-layout decode first. That cost is *not* record decoding: it is
 /// iterating the shared default column family, where 659,865 of 679,374 keys
 /// belong to the fact, watermark, lineage and vmapping keyspaces rather than to
 /// memories. Per-key cost is ~15–19µs on every profile regardless of how many
