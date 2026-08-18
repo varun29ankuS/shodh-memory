@@ -902,7 +902,9 @@ fn run_one_pass(
 /// thousand others, and the pin leaked to all of them. `SHODH_RECALL_READONLY=1`
 /// in particular silently disabled reinforcement for every test that ran
 /// afterwards or alongside, and it stayed invisible because nothing asserted
-/// that the default path still reinforces.
+/// that the default path still reinforces. That variable is no longer written
+/// here at all — see [`HarnessEnvPin::recall_read_only`] — but the same leak
+/// applies to the three that remain.
 ///
 /// The previous fix wrapped the harness's own tests in a guard. That is a fix
 /// you have to remember at seven call sites and at every future one, and it
@@ -2474,12 +2476,13 @@ mod tests {
     ///
     /// This module used to carry a local `HarnessEnvGuard` that tests had to
     /// remember to acquire. It was the right diagnosis and the wrong location.
-    /// `pin_harness_threads` sets `SHODH_ONNX_THREADS`, `RAYON_NUM_THREADS`,
-    /// `SHODH_RECALL_READONLY` and `SHODH_EVAL_NOW` for the PROCESS; the local
-    /// guard restored exactly one of them, so the frozen scoring clock leaked
-    /// regardless — and any future test (or non-test caller) that forgot the
-    /// guard leaked all four. Tests below bind the pin the same way the suite
-    /// entry points do, and the lock is reentrant so nesting is safe.
+    /// `pin_harness_threads` then set `SHODH_ONNX_THREADS`,
+    /// `RAYON_NUM_THREADS`, `SHODH_RECALL_READONLY` and `SHODH_EVAL_NOW` for
+    /// the PROCESS; the local guard restored exactly one of them, so the frozen
+    /// scoring clock leaked regardless — and any future test (or non-test
+    /// caller) that forgot the guard leaked all four. Tests below bind the pin
+    /// the same way the suite entry points do, and the lock is reentrant so
+    /// nesting is safe.
 
     /// Lineage repro (substrate diagnosis 2026-06-10): root-cause P@1 has been
     /// 0.0 through every fix, and the instrumented CI run produced ZERO edge

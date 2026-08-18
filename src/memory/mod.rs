@@ -155,8 +155,10 @@ pub(crate) fn recall_is_readonly(query: &Query) -> bool {
 /// Process-global lock for every code path that mutates the harness
 /// determinism env (`SHODH_RECALL_READONLY`, `SHODH_EVAL_NOW`,
 /// `SHODH_ONNX_THREADS`, `RAYON_NUM_THREADS`) — including
-/// `recall_harness::runner::pin_harness_threads`, which sets all four
-/// process-wide.
+/// `recall_harness::runner::pin_harness_threads`, which sets the last three
+/// process-wide. (`SHODH_RECALL_READONLY` is read there, never written — it
+/// changes what concurrently running code does, and a lock cannot exclude a
+/// reader.)
 ///
 /// `env::set_var`/`remove_var` are not thread-safe against concurrent readers on
 /// other test threads, and `recall_is_readonly` re-reads the env on every call
@@ -181,14 +183,12 @@ pub(crate) static RECALL_ENV_LOCK: parking_lot::ReentrantMutex<()> =
 /// Holds [`RECALL_ENV_LOCK`] and pins `SHODH_RECALL_READONLY` to an EXPLICIT
 /// value for the duration of a test, restoring the previous value on drop.
 ///
-/// Pinning `"0"` rather than removing the variable is what makes a test immune
-/// to the harness pin. `pin_harness_threads` sets the variable only when it is
-/// unset — "a caller that explicitly chose a different value keeps their
-/// override" — so an explicit `"0"` cannot be clobbered by a harness test that
-/// slips past the lock, while a removed variable can. `recall_readonly_env`
-/// treats unset and `"0"` identically, so this changes nothing about what is
-/// being tested; it only removes a way for the test to be wrong for reasons
-/// that have nothing to do with the code under test.
+/// Pins `"0"` rather than removing the variable. `recall_readonly_env` treats
+/// unset and `"0"` identically, so this changes nothing about what is being
+/// tested; it states the intent, and it is what the surviving writer of this
+/// variable — the `recall_eval` binary's only-if-unset startup pin — cannot
+/// override. The in-process harness no longer writes the variable at all: it
+/// reads it once and threads `Query::read_only`.
 #[cfg(test)]
 pub(crate) struct RecallEnvPin {
     _lock: parking_lot::ReentrantMutexGuard<'static, ()>,
@@ -12626,8 +12626,8 @@ mod recall_readonly_write_gate_tests {
 
         // Production default: the counter still moves. Pinned to an explicit
         // "0" rather than removing the variable — `recall_readonly_env` treats
-        // the two identically, but only the explicit value is immune to a
-        // harness test's `pin_harness_threads`, which sets the pin when unset.
+        // the two identically, but the explicit value states the intent and
+        // survives any only-if-unset writer.
         {
             let _pin = RecallEnvPin::pin("0");
             let _ = system

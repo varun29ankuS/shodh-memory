@@ -3092,11 +3092,10 @@ mod tests {
         };
         use chrono::Utc;
 
-        // The pin is explicitly OFF for this whole test: the claim under test is
-        // that the per-request flag ALONE suppresses the write. An explicit "0"
-        // rather than an unset variable, so a harness test that slips past the
-        // lock cannot turn it on — `pin_harness_threads` only sets the variable
-        // when it is unset.
+        // The pin is explicitly OFF for this whole test: the claim under test
+        // is that the per-request flag ALONE suppresses the write. An explicit
+        // "0" rather than an unset variable, so no only-if-unset writer can
+        // turn it on underneath the assertion.
         let _env = crate::memory::RecallEnvPin::pin("0");
 
         struct StubEmbedder;

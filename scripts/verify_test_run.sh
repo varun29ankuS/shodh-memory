@@ -32,8 +32,10 @@ set -uo pipefail
 FLOOR="${SHODH_TEST_PASS_FLOOR:-1100}"
 OUT="${1:-target/test-run-$(date +%Y%m%d-%H%M%S).log}"
 
-# Names that exist only on this branch's test isolation work. If the binary that
-# ran does not contain these, it is not the binary this branch built.
+# The first three names exist ONLY on this branch, so a stale or foreign binary
+# cannot produce them. The last three exist on the parent branch too and do not
+# discriminate on their own; they are here because they are the tests this work
+# is most likely to break, and ALL six must appear for the run to be accepted.
 SENTINELS=(
   "test_support::tests::env_mutation_sites_are_accounted_for"
   "test_support::tests::the_env_mutation_scanner_counts_calls_and_ignores_comments"
