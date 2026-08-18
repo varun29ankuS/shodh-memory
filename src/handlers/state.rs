@@ -487,6 +487,26 @@ struct MultiUserMemoryManagerRotationHelper {
 
 const CF_AUDIT: &str = "audit";
 
+/// How many hypernym levels above an entity get an `IsA` edge.
+///
+/// The vendored chain runs all the way to `organism` and `living_thing`. Each
+/// step up is a larger hub with less discriminative power: `turtle IsA animal`
+/// is the bridge a query actually needs, while `turtle IsA living_thing` links
+/// half the corpus to one node and hands spreading activation a super-hub. Three
+/// is the point where the ancestors are still nameable categories a person would
+/// use in a question.
+const TAXONOMY_MAX_CATEGORIES: usize = 3;
+
+/// Strength assigned to a taxonomy `IsA` edge.
+///
+/// Deliberately below the strength earned by an extracted, corroborated edge.
+/// Not because the fact is less certain — a vendored taxonomy is the most
+/// reliable thing in the graph — but because it is unattested *by this corpus*:
+/// it says nothing about what these two speakers actually discussed, and the
+/// retrieval stack is tuned to treat strength as evidence-of-relevance rather
+/// than evidence-of-truth.
+const TAXONOMY_EDGE_STRENGTH: f32 = 0.5;
+
 impl MultiUserMemoryManagerRotationHelper {
     fn audit_cf(&self) -> &rocksdb::ColumnFamily {
         self.shared_db
@@ -3349,6 +3369,14 @@ impl MultiUserMemoryManager {
         let semantic_relations_on = std::env::var("SHODH_SEMANTIC_RELATIONS")
             .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
             .unwrap_or(true);
+
+        // Category (`IsA`) edges from the vendored taxonomy. Opt-IN: unlike the
+        // flags around it, this defaults OFF because it is the only one that
+        // adds edges the corpus never attested, and its effect on the recall
+        // gate has not been measured. `SHODH_TAXONOMY_EDGES=1` enables.
+        let taxonomy_edges_on = std::env::var("SHODH_TAXONOMY_EDGES")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         let mut semantic_pairs: HashMap<
             (String, String),
             (crate::graph_memory::RelationType, bool, f32),
@@ -3452,6 +3480,107 @@ impl MultiUserMemoryManager {
             match graph_guard.add_entity(entity) {
                 Ok(uuid) => entity_uuids.push((name, uuid, primary_label)),
                 Err(e) => tracing::debug!("Failed to add entity {}: {}", name, e),
+            }
+        }
+
+        // Category edges from the vendored taxonomy.
+        //
+        // Every other edge in this graph is extracted: something in the text
+        // asserted it. These are not. They record that `turtle` is a kind of
+        // `animal` — a fact no conversation about pets ever bothers to state,
+        // which is exactly why a query asking by category cannot otherwise reach
+        // an answer that names an instance. See `crate::taxonomy` for the
+        // measured case and for why the asset resolves one chosen word sense
+        // rather than all of them.
+        //
+        // Off by default. The graph shape it produces is unmeasured against the
+        // recall gate, and a change that adds edges to every common noun in the
+        // corpus is not something to enable on argument alone.
+        if taxonomy_edges_on {
+            for (name, entity_uuid, _) in &entity_uuids {
+                // Nearest ancestors only. The full chain runs to `organism` and
+                // beyond, and each step up is a bigger hub with less
+                // discriminative power — `turtle IsA animal` earns its place,
+                // `turtle IsA living_thing` links half the corpus together.
+                let categories = crate::taxonomy::hypernyms(name);
+                for category in categories.iter().take(TAXONOMY_MAX_CATEGORIES) {
+                    // Self-reference guard: a lemma that is its own ancestor
+                    // through some cycle in the source data would otherwise get
+                    // an edge to itself.
+                    if category.eq_ignore_ascii_case(name) {
+                        continue;
+                    }
+                    let category_node = EntityNode {
+                        uuid: uuid::Uuid::new_v4(),
+                        name: (*category).to_string(),
+                        labels: vec![EntityLabel::Concept],
+                        created_at: now,
+                        last_seen_at: now,
+                        mention_count: 1,
+                        summary: String::new(),
+                        attributes: {
+                            let mut a = HashMap::new();
+                            a.insert("source".into(), "taxonomy".into());
+                            a
+                        },
+                        name_embedding: None,
+                        salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
+                            &EntityLabel::Concept,
+                            false,
+                        ),
+                        // A category noun is a common noun by definition.
+                        is_proper_noun: false,
+                        selectivity: None,
+                        fine_type: None,
+                        kb_id: None,
+                    };
+                    // `add_entity` dedups by name, so a category mentioned by
+                    // many entities resolves to one shared node — which is the
+                    // point: that shared node is the bridge.
+                    let category_uuid = match graph_guard.add_entity(category_node) {
+                        Ok(uuid) => uuid,
+                        Err(e) => {
+                            tracing::debug!("Failed to add category {}: {}", category, e);
+                            continue;
+                        }
+                    };
+                    let edge = RelationshipEdge {
+                        uuid: uuid::Uuid::new_v4(),
+                        from_entity: *entity_uuid,
+                        to_entity: category_uuid,
+                        relation_type: RelationType::IsA,
+                        strength: TAXONOMY_EDGE_STRENGTH,
+                        created_at: now,
+                        valid_at: now,
+                        invalidated_at: None,
+                        source_episode_id: Some(memory_id.0),
+                        context: String::new(),
+                        last_activated: now,
+                        activation_count: 1,
+                        ltp_status: LtpStatus::None,
+                        tier: EdgeTier::L1Working,
+                        activation_timestamps: None,
+                        entity_confidence: None,
+                        forman_curvature: None,
+                        endpoint_selectivity: None,
+                        provenance: vec![crate::graph_memory::ProvenanceRecord {
+                            source_episode_id: memory_id.0,
+                            mention_count: 1,
+                            first_observed: now,
+                            last_observed: now,
+                            confidence: None,
+                            // No span: the corpus never said this. Pointing at
+                            // the episode that merely mentioned the entity would
+                            // claim evidence that does not exist.
+                            evidence_span: None,
+                            typed_by: Some(crate::graph_memory::TypingMethod::Taxonomy),
+                        }],
+                        promoted_at: None,
+                    };
+                    if let Err(e) = graph_guard.add_relationship(edge) {
+                        tracing::debug!("Failed to add taxonomy edge for {}: {}", name, e);
+                    }
+                }
             }
         }
 

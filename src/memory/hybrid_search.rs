@@ -23,7 +23,9 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::{Field, Schema, Value, STORED, STRING, TEXT};
+use tantivy::schema::{
+    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING, TEXT,
+};
 use tantivy::{Index, IndexReader, IndexWriter, TantivyDocument};
 use tracing::{debug, info};
 
@@ -150,24 +152,86 @@ pub struct BM25Index {
     commit_failures: std::sync::atomic::AtomicU64,
 }
 
+/// Tantivy analyzer that lowercases and applies the English (Snowball) stemmer.
+///
+/// Registered by `TokenizerManager::default()` whenever tantivy's `stemmer`
+/// feature is on, which it is: `stemmer` sits in tantivy's own default feature
+/// set and this crate depends on `tantivy = "0.26"` with defaults enabled.
+const STEMMED_TOKENIZER: &str = "en_stem";
+
+/// Build the schema this binary expects.
+///
+/// `content` and `tags` are stemmed; `entities` deliberately is **not**.
+///
+/// The lexical leg used to bind tantivy's `default` analyzer for every text
+/// field (`SimpleTokenizer + RemoveLongFilter + LowerCaser`, no stemmer), which
+/// left it unable to match a query to an inflected form of the same word. On the
+/// LoCoMo gate corpus that is not a marginal effect: of the 76 `multi_hop`
+/// (query, gold) pairs, 53 share no content word with the query at all, and 18
+/// of those 53 become lexically reachable purely by stemming — an order of
+/// magnitude more than any other lexical bridge available. Every other stemmed
+/// surface in this codebase (the entity index in `graph_memory`, the query
+/// parser, compression, temporal facts) already uses `rust_stemmers`; BM25 was
+/// the lone holdout.
+///
+/// `entities` holds proper nouns, and stemming them would re-create precisely
+/// the collision `GraphMemory` pays to avoid — see the comments at
+/// `graph_memory.rs` on keeping proper nouns out of the stemmed entity index
+/// "to prevent 'Paris' → 'pari' merging with 'Parison'". Tantivy analyzes a
+/// query per field with that field's own tokenizer, so a mixed schema is safe:
+/// a term stems when matched against `content` and stays literal against
+/// `entities`, with no cross-field contamination.
+fn build_schema() -> Schema {
+    let stemmed = TextOptions::default().set_indexing_options(
+        TextFieldIndexing::default()
+            .set_tokenizer(STEMMED_TOKENIZER)
+            // Phrase queries (`search_with_term_and_phrase_weights`) need positions.
+            .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+    );
+
+    let mut schema_builder = Schema::builder();
+
+    // Memory ID (stored, not tokenized)
+    schema_builder.add_text_field("id", STRING | STORED);
+
+    // Main content (tokenized + stemmed for BM25)
+    schema_builder.add_text_field("content", stemmed.clone() | STORED);
+
+    // Tags (tokenized + stemmed — lowercase common nouns, low proper-noun risk)
+    schema_builder.add_text_field("tags", stemmed);
+
+    // Entities (tokenized, NOT stemmed — see above)
+    schema_builder.add_text_field("entities", TEXT);
+
+    schema_builder.build()
+}
+
 impl BM25Index {
-    /// Create or open a BM25 index at the given path
+    /// Create or open a BM25 index at the given path.
+    ///
+    /// # Schema migration
+    ///
+    /// An on-disk index carries its own schema — including each field's
+    /// tokenizer *name* — in `meta.json`, and `Index::open` takes no schema
+    /// argument: it reconstructs everything from that file and silently discards
+    /// whatever the caller built. Both the writer and the `QueryParser` then
+    /// resolve tokenizers from the opened index, so an index created before a
+    /// tokenizer change keeps indexing *and* querying with the old analyzer
+    /// forever. Nothing errors. Nothing warns. The index stays internally
+    /// consistent and simply answers differently from a fresh install of the
+    /// same binary — two fleets, two retrieval behaviours, one version number.
+    ///
+    /// That failure is invisible to the existing integrity tooling, because
+    /// `verify_index` / `repair_index` only ever walk the *vector* index.
+    ///
+    /// So the schema is compared explicitly on open, and a mismatch rebuilds:
+    /// the stale directory is deleted and recreated empty, which makes
+    /// [`HybridSearchEngine::needs_backfill`] true and lets the existing
+    /// startup backfill repopulate it from RocksDB — the same path a fresh
+    /// install takes, so a migrated index is equivalent to a new one by
+    /// construction rather than by argument.
     pub fn new(path: &Path) -> Result<Self> {
-        let mut schema_builder = Schema::builder();
-
-        // Memory ID (stored, not tokenized)
-        schema_builder.add_text_field("id", STRING | STORED);
-
-        // Main content (tokenized for BM25)
-        schema_builder.add_text_field("content", TEXT | STORED);
-
-        // Tags (tokenized)
-        schema_builder.add_text_field("tags", TEXT);
-
-        // Entities (tokenized)
-        schema_builder.add_text_field("entities", TEXT);
-
-        let schema = schema_builder.build();
+        let schema = build_schema();
 
         // Create or open index
         std::fs::create_dir_all(path)?;
@@ -175,7 +239,28 @@ impl BM25Index {
             .context("Failed to open tantivy directory")?;
 
         let index = if Index::exists(&dir)? {
-            Index::open(dir).context("Failed to open existing BM25 index")?
+            let existing = Index::open(dir).context("Failed to open existing BM25 index")?;
+            if existing.schema() == schema {
+                existing
+            } else {
+                // Drop every handle onto the directory before removing it. On
+                // Windows the mmapped segment files are still open until this
+                // value dies, and `remove_dir_all` would fail with a sharing
+                // violation.
+                drop(existing);
+                tracing::warn!(
+                    "BM25 index at {:?} was built with an out-of-date schema \
+                     (tokenizer or field change); discarding it and rebuilding \
+                     from long-term storage. Search results are incomplete until \
+                     the backfill finishes.",
+                    path
+                );
+                std::fs::remove_dir_all(path)
+                    .with_context(|| format!("Failed to remove stale BM25 index at {path:?}"))?;
+                std::fs::create_dir_all(path)?;
+                Index::create_in_dir(path, schema.clone())
+                    .context("Failed to recreate BM25 index after schema change")?
+            }
         } else {
             Index::create_in_dir(path, schema).context("Failed to create BM25 index")?
         };

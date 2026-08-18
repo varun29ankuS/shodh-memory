@@ -541,6 +541,7 @@ fn relation_type_to_string(r: &crate::graph_memory::RelationType) -> String {
         RelationType::PartOf => "part_of",
         RelationType::Contains => "contains",
         RelationType::OwnedBy => "owned_by",
+        RelationType::IsA => "is_a",
         RelationType::LocatedIn => "located_in",
         RelationType::LocatedAt => "located_at",
         RelationType::Uses => "uses",

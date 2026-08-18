@@ -905,6 +905,14 @@ pub enum TypingMethod {
     OpenIe,
     /// Event→event causal link from the CATENA event arm (signal + temporal order).
     Catena,
+    /// Category membership from the vendored WordNet table ([`crate::taxonomy`]).
+    ///
+    /// The only typing method here that did not read the corpus. Every other
+    /// variant names an extractor that saw text and drew a conclusion from it;
+    /// this one names a lookup. That distinction matters for ablation — a
+    /// taxonomy edge cannot be credited to, or blamed on, extraction quality —
+    /// and for provenance, since there is no evidence span to point at.
+    Taxonomy,
 }
 
 /// One source episode that attested an edge — the unit of provenance/corroboration.
@@ -1941,6 +1949,19 @@ pub enum RelationType {
     Contains,
     OwnedBy,
 
+    /// Category membership — `turtle IsA animal`.
+    ///
+    /// The only relation here that is **not** extracted from the corpus. Every
+    /// other variant records something a text said; this one records world
+    /// knowledge supplied by [`crate::taxonomy`], because a conversation about
+    /// pets never pauses to state that a turtle is an animal. Without it a query
+    /// that asks by category cannot reach an answer that names an instance —
+    /// see the module docs on `crate::taxonomy` for the measured case.
+    ///
+    /// Asymmetric, and the direction is easy to invert: the edge runs from the
+    /// specific to the general.
+    IsA,
+
     /// Location relationships
     LocatedIn,
     LocatedAt,
@@ -2039,6 +2060,7 @@ impl RelationType {
             Self::PartOf => "PartOf",
             Self::Contains => "Contains",
             Self::OwnedBy => "OwnedBy",
+            Self::IsA => "IsA",
             Self::LocatedIn => "LocatedIn",
             Self::LocatedAt => "LocatedAt",
             Self::Uses => "Uses",
@@ -2126,6 +2148,16 @@ impl RelationType {
             | Implements | Configures | DeploysTo | Monitors | Documents | WorksWith | Knows
             | Learned | Prefers | Recommends => 1.0,
             AlternativeTo => 0.9,
+            // Category membership. Deliberately below the structural relations
+            // despite being the most *reliable* edge in the graph — it comes
+            // from a vendored taxonomy rather than from extraction, so it is
+            // never wrong. The discount is for fan-out, not for doubt: a
+            // hypernym node is a hub by construction (`animal` is reachable
+            // from every creature in the corpus), and spreading activation
+            // through hubs is what `SHODH_HUB_DEGREE_MAX` exists to contain.
+            // Weight is a starting point to be moved by measurement, not a
+            // claim that a taxonomy edge means less than `PartOf`.
+            IsA => 0.9,
             // Generic associations — progressively weaker evidence of meaning.
             AssociatedWith | CoRetrieved => 0.7,
             // Temporal order (CATENA `Precedes`) is weaker evidence than causation
