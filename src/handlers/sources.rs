@@ -892,3 +892,721 @@ pub async fn list_items(
 
     Ok(Json(ListItemsResponse { items, total }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ServerConfig;
+    use crate::handlers::state::MultiUserMemoryManager;
+    use crate::ingest::folder;
+    use crate::memory::sources::{RunLease, RunStatus, RunTrigger};
+    use crate::memory::types::MemoryOrigin;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    const USER: &str = "ingest-tester";
+
+    /// A manager over a path we control, so the same path can be reopened.
+    fn build_manager(path: &std::path::Path) -> AppState {
+        let config = ServerConfig {
+            storage_path: path.to_path_buf(),
+            backup_enabled: false,
+            ..ServerConfig::default()
+        };
+        Arc::new(
+            MultiUserMemoryManager::new(path.to_path_buf(), config).expect("failed to open manager"),
+        )
+    }
+
+    fn write_file(root: &std::path::Path, rel: &str, body: &str) {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        std::fs::write(&path, body).expect("write corpus file");
+    }
+
+    fn folder_body(root: &std::path::Path, include: &[&str]) -> WatchedFolderConfigBody {
+        WatchedFolderConfigBody {
+            root: root.to_string_lossy().to_string(),
+            include_globs: Some(include.iter().map(|g| g.to_string()).collect()),
+            exclude_globs: None,
+            max_depth: None,
+            max_files_per_run: None,
+            max_file_bytes: None,
+            max_run_bytes: None,
+            rehash_every_n_runs: None,
+            memory_type: Some("observation".to_string()),
+            tags: Some(vec!["corpus".to_string()]),
+        }
+    }
+
+    async fn register_with(
+        state: &AppState,
+        name: &str,
+        config: WatchedFolderConfigBody,
+    ) -> SourceDefinition {
+        let response = create_source(
+            State(state.clone()),
+            Json(CreateSourceRequest {
+                user_id: USER.to_string(),
+                name: name.to_string(),
+                kind: "watched_folder".to_string(),
+                enabled: true,
+                config,
+            }),
+        )
+        .await
+        .expect("source registration must succeed")
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        state
+            .source_store
+            .list_sources(USER)
+            .expect("list sources")
+            .into_iter()
+            .find(|d| d.name == name)
+            .expect("the registered source must be readable back")
+    }
+
+    async fn register(state: &AppState, corpus: &std::path::Path, name: &str) -> SourceDefinition {
+        register_with(state, name, folder_body(corpus, &["**/*.md"])).await
+    }
+
+    async fn run_now(state: &AppState, def: &SourceDefinition, force: bool) -> SourceRun {
+        folder::execute_run(state, def, RunTrigger::Manual, force)
+            .await
+            .expect("a run must always leave a record")
+    }
+
+    /// Wait for every background enrichment task without sleeping.
+    ///
+    /// `TaskTracker::close` does not stop new spawns, so this also drains the
+    /// graph, lineage and temporal passes an ingest kicks off.
+    async fn drain(state: &AppState) {
+        state.task_tracker.close();
+        state.task_tracker.wait().await;
+    }
+
+    fn memory_count(state: &AppState) -> usize {
+        let memory = state.get_user_memory(USER).expect("user memory");
+        let guard = memory.read();
+        guard.get_all_memories().expect("list memories").len()
+    }
+
+    fn load_memory(state: &AppState, id: uuid::Uuid) -> crate::memory::types::Memory {
+        let memory = state.get_user_memory(USER).expect("user memory");
+        let guard = memory.read();
+        guard
+            .get_memory(&crate::memory::MemoryId(id))
+            .expect("stored memory")
+    }
+
+    async fn list_json(state: &AppState) -> serde_json::Value {
+        let Json(body) = list_sources(State(state.clone()), Path(USER.to_string()))
+            .await
+            .expect("listing must succeed");
+        serde_json::to_value(&body).expect("serialise listing")
+    }
+
+    // -----------------------------------------------------------------------
+
+    /// **The SessionStore regression test.**
+    ///
+    /// `SessionStore` keeps its state only in the process, so an 18,032-memory
+    /// profile answers `{"sessions":[],"count":0}` immediately after a restart.
+    /// This asserts the registry cannot do that: drop the entire manager,
+    /// reopen the same directory, and the listing must come back identical —
+    /// definition, run history and counters alike.
+    #[tokio::test]
+    async fn source_listing_is_identical_after_a_restart() {
+        let home = TempDir::new().expect("temp home");
+        let corpus = TempDir::new().expect("temp corpus");
+        write_file(corpus.path(), "notes/alpha.md", "Baltimore harbour survey, first pass.");
+        write_file(corpus.path(), "notes/beta.md", "Second note about the Patapsco river.");
+
+        let before = {
+            let state = build_manager(home.path());
+            let def = register(&state, corpus.path(), "Field notes").await;
+            let run = run_now(&state, &def, false).await;
+            assert_eq!(run.items_ingested, 2, "both notes must land on the first run");
+            drain(&state).await;
+            let json = list_json(&state).await;
+            drop(state);
+            json
+        };
+
+        let state = build_manager(home.path());
+        let after = list_json(&state).await;
+
+        assert_eq!(
+            after, before,
+            "the registry answered differently after a restart, which is the SessionStore \
+             failure this store exists to make impossible"
+        );
+        assert_eq!(
+            after["sources"][0]["last_run"]["items_ingested"], 2,
+            "the run record must survive the process that wrote it"
+        );
+        assert_eq!(after["sources"][0]["items_tracked"], 2);
+        assert_eq!(after["sources"][0]["memories_written_total"], 2);
+    }
+
+    /// Re-reading an unchanged folder must not write anything.
+    #[tokio::test]
+    async fn a_second_run_over_unchanged_files_writes_nothing() {
+        let home = TempDir::new().expect("temp home");
+        let corpus = TempDir::new().expect("temp corpus");
+        write_file(corpus.path(), "one.md", "A note about the survey at Fort McHenry.");
+        write_file(corpus.path(), "two.md", "A different note about the tide gauge.");
+
+        let state = build_manager(home.path());
+        let def = register(&state, corpus.path(), "Notes").await;
+
+        let first = run_now(&state, &def, false).await;
+        assert_eq!(first.items_ingested, 2);
+        assert_eq!(first.memories_written, 2);
+        drain(&state).await;
+        let after_first = memory_count(&state);
+
+        let second = run_now(&state, &def, false).await;
+        assert_eq!(
+            second.items_ingested, 0,
+            "nothing changed, so nothing may be written"
+        );
+        assert_eq!(second.items_unchanged, 2);
+        assert_eq!(second.memories_written, 0);
+        assert_eq!(
+            memory_count(&state),
+            after_first,
+            "a re-read produced a duplicate memory"
+        );
+    }
+
+    /// A single-part file that changes UPSERTS: one memory, version bumped, the
+    /// previous text on that memory's own history.
+    ///
+    /// The weaker assertion — "a memory exists" — passes under append too and
+    /// would prove nothing, so this checks the count, the version and the
+    /// history entry.
+    #[tokio::test]
+    async fn a_changed_single_part_file_upserts_rather_than_appending() {
+        let home = TempDir::new().expect("temp home");
+        let corpus = TempDir::new().expect("temp corpus");
+        write_file(
+            corpus.path(),
+            "report.md",
+            "Quarter two: the tide gauge held calibration throughout.",
+        );
+
+        let state = build_manager(home.path());
+        let def = register(&state, corpus.path(), "Reports").await;
+
+        let first = run_now(&state, &def, false).await;
+        assert_eq!(first.items_ingested, 1);
+        drain(&state).await;
+        let before = memory_count(&state);
+        assert_eq!(before, 1);
+
+        write_file(
+            corpus.path(),
+            "report.md",
+            "Quarter three: the tide gauge drifted and was recalibrated on the eighth.",
+        );
+        let second = run_now(&state, &def, false).await;
+        assert_eq!(second.items_ingested, 1, "the edit must be ingested");
+
+        assert_eq!(
+            memory_count(&state),
+            before,
+            "an edited single-part document must stay ONE memory; a second memory here is \
+             the append path, and a year of weekly edits would put 52 near-identical \
+             memories into retrieval"
+        );
+
+        let cursor = state
+            .source_store
+            .get_cursor(&def.id, &folder::item_hash("report.md"))
+            .expect("cursor read")
+            .expect("the item must have a cursor");
+        assert_eq!(cursor.memory_ids.len(), 1);
+        assert!(
+            cursor.external_id.is_some(),
+            "a single-part item must be bound to an external id, or the next edit cannot \
+             find the memory to replace"
+        );
+
+        let memory = load_memory(&state, cursor.memory_ids[0]);
+        assert_eq!(memory.version, 2, "the update must bump the version");
+        assert!(
+            memory.experience.content.contains("Quarter three"),
+            "the memory must hold the current text"
+        );
+        assert!(
+            memory
+                .get_history()
+                .iter()
+                .any(|r| r.previous_content.contains("Quarter two")),
+            "the previous text must survive on the memory's own version history"
+        );
+    }
+
+    /// The crash window: the memory write succeeded, the cursor commit did not.
+    ///
+    /// Dropping the cursor reproduces exactly that state. The next run re-reads
+    /// the same bytes and must not bump the memory's version — `upsert` does not
+    /// consult the content-hash index, so nothing below the connector can absorb
+    /// this duplicate.
+    #[tokio::test]
+    async fn a_lost_cursor_commit_does_not_duplicate_or_bump_a_version() {
+        let home = TempDir::new().expect("temp home");
+        let corpus = TempDir::new().expect("temp corpus");
+        write_file(corpus.path(), "survey.md", "The channel was sounded at first light.");
+
+        let state = build_manager(home.path());
+        let def = register(&state, corpus.path(), "Survey").await;
+
+        let first = run_now(&state, &def, false).await;
+        assert_eq!(first.items_ingested, 1);
+        drain(&state).await;
+        let before = memory_count(&state);
+
+        // The crash: cursor gone, memory still there.
+        state
+            .source_store
+            .delete_cursor(&def.id, &folder::item_hash("survey.md"))
+            .expect("drop cursor");
+
+        let second = run_now(&state, &def, false).await;
+        assert_eq!(
+            second.items_deduped, 1,
+            "the re-read must be absorbed, not re-written"
+        );
+        assert_eq!(second.memories_written, 0);
+        assert_eq!(memory_count(&state), before, "the duplicate was not absorbed");
+
+        let cursor = state
+            .source_store
+            .get_cursor(&def.id, &folder::item_hash("survey.md"))
+            .expect("cursor read")
+            .expect("the cursor must be rebuilt");
+        let memory = load_memory(&state, cursor.memory_ids[0]);
+        assert_eq!(
+            memory.version, 1,
+            "re-reading identical bytes pushed an identical version onto the history"
+        );
+    }
+
+    /// Provenance is stamped at write time or lost forever: no migration and no
+    /// heuristic can recover where a memory came from.
+    #[tokio::test]
+    async fn every_memory_a_run_writes_carries_its_provenance() {
+        let home = TempDir::new().expect("temp home");
+        let corpus = TempDir::new().expect("temp corpus");
+        write_file(corpus.path(), "a.md", "The pier was inspected and found sound.");
+        write_file(corpus.path(), "sub/b.md", "The second pier was not inspected.");
+
+        let state = build_manager(home.path());
+        let def = register(&state, corpus.path(), "Inspections").await;
+        let run = run_now(&state, &def, false).await;
+        assert_eq!(run.items_ingested, 2);
+        drain(&state).await;
+
+        let memories = {
+            let mem = state.get_user_memory(USER).expect("user memory");
+            let guard = mem.read();
+            guard.get_all_memories().expect("list memories")
+        };
+        assert_eq!(memories.len(), 2);
+        for memory in &memories {
+            assert_eq!(
+                memory.experience.origin,
+                MemoryOrigin::Connector,
+                "a connector write that is not stamped Connector is indistinguishable from \
+                 something a human asked for"
+            );
+            let meta = &memory.experience.metadata;
+            assert_eq!(
+                meta.get(folder::META_RUN_ID).map(String::as_str),
+                Some(run.run_id.to_string().as_str())
+            );
+            assert_eq!(
+                meta.get(folder::META_SOURCE_ID).map(String::as_str),
+                Some(def.id.0.to_string().as_str())
+            );
+            assert_eq!(
+                meta.get(folder::META_SOURCE_KIND).map(String::as_str),
+                Some("watched_folder")
+            );
+            assert!(
+                meta.get(folder::META_ITEM).is_some_and(|p| !p.is_empty()),
+                "without the item path there is no link back to the file"
+            );
+            assert!(
+                !memory.experience.content.contains(".md"),
+                "the memory's content is the file text and nothing else; a path header would \
+                 defeat content dedup and pollute NER and BM25"
+            );
+        }
+    }
+
+    /// Credential-shaped files and credential directories are refused before any
+    /// read, and the refusal is counted where an operator can see it.
+    #[tokio::test]
+    async fn credential_files_are_refused_and_counted() {
+        let home = TempDir::new().expect("temp home");
+        let corpus = TempDir::new().expect("temp corpus");
+        write_file(corpus.path(), "notes.md", "An ordinary note about the harbour.");
+        write_file(corpus.path(), "deploy.key", "PRIVATE KEY MATERIAL");
+        write_file(corpus.path(), ".env", "SHODH_API_KEY=secret");
+        write_file(corpus.path(), ".ssh/notes.md", "Host bastion, port 22.");
+
+        let state = build_manager(home.path());
+        // A deliberately wide include glob, so nothing but the deny-list stands
+        // in the way.
+        let def = register_with(&state, "Everything", folder_body(corpus.path(), &["**/*"])).await;
+
+        let run = run_now(&state, &def, false).await;
+        assert_eq!(
+            run.items_seen, 1,
+            "only the ordinary note may reach the item loop"
+        );
+        assert_eq!(
+            run.items_denied_by_policy, 3,
+            "deploy.key, .env and the .ssh directory must each be refused"
+        );
+        drain(&state).await;
+
+        let memories = {
+            let mem = state.get_user_memory(USER).expect("user memory");
+            let guard = mem.read();
+            guard.get_all_memories().expect("list memories")
+        };
+        assert_eq!(memories.len(), 1);
+        assert!(memories[0].experience.content.contains("harbour"));
+    }
+
+    /// A run that dies mid-flight leaves a lease. Reopening the store must turn
+    /// that into an `Aborted` run rather than one that says `Running` forever
+    /// and blocks the source.
+    #[tokio::test]
+    async fn a_lease_left_by_a_dead_process_is_swept_into_an_aborted_run() {
+        let home = TempDir::new().expect("temp home");
+        let corpus = TempDir::new().expect("temp corpus");
+        write_file(corpus.path(), "note.md", "A note that will never finish ingesting.");
+
+        let def = {
+            let state = build_manager(home.path());
+            let def = register(&state, corpus.path(), "Interrupted").await;
+
+            // Exactly what `execute_run` writes before its first read, and then
+            // nothing else — the shape a killed process leaves behind.
+            let run = SourceRun::start(&def, RunTrigger::Manual, chrono::Utc::now());
+            let lease = RunLease {
+                run_id: run.run_id,
+                started_at: run.started_at,
+                run_started_nanos: run.started_nanos,
+                heartbeat_at: run.started_at,
+                pid: std::process::id(),
+            };
+            state.source_store.begin_run(&run, &lease).expect("begin run");
+            assert!(state.source_store.is_running(USER, &def.id).expect("lease"));
+            drop(state);
+            def
+        };
+
+        let state = build_manager(home.path());
+        assert!(
+            !state
+                .source_store
+                .is_running(USER, &def.id)
+                .expect("lease read"),
+            "the stale lease must be gone, or the source can never run again"
+        );
+
+        let (runs, total) = state
+            .source_store
+            .list_runs(USER, &def.id, 10, 0)
+            .expect("runs");
+        assert_eq!(total, 1);
+        assert!(
+            matches!(runs[0].status, RunStatus::Aborted),
+            "an interrupted run must read as Aborted, not Running: got {:?}",
+            runs[0].status
+        );
+        assert!(
+            runs[0]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("process exited")),
+            "the abort must say why"
+        );
+    }
+
+    /// One run at a time. The lock is held by the run, not by the request, so a
+    /// second trigger while a run is in flight is a 409 with its own code.
+    #[tokio::test]
+    async fn a_second_run_trigger_is_refused_while_one_is_in_flight() {
+        let home = TempDir::new().expect("temp home");
+        let corpus = TempDir::new().expect("temp corpus");
+        write_file(corpus.path(), "note.md", "A note about the inner harbour.");
+
+        let state = build_manager(home.path());
+        let def = register(&state, corpus.path(), "Busy").await;
+
+        // Hold the source's lock the way an in-flight run holds it.
+        let lock = state
+            .source_locks
+            .entry(def.id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _held = lock.lock_owned().await;
+
+        let err = trigger_run(
+            State(state.clone()),
+            Path((USER.to_string(), def.id.0.to_string())),
+            None,
+        )
+        .await
+        .err()
+        .expect("a second trigger must be refused");
+        assert_eq!(err.code(), "SOURCE_RUN_IN_PROGRESS");
+        assert_eq!(err.status_code(), StatusCode::CONFLICT);
+    }
+
+    /// The accepted path, through the handler this time.
+    #[tokio::test]
+    async fn triggering_a_run_over_http_ingests_and_records() {
+        let home = TempDir::new().expect("temp home");
+        let corpus = TempDir::new().expect("temp corpus");
+        write_file(corpus.path(), "note.md", "The dredger finished the north channel.");
+
+        let state = build_manager(home.path());
+        let def = register(&state, corpus.path(), "Dredging").await;
+
+        let response = trigger_run(
+            State(state.clone()),
+            Path((USER.to_string(), def.id.0.to_string())),
+            None,
+        )
+        .await
+        .expect("trigger")
+        .into_response();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        drain(&state).await;
+
+        let Json(runs) = list_runs(
+            State(state.clone()),
+            Path((USER.to_string(), def.id.0.to_string())),
+            Query(PageQuery {
+                limit: None,
+                offset: None,
+            }),
+        )
+        .await
+        .expect("runs");
+        assert_eq!(runs.total, 1);
+        assert_eq!(runs.runs[0].items_ingested, 1);
+        assert!(runs.failures_are_a_sample);
+
+        let Json(items) = list_items(
+            State(state.clone()),
+            Path((USER.to_string(), def.id.0.to_string())),
+            Query(ItemQuery {
+                state: Some("ingested".to_string()),
+                limit: None,
+                offset: None,
+            }),
+        )
+        .await
+        .expect("items");
+        assert_eq!(items.total, 1);
+        assert_eq!(items.items[0].path, "note.md");
+    }
+
+    /// A source that has never run reports `last_run: null`, not a zero-filled
+    /// object. A confident zero here reads as "this source delivered nothing"
+    /// when the truth is "nothing recorded whether it did".
+    #[tokio::test]
+    async fn a_source_that_never_ran_reports_null_rather_than_zeros() {
+        let home = TempDir::new().expect("temp home");
+        let corpus = TempDir::new().expect("temp corpus");
+        write_file(corpus.path(), "note.md", "Nothing has read this yet.");
+
+        let state = build_manager(home.path());
+        register(&state, corpus.path(), "Fresh").await;
+
+        let json = list_json(&state).await;
+        assert!(
+            json["sources"][0]["last_run"].is_null(),
+            "last_run must be null before the first run"
+        );
+        assert_eq!(json["sources"][0]["run_count"], 0);
+        assert_eq!(json["sources"][0]["running"], false);
+        assert!(json["sources"][0]["last_success_at"].is_null());
+    }
+
+    /// A document past `MAX_CONTENT_LENGTH` becomes an ordered episode rather
+    /// than being dropped, and its parts are appended — upsert cannot express a
+    /// part count that changes between versions.
+    #[tokio::test]
+    async fn an_oversized_document_becomes_an_ordered_episode() {
+        let home = TempDir::new().expect("temp home");
+        let corpus = TempDir::new().expect("temp corpus");
+        let body: String = (0..900)
+            .map(|i| format!("Sounding {i} recorded a depth reading in the north channel.\n\n"))
+            .collect();
+        assert!(body.len() > validation::MAX_CONTENT_LENGTH);
+        write_file(corpus.path(), "long.md", &body);
+
+        let state = build_manager(home.path());
+        let def = register(&state, corpus.path(), "Long").await;
+        let run = run_now(&state, &def, false).await;
+        assert_eq!(run.items_ingested, 1);
+        assert!(
+            run.memories_written > 1,
+            "a document over the content limit must be split, not dropped"
+        );
+        drain(&state).await;
+
+        let cursor = state
+            .source_store
+            .get_cursor(&def.id, &folder::item_hash("long.md"))
+            .expect("cursor")
+            .expect("cursor exists");
+        assert_eq!(cursor.memory_ids.len(), run.memories_written as usize);
+        assert!(
+            cursor.external_id.is_none(),
+            "a split document is appended, so no single memory owns the item's external id"
+        );
+
+        let total = cursor.memory_ids.len();
+        for (index, id) in cursor.memory_ids.iter().enumerate() {
+            let memory = load_memory(&state, *id);
+            assert!(memory.experience.content.len() <= validation::MAX_CONTENT_LENGTH);
+            assert_eq!(
+                memory.experience.metadata.get(folder::META_PART),
+                Some(&format!("{}/{}", index + 1, total))
+            );
+            let context = memory
+                .experience
+                .context
+                .as_ref()
+                .expect("a part must carry episode context");
+            assert_eq!(context.episode.sequence_number, Some(index as u32));
+            if index > 0 {
+                assert_eq!(
+                    context.episode.preceding_memory_id.as_deref(),
+                    Some(cursor.memory_ids[index - 1].to_string().as_str()),
+                    "the parts must be linked in order"
+                );
+            }
+        }
+    }
+
+    /// Registration-time refusals. Each is a distinct `InvalidInput` on
+    /// `config.root`, so a caller is told which rule it hit.
+    #[tokio::test]
+    async fn registration_refuses_dangerous_roots() {
+        let home = TempDir::new().expect("temp home");
+        let corpus = TempDir::new().expect("temp corpus");
+        write_file(corpus.path(), "note.md", "An ordinary note.");
+        let state = build_manager(home.path());
+        let none: Vec<SourceDefinition> = Vec::new();
+
+        // A relative path resolves against the server's working directory,
+        // which is not something the caller can see.
+        let err = folder::validate_root("notes", home.path(), &none)
+            .expect_err("a relative root must be refused");
+        assert!(err.message().contains("absolute"), "{}", err.message());
+
+        // The volume root: the failure mode this control exists for.
+        let volume_root = if cfg!(windows) { "C:\\" } else { "/" };
+        let err = folder::validate_root(volume_root, home.path(), &none)
+            .expect_err("a volume root must be refused");
+        assert!(
+            err.message().contains("filesystem or volume root"),
+            "{}",
+            err.message()
+        );
+
+        // Our own storage: ingesting the store's RocksDB into the store is a
+        // corruption path, not merely a waste.
+        let err = folder::validate_root(&home.path().to_string_lossy(), home.path(), &none)
+            .expect_err("the manager's own base path must be refused");
+        assert!(err.message().contains("protected"), "{}", err.message());
+
+        // A second source over the same tree would produce two cursors pointing
+        // at one memory.
+        let def = register(&state, corpus.path(), "First").await;
+        let err = folder::validate_root(
+            &corpus.path().to_string_lossy(),
+            home.path(),
+            std::slice::from_ref(&def),
+        )
+        .expect_err("an overlapping root must be refused");
+        assert!(err.message().contains("overlaps"), "{}", err.message());
+
+        // And the same refusal reaches the API, not just the helper.
+        let err = create_source(
+            State(state.clone()),
+            Json(CreateSourceRequest {
+                user_id: USER.to_string(),
+                name: "Second".to_string(),
+                kind: "watched_folder".to_string(),
+                enabled: true,
+                config: folder_body(corpus.path(), &["**/*.md"]),
+            }),
+        )
+        .await
+        .err()
+        .expect("registration must refuse the overlapping root");
+        assert_eq!(err.code(), "INVALID_INPUT");
+    }
+
+    /// Deleting a source removes its cursors and says, on the wire, that it did
+    /// not delete any memories.
+    #[tokio::test]
+    async fn deleting_a_source_removes_its_cursors_and_keeps_its_memories() {
+        let home = TempDir::new().expect("temp home");
+        let corpus = TempDir::new().expect("temp corpus");
+        write_file(corpus.path(), "one.md", "A note about the outer harbour.");
+
+        let state = build_manager(home.path());
+        let def = register(&state, corpus.path(), "Doomed").await;
+        run_now(&state, &def, false).await;
+        drain(&state).await;
+        let before = memory_count(&state);
+        assert_eq!(before, 1);
+
+        let Json(deleted) = delete_source(
+            State(state.clone()),
+            Path((USER.to_string(), def.id.0.to_string())),
+        )
+        .await
+        .expect("delete");
+        assert!(deleted.deleted);
+        assert_eq!(deleted.cursors_removed, 1);
+        assert_eq!(deleted.memories_deleted, 0);
+
+        assert_eq!(
+            memory_count(&state),
+            before,
+            "unregistering a source must never destroy the corpus it produced"
+        );
+        assert!(state
+            .source_store
+            .list_cursors(&def.id)
+            .expect("cursors")
+            .is_empty());
+        let err = get_source(
+            State(state.clone()),
+            Path((USER.to_string(), def.id.0.to_string())),
+        )
+        .await
+        .expect_err("a deleted source must be gone");
+        assert_eq!(err.code(), "SOURCE_NOT_FOUND");
+    }
+}

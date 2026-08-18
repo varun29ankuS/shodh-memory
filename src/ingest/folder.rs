@@ -1352,6 +1352,33 @@ async fn finish(
 mod tests {
     use super::*;
 
+    /// The default include globs are the whole contract for what a folder
+    /// source reads. If `**/*.md` did not match a file sitting directly in the
+    /// root, every top-level document in a corpus would be invisible and the
+    /// only symptom would be a run that reports zero items seen.
+    #[test]
+    fn default_include_globs_match_both_top_level_and_nested_files() {
+        let include =
+            compile_globs(&crate::memory::sources::default_include_globs(), "t").expect("globs");
+        for path in ["notes.md", "a/notes.md", "a/b/c/notes.txt", "notes.txt"] {
+            assert!(
+                include.iter().any(|p| p.matches(path)),
+                "{path} must be matched by the default include globs"
+            );
+        }
+        for path in ["notes.pdf", "a/binary.exe"] {
+            assert!(
+                !include.iter().any(|p| p.matches(path)),
+                "{path} must not be matched by the default include globs"
+            );
+        }
+        let wide = compile_globs(&["**/*".to_string()], "t").expect("globs");
+        assert!(
+            wide.iter().any(|p| p.matches("notes.md")),
+            "a caller asking for everything must get top-level files too"
+        );
+    }
+
     #[test]
     fn credential_shapes_are_refused_by_name() {
         for name in [
@@ -1402,6 +1429,142 @@ mod tests {
             doc.matches('x').count(),
             "splitting must not drop content"
         );
+    }
+
+    /// The last control before an open.
+    ///
+    /// This is the documented MCP `forget` path-traversal class: a string used
+    /// to address a resource without normalisation. Here the entry is handed to
+    /// the reader already pointing outside the root — the state an escaped
+    /// symlink, a junction, or a bug in the enumerator would produce — and the
+    /// file must never be opened. Asserting on the walk alone would leave this
+    /// untested on any machine where creating a symlink needs a privilege.
+    #[test]
+    fn a_file_that_resolves_outside_the_root_is_never_read() {
+        let root = tempfile::TempDir::new().expect("root");
+        let outside = tempfile::TempDir::new().expect("outside");
+        let secret = outside.path().join("secret.md");
+        std::fs::write(&secret, "credentials that live outside the corpus").expect("write");
+
+        let canonical_root = std::fs::canonicalize(root.path()).expect("canonical root");
+        let entry = WalkEntry {
+            // The relative path claims to be inside the root; the absolute path
+            // is not. That mismatch is precisely what an escape looks like.
+            rel: "secret.md".to_string(),
+            abs: secret.clone(),
+            size: std::fs::metadata(&secret).expect("metadata").len(),
+            mtime_unix_nanos: None,
+        };
+
+        match read_item(&entry, &canonical_root, 1_048_576) {
+            Err(ReadRefusal::Denied(reason)) => {
+                assert!(reason.contains("outside"), "{reason}");
+            }
+            Err(other) => panic!(
+                "an escape must be DENIED, not merely skipped: {}",
+                match other {
+                    ReadRefusal::Skipped(r) | ReadRefusal::Failed(r) => r,
+                    ReadRefusal::Denied(r) => r,
+                }
+            ),
+            Ok(text) => panic!("the file outside the root was read: {text:?}"),
+        }
+    }
+
+    /// The walk refuses a symlink rather than resolving it. Creating a symlink
+    /// on Windows needs Developer Mode or an elevated process, so this asserts
+    /// the refusal wherever the platform lets one be created and states plainly
+    /// that the containment check above is what covers the rest.
+    #[test]
+    fn the_walk_refuses_a_symlink_that_escapes_the_root() {
+        let root = tempfile::TempDir::new().expect("root");
+        let outside = tempfile::TempDir::new().expect("outside");
+        let target = outside.path().join("secret.md");
+        std::fs::write(&target, "credentials that live outside the corpus").expect("write");
+        std::fs::write(root.path().join("ordinary.md"), "an ordinary note").expect("write");
+
+        let link = root.path().join("escape.md");
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&target, &link).is_ok();
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&target, &link).is_ok();
+        #[cfg(not(any(windows, unix)))]
+        let made = false;
+
+        if !made {
+            // No privilege to create one. The containment check in
+            // `a_file_that_resolves_outside_the_root_is_never_read` is the
+            // control that still holds if a link ever reaches the reader.
+            return;
+        }
+
+        let cfg = crate::memory::sources::WatchedFolderConfig::with_root(
+            root.path().to_string_lossy().to_string(),
+        );
+        let include = compile_globs(&["**/*.md".to_string()], "t").expect("globs");
+        let canonical_root = std::fs::canonicalize(root.path()).expect("canonical root");
+        let outcome = walk_root(&canonical_root, &cfg, &include, &[]);
+
+        assert_eq!(outcome.denied, 1, "the symlink must be counted as denied");
+        assert_eq!(outcome.entries.len(), 1);
+        assert_eq!(outcome.entries[0].rel, "ordinary.md");
+    }
+
+    /// A Windows directory junction redirects exactly like a symlink but is
+    /// **not** a symlink to `FileType::is_symlink`, and — unlike a symlink —
+    /// creating one needs no privilege. That combination is what makes it the
+    /// realistic escape on this platform, and it is why the walk tests
+    /// `FILE_ATTRIBUTE_REPARSE_POINT` rather than trusting `is_symlink` alone.
+    #[cfg(windows)]
+    #[test]
+    fn the_walk_refuses_a_directory_junction() {
+        let root = tempfile::TempDir::new().expect("root");
+        let outside = tempfile::TempDir::new().expect("outside");
+        std::fs::write(outside.path().join("secret.md"), "material outside the corpus")
+            .expect("write");
+        std::fs::write(root.path().join("ordinary.md"), "an ordinary note").expect("write");
+
+        let link = root.path().join("escape");
+        let made = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link.to_string_lossy(),
+                &outside.path().to_string_lossy(),
+            ])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(
+            made,
+            "creating a junction needs no privilege; if this failed the test cannot              prove anything and must not pass quietly"
+        );
+
+        // Measured, not assumed: std reports a junction as a symlink, because
+        // `FileType::is_symlink` accepts both IO_REPARSE_TAG_SYMLINK and
+        // IO_REPARSE_TAG_MOUNT_POINT. The reparse-point check is what still
+        // catches every OTHER reparse tag - cloud placeholders, dedup stubs -
+        // which std does not classify as a link at all.
+        let md = std::fs::symlink_metadata(&link).expect("junction metadata");
+        assert!(
+            is_reparse_point(&md),
+            "a junction must carry FILE_ATTRIBUTE_REPARSE_POINT"
+        );
+
+        let cfg = crate::memory::sources::WatchedFolderConfig::with_root(
+            root.path().to_string_lossy().to_string(),
+        );
+        let include = compile_globs(&["**/*.md".to_string()], "t").expect("globs");
+        let canonical_root = std::fs::canonicalize(root.path()).expect("canonical root");
+        let outcome = walk_root(&canonical_root, &cfg, &include, &[]);
+
+        assert_eq!(
+            outcome.denied, 1,
+            "the junction must be refused and counted, not descended into"
+        );
+        assert_eq!(outcome.entries.len(), 1);
+        assert_eq!(outcome.entries[0].rel, "ordinary.md");
     }
 
     #[test]

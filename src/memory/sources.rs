@@ -812,6 +812,18 @@ impl SourceStore {
             .context("touch item cursor")
     }
 
+    /// Drop one item's cursor. The memories it produced are untouched.
+    ///
+    /// This is the deliberate way to make a source forget an item: the next run
+    /// re-reads it, and the sink absorbs the re-derived content. It is also
+    /// exactly the state a crash between the memory write and the cursor commit
+    /// leaves behind, which is what makes that window testable.
+    pub fn delete_cursor(&self, source_id: &SourceId, item_hash: &str) -> Result<()> {
+        self.db
+            .delete_cf(self.cursor_cf(), cursor_key(source_id, item_hash))
+            .context("delete item cursor")
+    }
+
     /// Every cursor for a source. Walked once per run for disappearance
     /// detection and item totals; the API's item list reads it too.
     pub fn list_cursors(&self, source_id: &SourceId) -> Result<Vec<ItemCursor>> {
