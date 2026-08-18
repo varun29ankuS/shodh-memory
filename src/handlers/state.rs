@@ -481,6 +481,35 @@ struct MultiUserMemoryManagerRotationHelper {
 
 const CF_AUDIT: &str = "audit";
 
+/// What one rotation pass did to a user's audit trail.
+///
+/// Rotation reports what it retained as well as what it removed: a key it
+/// could not interpret is not silently skipped, because a trail that quietly
+/// stops shrinking is indistinguishable from one that has nothing to shrink.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RotationOutcome {
+    /// Keys deleted from `CF_AUDIT`.
+    removed: usize,
+    /// Keys rotation could not fully interpret and therefore did not touch.
+    retained_unreadable: usize,
+}
+
+/// Parse the nanosecond stamp out of a `{user_id}:{timestamp_nanos:020}` audit
+/// key.
+///
+/// Returns `None` for anything rotation cannot fully interpret: bytes that are
+/// not UTF-8, a key that does not carry the expected `{user_id}:` prefix, or a
+/// suffix that is not an `i64`. `None` means "unknown", never "zero" — see
+/// [`MultiUserMemoryManagerRotationHelper::rotate_user_audit_logs`] for why
+/// that distinction is the whole point.
+fn parse_audit_key_nanos(key: &[u8], prefix: &str) -> Option<i64> {
+    std::str::from_utf8(key)
+        .ok()?
+        .strip_prefix(prefix)?
+        .parse::<i64>()
+        .ok()
+}
+
 impl MultiUserMemoryManagerRotationHelper {
     fn audit_cf(&self) -> &rocksdb::ColumnFamily {
         self.shared_db
@@ -488,88 +517,141 @@ impl MultiUserMemoryManagerRotationHelper {
             .expect("audit CF must exist")
     }
 
-    /// Rotate audit logs for a user - delete old entries and enforce max count.
+    /// Rotate audit logs for a user — delete entries past the retention window
+    /// and entries beyond the per-user cap, oldest first.
     ///
     /// Keys are `{user_id}:{timestamp_nanos:020}` so RocksDB returns them in
-    /// ascending timestamp order. Two strategies depending on scale:
-    /// - ≤100K keys: collect all, compute excess, batch delete
-    /// - >100K keys: streaming 2-pass (count, then delete) to avoid OOM
-    fn rotate_user_audit_logs(&self, user_id: &str) -> Result<usize> {
+    /// ascending timestamp order. Streaming two-pass (count, then delete) with
+    /// a `WriteBatch` flushed every 10K deletes, so peak memory does not scale
+    /// with the size of the trail.
+    ///
+    /// # Unreadable keys are retained, never deleted
+    ///
+    /// This function used to parse each key with `.unwrap_or(0)`. A key it
+    /// could not parse therefore compared as timestamp zero, which is older
+    /// than every cutoff, so it was deleted on the first pass that touched it —
+    /// unconditionally, whether or not the cap was anywhere near being hit.
+    /// (Worth being precise about the mechanism: ASCII letters sort *above*
+    /// digits, so a malformed suffix lands at the END of the user's key range,
+    /// not the front. It was never "sorted oldest"; it was *evaluated* as
+    /// infinitely old, which no position in the range could save it from.) The
+    /// records most likely to be evidence of a problem — a truncated write, a
+    /// foreign writer, disk corruption — were the ones rotation destroyed
+    /// first, inside the one structure whose entire purpose is not to lose
+    /// things.
+    ///
+    /// The rule now is uniform: anything rotation cannot fully interpret,
+    /// rotation does not touch. A failed parse is an inconclusive read, and an
+    /// inconclusive read is never proof of absence — it is certainly not proof
+    /// of age. The alternatives were considered and rejected:
+    ///
+    /// - *Hard error.* One corrupt key would then disable retention for that
+    ///   user permanently, converting a single bad record into unbounded trail
+    ///   growth — a different and larger data problem.
+    /// - *Quarantine* (re-key into a holding area). Rewriting the record
+    ///   destroys the original key bytes, which are the actual evidence of
+    ///   whatever went wrong, and the rewrite is itself a write that can fail.
+    ///
+    /// Retained keys are counted into [`RotationOutcome::retained_unreadable`]
+    /// and warned about once per pass, so the condition is visible rather than
+    /// silent. They are also excluded from the cap arithmetic: excess is
+    /// computed over readable keys only, so an unreadable key can neither be
+    /// deleted by the cap nor push a well-formed key over it.
+    fn rotate_user_audit_logs(&self, user_id: &str) -> Result<RotationOutcome> {
         let cutoff_time = chrono::Utc::now() - chrono::Duration::days(self.audit_retention_days);
         let cutoff_nanos = cutoff_time.timestamp_nanos_opt().unwrap_or_else(|| {
             tracing::warn!("audit cutoff timestamp outside i64 nanos range, using 0");
             0
         });
         let prefix = format!("{user_id}:");
+        let prefix_bytes = prefix.as_bytes();
         let audit = self.audit_cf();
 
-        // Pass 1: count total entries to determine excess
-        let mut total_count = 0usize;
-        let iter = self.shared_db.prefix_iterator_cf(audit, prefix.as_bytes());
+        // Pass 1: count entries to determine the excess over the cap. Only
+        // readable keys are counted, because only readable keys are deletable.
+        // The prefix bound is checked on raw bytes so a non-UTF-8 key inside
+        // the range is attributed to this user rather than skipped.
+        let mut readable_count = 0usize;
+        let mut retained_unreadable = 0usize;
+        let iter = self.shared_db.prefix_iterator_cf(audit, prefix_bytes);
         for (key, _) in iter.flatten() {
-            if let Ok(key_str) = std::str::from_utf8(&key) {
-                if !key_str.starts_with(&prefix) {
-                    break;
-                }
-                total_count += 1;
-            }
-        }
-
-        if total_count == 0 {
-            return Ok(0);
-        }
-
-        let excess_count = total_count.saturating_sub(self.audit_max_entries);
-
-        // Pass 2: stream through keys, deleting those that are too old or excess.
-        // Flush WriteBatch every 10K deletes to bound memory.
-        const BATCH_FLUSH_SIZE: usize = 10_000;
-        let mut batch = rocksdb::WriteBatch::default();
-        let mut removed_count = 0usize;
-        let mut position = 0usize;
-
-        let iter = self.shared_db.prefix_iterator_cf(audit, prefix.as_bytes());
-        for (key, _) in iter.flatten() {
-            let key_str = match std::str::from_utf8(&key) {
-                Ok(s) => s,
-                Err(_) => {
-                    position += 1;
-                    continue;
-                }
-            };
-            if !key_str.starts_with(&prefix) {
+            if !key.starts_with(prefix_bytes) {
                 break;
             }
-
-            let ts = key_str
-                .strip_prefix(&prefix)
-                .and_then(|s| s.parse::<i64>().ok())
-                .unwrap_or(0); // Malformed keys sort first → get deleted
-
-            if ts < cutoff_nanos || position < excess_count {
-                batch.delete_cf(audit, &key);
-                removed_count += 1;
-
-                if removed_count.is_multiple_of(BATCH_FLUSH_SIZE) {
-                    self.shared_db
-                        .write(std::mem::take(&mut batch))
-                        .map_err(|e| anyhow::anyhow!("Failed to write rotation batch: {e}"))?;
-                    batch = rocksdb::WriteBatch::default();
-                }
+            if parse_audit_key_nanos(&key, &prefix).is_some() {
+                readable_count += 1;
+            } else {
+                retained_unreadable += 1;
             }
-
-            position += 1;
         }
 
-        // Flush remaining
-        if !removed_count.is_multiple_of(BATCH_FLUSH_SIZE) {
+        if retained_unreadable > 0 {
+            tracing::warn!(
+                "Audit rotation for user {}: {} key(s) could not be parsed and were RETAINED \
+                 (an unparseable key is not evidence of age); {} readable key(s) considered",
+                user_id,
+                retained_unreadable,
+                readable_count
+            );
+        }
+
+        if readable_count == 0 {
+            return Ok(RotationOutcome {
+                removed: 0,
+                retained_unreadable,
+            });
+        }
+
+        let excess_count = readable_count.saturating_sub(self.audit_max_entries);
+
+        // Pass 2: stream through keys, deleting those that are too old or
+        // beyond the cap. Flush the WriteBatch every 10K deletes to bound
+        // memory.
+        const BATCH_FLUSH_SIZE: usize = 10_000;
+        let mut batch = rocksdb::WriteBatch::default();
+        let mut removed = 0usize;
+        let mut pending = 0usize;
+        // Position among READABLE keys only, so the positional cap is not
+        // shifted by keys that are never candidates for deletion.
+        let mut readable_position = 0usize;
+
+        let iter = self.shared_db.prefix_iterator_cf(audit, prefix_bytes);
+        for (key, _) in iter.flatten() {
+            if !key.starts_with(prefix_bytes) {
+                break;
+            }
+            let Some(ts) = parse_audit_key_nanos(&key, &prefix) else {
+                // Already counted in pass 1. Left in place, deliberately.
+                continue;
+            };
+            let position = readable_position;
+            readable_position += 1;
+
+            if ts >= cutoff_nanos && position >= excess_count {
+                continue;
+            }
+
+            batch.delete_cf(audit, &key);
+            pending += 1;
+
+            if pending >= BATCH_FLUSH_SIZE {
+                self.shared_db
+                    .write(std::mem::take(&mut batch))
+                    .map_err(|e| anyhow::anyhow!("Failed to write rotation batch: {e}"))?;
+                removed += pending;
+                pending = 0;
+            }
+        }
+
+        if pending > 0 {
             self.shared_db
                 .write(batch)
                 .map_err(|e| anyhow::anyhow!("Failed to write rotation batch: {e}"))?;
+            removed += pending;
         }
 
         // Sync in-memory cache
-        if removed_count > 0 {
+        if removed > 0 {
             if let Some(log) = self.audit_logs.get(user_id) {
                 let mut log_guard = log.write();
 
@@ -584,7 +666,10 @@ impl MultiUserMemoryManagerRotationHelper {
             }
         }
 
-        Ok(removed_count)
+        Ok(RotationOutcome {
+            removed,
+            retained_unreadable,
+        })
     }
 }
 
@@ -1178,12 +1263,23 @@ impl MultiUserMemoryManager {
                     audit_retention_days,
                     audit_max_entries,
                 };
-                if let Err(e) = manager.rotate_user_audit_logs(&user_id_clone) {
-                    tracing::warn!(
-                        "Audit log rotation failed for user {}: {}",
-                        user_id_clone,
-                        e
-                    );
+                match manager.rotate_user_audit_logs(&user_id_clone) {
+                    Ok(outcome) => {
+                        if outcome.retained_unreadable > 0 {
+                            tracing::warn!(
+                                "Audit log rotation for user {} retained {} unreadable key(s)",
+                                user_id_clone,
+                                outcome.retained_unreadable
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Audit log rotation failed for user {}: {}",
+                            user_id_clone,
+                            e
+                        );
+                    }
                 }
             });
         }
@@ -1889,10 +1985,15 @@ impl MultiUserMemoryManager {
             .iterator_cf(audit, rocksdb::IteratorMode::Start);
 
         for (key, _) in iter.flatten() {
-            if let Ok(key_str) = std::str::from_utf8(&key) {
-                if let Some(user_id) = key_str.split(':').next() {
-                    user_ids.insert(user_id.to_string());
-                }
+            // Split on the first ':' in the RAW bytes: a key whose suffix is
+            // not valid UTF-8 still attributes to its user this way. Decoding
+            // the whole key first would drop such an entry from the user set
+            // and could hide an entire user from rotation.
+            let Some(separator) = key.iter().position(|b| *b == b':') else {
+                continue;
+            };
+            if let Ok(user_id) = std::str::from_utf8(&key[..separator]) {
+                user_ids.insert(user_id.to_string());
             }
         }
 
@@ -1903,16 +2004,18 @@ impl MultiUserMemoryManager {
             audit_max_entries: self.server_config.audit_max_entries_per_user,
         };
 
+        let mut total_retained_unreadable = 0usize;
         for user_id in user_ids {
             match helper.rotate_user_audit_logs(&user_id) {
-                Ok(removed) => {
-                    if removed > 0 {
+                Ok(outcome) => {
+                    if outcome.removed > 0 {
                         info!(
                             "  Rotated audit logs for user {}: removed {} old entries",
-                            user_id, removed
+                            user_id, outcome.removed
                         );
-                        total_removed += removed;
+                        total_removed += outcome.removed;
                     }
+                    total_retained_unreadable += outcome.retained_unreadable;
                 }
                 Err(e) => {
                     tracing::warn!("  Failed to rotate audit logs for user {}: {}", user_id, e);
@@ -1924,6 +2027,14 @@ impl MultiUserMemoryManager {
             info!(
                 "Audit log rotation complete: removed {} total entries",
                 total_removed
+            );
+        }
+
+        if total_retained_unreadable > 0 {
+            tracing::warn!(
+                "Audit log rotation retained {} unreadable key(s) across all users — these were \
+                 NOT deleted; inspect the audit CF for corruption or a foreign writer",
+                total_retained_unreadable
             );
         }
 
@@ -4902,6 +5013,226 @@ mod tests {
             manager.users_in_cache(),
             0,
             "reading the snapshot must not recreate the evicted cache entry"
+        );
+    }
+}
+
+#[cfg(test)]
+mod audit_rotation_tests {
+    use super::*;
+
+    /// Open a throwaway shared DB carrying only the audit CF, with the same
+    /// (absence of) prefix-extractor configuration production uses — so
+    /// `prefix_iterator_cf` behaves here exactly as it does live.
+    fn open_audit_db(path: &std::path::Path) -> Arc<rocksdb::DB> {
+        let mut db_opts = rocksdb::Options::default();
+        db_opts.create_if_missing(true);
+        db_opts.create_missing_column_families(true);
+        let cfs = vec![
+            rocksdb::ColumnFamilyDescriptor::new("default", rocksdb::Options::default()),
+            rocksdb::ColumnFamilyDescriptor::new(CF_AUDIT, rocksdb::Options::default()),
+        ];
+        Arc::new(
+            rocksdb::DB::open_cf_descriptors(&db_opts, path, cfs).expect("open throwaway audit db"),
+        )
+    }
+
+    /// Write one audit record under `{user}:{key_suffix}` — the suffix is taken
+    /// verbatim so tests can plant keys rotation cannot parse.
+    fn put_event(
+        db: &rocksdb::DB,
+        user: &str,
+        key_suffix: &str,
+        label: &str,
+        ts: chrono::DateTime<chrono::Utc>,
+    ) -> String {
+        let event = AuditEvent {
+            timestamp: ts,
+            event_type: "test_event".to_string(),
+            memory_id: label.to_string(),
+            details: label.to_string(),
+        };
+        let value = crate::serialization::encode(&event).expect("encode audit event");
+        let cf = db.cf_handle(CF_AUDIT).expect("audit cf");
+        let key = format!("{user}:{key_suffix}");
+        db.put_cf(&cf, key.as_bytes(), value).expect("put audit key");
+        key
+    }
+
+    /// Write a record whose key is a well-formed zero-padded nanosecond stamp.
+    fn well_formed(db: &rocksdb::DB, user: &str, ts: chrono::DateTime<chrono::Utc>) -> String {
+        let nanos = ts.timestamp_nanos_opt().expect("timestamp in i64 nanos range");
+        put_event(db, user, &format!("{nanos:020}"), &format!("event@{nanos}"), ts)
+    }
+
+    /// Every surviving key for `user`, ascending.
+    fn surviving_keys(db: &rocksdb::DB, user: &str) -> Vec<String> {
+        let cf = db.cf_handle(CF_AUDIT).expect("audit cf");
+        let prefix = format!("{user}:");
+        db.iterator_cf(&cf, rocksdb::IteratorMode::Start)
+            .flatten()
+            .filter_map(|(k, _)| String::from_utf8(k.to_vec()).ok())
+            .filter(|k| k.starts_with(&prefix))
+            .collect()
+    }
+
+    fn helper(
+        db: Arc<rocksdb::DB>,
+        retention_days: i64,
+        max_entries: usize,
+    ) -> MultiUserMemoryManagerRotationHelper {
+        MultiUserMemoryManagerRotationHelper {
+            shared_db: db,
+            audit_logs: Arc::new(DashMap::new()),
+            audit_retention_days: retention_days,
+            audit_max_entries: max_entries,
+        }
+    }
+
+    /// A key whose timestamp cannot be parsed is not evidence of age. Rotation
+    /// must leave it alone — deleting it because the parse failed destroys the
+    /// records most likely to be evidence of a problem.
+    #[test]
+    fn unparseable_key_survives_the_retention_sweep() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = open_audit_db(dir.path());
+        let user = "audit-user";
+        let now = chrono::Utc::now();
+
+        let ancient = well_formed(&db, user, now - chrono::Duration::days(90));
+        let recent_a = well_formed(&db, user, now - chrono::Duration::days(1));
+        let recent_b = well_formed(&db, user, now - chrono::Duration::hours(1));
+        let malformed = put_event(&db, user, "not-a-timestamp", "unparseable", now);
+
+        // Retention 30d, cap far above the record count: only the age rule fires.
+        helper(db.clone(), 30, 1_000)
+            .rotate_user_audit_logs(user)
+            .expect("rotation succeeds");
+
+        let survivors = surviving_keys(&db, user);
+        assert!(
+            survivors.contains(&malformed),
+            "unparseable key was deleted; rotation cannot prove it is old. survivors: {survivors:?}"
+        );
+        assert!(
+            !survivors.contains(&ancient),
+            "the genuinely old well-formed key should still be deleted"
+        );
+        assert!(
+            survivors.contains(&recent_a) && survivors.contains(&recent_b),
+            "in-retention keys must survive. survivors: {survivors:?}"
+        );
+    }
+
+    /// The max-entries cap is positional. An unparseable key must neither be
+    /// deleted by it nor push a well-formed key over the edge: the cap governs
+    /// the trail rotation can actually read.
+    #[test]
+    fn unparseable_key_survives_the_excess_sweep() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = open_audit_db(dir.path());
+        let user = "capped-user";
+        let now = chrono::Utc::now();
+
+        // All four well within retention, so only the cap can delete.
+        let oldest = well_formed(&db, user, now - chrono::Duration::hours(4));
+        let older = well_formed(&db, user, now - chrono::Duration::hours(3));
+        let newer = well_formed(&db, user, now - chrono::Duration::hours(2));
+        let newest = well_formed(&db, user, now - chrono::Duration::hours(1));
+        let malformed = put_event(&db, user, "corrupt-suffix", "unparseable", now);
+
+        helper(db.clone(), 30, 2)
+            .rotate_user_audit_logs(user)
+            .expect("rotation succeeds");
+
+        let survivors = surviving_keys(&db, user);
+        assert!(
+            survivors.contains(&malformed),
+            "unparseable key was deleted by the cap. survivors: {survivors:?}"
+        );
+        assert!(
+            survivors.contains(&newer) && survivors.contains(&newest),
+            "the newest {{max_entries}} well-formed keys must survive. survivors: {survivors:?}"
+        );
+        assert!(
+            !survivors.contains(&oldest) && !survivors.contains(&older),
+            "the oldest well-formed keys beyond the cap should be deleted. survivors: {survivors:?}"
+        );
+    }
+
+    /// Documents the actual byte order: ASCII letters sort ABOVE digits, so an
+    /// unparseable suffix lands at the END of the user's range, not the front.
+    /// It was never "sorted oldest" — it was treated as infinitely old by the
+    /// `unwrap_or(0)` cutoff comparison, which fires regardless of position.
+    #[test]
+    fn unparseable_key_sorts_last_not_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = open_audit_db(dir.path());
+        let user = "order-user";
+        let now = chrono::Utc::now();
+
+        well_formed(&db, user, now - chrono::Duration::days(90));
+        well_formed(&db, user, now);
+        let malformed = put_event(&db, user, "zz-unparseable", "unparseable", now);
+
+        let ordered = surviving_keys(&db, user);
+        assert_eq!(
+            ordered.last(),
+            Some(&malformed),
+            "expected the unparseable key to sort last, not first: {ordered:?}"
+        );
+    }
+
+    /// Retention is not allowed to be silent about what it skipped: a trail
+    /// that quietly stops shrinking must be distinguishable from one with
+    /// nothing to shrink.
+    #[test]
+    fn rotation_outcome_counts_retained_unreadable_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = open_audit_db(dir.path());
+        let user = "counted-user";
+        let now = chrono::Utc::now();
+
+        well_formed(&db, user, now - chrono::Duration::days(90));
+        well_formed(&db, user, now);
+        put_event(&db, user, "bad-one", "unparseable", now);
+        put_event(&db, user, "bad-two", "unparseable", now);
+
+        let outcome = helper(db.clone(), 30, 1_000)
+            .rotate_user_audit_logs(user)
+            .expect("rotation succeeds");
+
+        assert_eq!(outcome.removed, 1, "exactly the one aged-out key");
+        assert_eq!(
+            outcome.retained_unreadable, 2,
+            "both unparseable keys must be reported, not silently skipped"
+        );
+    }
+
+    /// A non-UTF-8 key is unreadable for the same reason a bad suffix is, and
+    /// gets the same treatment. It must also not be dropped from the counts.
+    #[test]
+    fn non_utf8_key_is_retained_and_counted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = open_audit_db(dir.path());
+        let user = "binary-user";
+        let now = chrono::Utc::now();
+
+        well_formed(&db, user, now - chrono::Duration::days(90));
+        let cf = db.cf_handle(CF_AUDIT).expect("audit cf");
+        let mut raw_key = format!("{user}:").into_bytes();
+        raw_key.extend_from_slice(&[0xff, 0xfe, 0xfd]);
+        db.put_cf(&cf, &raw_key, b"not-decodable".as_slice())
+            .expect("put raw key");
+
+        let outcome = helper(db.clone(), 30, 1_000)
+            .rotate_user_audit_logs(user)
+            .expect("rotation succeeds");
+
+        assert_eq!(outcome.retained_unreadable, 1);
+        assert!(
+            db.get_cf(&cf, &raw_key).expect("read back").is_some(),
+            "a non-UTF-8 audit key must survive rotation"
         );
     }
 }
