@@ -18,8 +18,8 @@
 #   1. Which binary ran, by path and content hash. Two runs that disagree here
 #      are not two runs of the same code.
 #   2. Every sentinel test below is present in the executed output as
-#      `test <name> ... ok`. Sentinels are chosen to be names that exist ONLY on
-#      this branch — a stale or foreign binary cannot produce them.
+#      `test <name> ... ok`. Three of them are names that exist only on this
+#      branch, so a stale or foreign binary cannot produce them.
 #   3. passed + ignored + failed equals the number of tests the binary lists, so
 #      nothing was silently filtered out.
 #   4. The pass count is at or above the floor.
