@@ -12,8 +12,8 @@ use std::sync::Arc;
 use super::state::MultiUserMemoryManager;
 use super::{
     ab_testing, anomalies, audit, compression, consolidation, crud, export, facts, files, graph,
-    health, history, integrations, lineage, mif, recall, remember, search, sessions, todos, users,
-    visualization, webhooks,
+    health, history, integrations, lineage, mif, recall, remember, search, sessions, sources, todos,
+    users, visualization, webhooks,
 };
 
 /// Application state type alias
@@ -159,6 +159,39 @@ pub fn build_protected_routes(state: AppState) -> Router {
         // like the other namespace reads.
         // =================================================================
         .route("/api/audit/{user_id}", get(audit::get_audit_trail))
+        // =================================================================
+        // SOURCES (INGESTION REGISTRY)
+        //
+        // The durable list of things that produce data for this store, plus
+        // each one's cursor and run history. `POST .../run` is the only way to
+        // start ingestion in this phase - there is no scheduler yet, so a
+        // source runs when someone asks it to.
+        // =================================================================
+        .route("/api/sources", post(sources::create_source))
+        .route("/api/sources/{user_id}", get(sources::list_sources))
+        .route("/api/sources/{user_id}/{source_id}", get(sources::get_source))
+        .route(
+            "/api/sources/{user_id}/{source_id}",
+            delete(sources::delete_source),
+        )
+        // POST alias for update, following the todos block: MCP and TUI
+        // clients only speak POST.
+        .route(
+            "/api/sources/{user_id}/{source_id}/update",
+            post(sources::update_source),
+        )
+        .route(
+            "/api/sources/{user_id}/{source_id}/run",
+            post(sources::trigger_run),
+        )
+        .route(
+            "/api/sources/{user_id}/{source_id}/runs",
+            get(sources::list_runs),
+        )
+        .route(
+            "/api/sources/{user_id}/{source_id}/items",
+            get(sources::list_items),
+        )
         // =================================================================
         // USER MANAGEMENT
         // =================================================================

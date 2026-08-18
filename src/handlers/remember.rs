@@ -626,6 +626,8 @@ pub async fn remember(
             run_id: req.run_id.clone(),
             actor_id: req.actor_id.clone(),
             parent_id: req.parent_id.clone(),
+            external_id: None,
+            change_reason: None,
             experience,
         },
     )

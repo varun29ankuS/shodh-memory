@@ -31,6 +31,8 @@
 //! failure vocabulary, and a shared one would be a union of two unrelated
 //! sets.
 
+pub mod folder;
+
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
@@ -38,7 +40,7 @@ use chrono::{DateTime, Utc};
 use crate::errors::AppError;
 use crate::handlers::router::AppState;
 use crate::handlers::types::MemoryEvent;
-use crate::memory::types::{MemoryOrigin, NerEntityRecord};
+use crate::memory::types::{ChangeType, MemoryOrigin, NerEntityRecord};
 use crate::memory::{Experience, ExperienceType, MemoryId};
 use crate::metrics;
 use crate::validation;
@@ -80,6 +82,23 @@ pub struct IngestRequest {
     /// in the background pass, exactly as the handler resolved it.
     pub parent_id: Option<String>,
 
+    /// When set, the write is keyed on this external id and **replaces** the
+    /// memory bound to it, pushing the previous content onto that memory's own
+    /// version history and bumping its version. When `None`, the write goes
+    /// through the content-hash index instead: identical content merges into
+    /// the existing memory, and changed content mints a new one alongside the
+    /// old.
+    ///
+    /// The two are not interchangeable. Keying on an external id gives one
+    /// always-current memory per item, at the cost of the old text no longer
+    /// being independently recallable. Not keying gives an accumulating
+    /// record, at the cost of near-identical versions competing in retrieval.
+    pub external_id: Option<String>,
+
+    /// Why the content changed, recorded on the memory's version history.
+    /// Only read when [`Self::external_id`] is set.
+    pub change_reason: Option<String>,
+
     /// The experience to store. `content`, `experience_type`, `metadata`,
     /// `importance_override` and `context` are the caller's; the robotics and
     /// multimodal fields are the caller's too and are `Default` for every
@@ -106,6 +125,8 @@ impl IngestRequest {
             run_id: None,
             actor_id: None,
             parent_id: None,
+            external_id: None,
+            change_reason: None,
             experience: Experience {
                 content: content.into(),
                 experience_type,
@@ -137,8 +158,14 @@ pub struct IngestOutcome {
     pub memory_id: MemoryId,
 
     /// True when the content already existed and enrichment was merged into
-    /// the stored memory rather than a new memory being created.
+    /// the stored memory rather than a new memory being created. Always false
+    /// on an external-id keyed write, which does not consult the content-hash
+    /// index at all.
     pub deduped: bool,
+
+    /// True when an external-id keyed write found an existing memory and
+    /// replaced its content. Always false otherwise.
+    pub was_update: bool,
 
     /// The merged entity set actually stored — caller tags, NER surfaces and
     /// YAKE keyphrases, capped at [`validation::MAX_ENTITIES_PER_MEMORY`], and
@@ -189,6 +216,8 @@ pub async fn ingest_experience(
         run_id,
         actor_id,
         parent_id,
+        external_id,
+        change_reason,
         mut experience,
     } = req;
 
@@ -272,50 +301,96 @@ pub async fn ingest_experience(
 
     let memory = state.get_user_memory(&user_id).map_err(AppError::Internal)?;
 
-    // `_detailed` so a content-hash dedup hit reports whether it MERGED
-    // enrichment into the stored memory. Without that signal the merged entity
-    // set would reach RocksDB and BM25 but never the graph, because the
-    // episode already exists and the graph pass is idempotent.
-    let outcome = {
-        let memory = memory.clone();
-        let exp_clone = experience.clone();
-        let agent_id = agent_id.clone();
-        let run_id = run_id.clone();
-        let actor_id = actor_id.clone();
+    let (memory_id, deduped, was_update, needs_graph_rebuild, experience, metric_label) =
+        match external_id {
+            // External-id keyed: replace the memory bound to this id, keeping
+            // the old content on that memory's version history. No content-hash
+            // lookup happens on this path, which is what keeps two byte-identical
+            // files at two paths as two memories rather than collapsing them.
+            Some(external_id) => {
+                let memory = memory.clone();
+                let exp_clone = experience.clone();
+                let (id, updated) = tokio::task::spawn_blocking(move || {
+                    let memory_guard = memory.read();
+                    memory_guard.upsert(
+                        external_id,
+                        exp_clone,
+                        ChangeType::ContentUpdated,
+                        None,
+                        change_reason,
+                    )
+                })
+                .await
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+                .map_err(AppError::Internal)?;
 
-        tokio::task::spawn_blocking(move || {
-            let memory_guard = memory.read();
-            if agent_id.is_some() || run_id.is_some() || actor_id.is_some() {
-                memory_guard.remember_with_agent_detailed(
-                    exp_clone, created_at, agent_id, run_id, actor_id,
-                )
-            } else {
-                memory_guard.remember_detailed(exp_clone, created_at)
+                let label = if updated {
+                    "upsert_update"
+                } else {
+                    "upsert_create"
+                };
+                // On an update the episode was built from the previous
+                // content's entity set and the graph pass is idempotent, so it
+                // has to be demolished rather than skipped.
+                (id, false, updated, updated, experience, label)
             }
-        })
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
-        .map_err(AppError::Internal)?
-    };
+            // `_detailed` so a content-hash dedup hit reports whether it MERGED
+            // enrichment into the stored memory. Without that signal the merged
+            // entity set would reach RocksDB and BM25 but never the graph,
+            // because the episode already exists and the graph pass is
+            // idempotent.
+            None => {
+                let memory = memory.clone();
+                let exp_clone = experience.clone();
+                let agent_id = agent_id.clone();
+                let run_id = run_id.clone();
+                let actor_id = actor_id.clone();
 
-    let memory_id = outcome.id.clone();
-    let deduped = outcome.deduped;
+                let outcome = tokio::task::spawn_blocking(move || {
+                    let memory_guard = memory.read();
+                    if agent_id.is_some() || run_id.is_some() || actor_id.is_some() {
+                        memory_guard.remember_with_agent_detailed(
+                            exp_clone, created_at, agent_id, run_id, actor_id,
+                        )
+                    } else {
+                        memory_guard.remember_detailed(exp_clone, created_at)
+                    }
+                })
+                .await
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+                .map_err(AppError::Internal)?;
 
-    // A merge that added entities makes the memory's stored experience RICHER
-    // than the one this request carried, so every downstream pass (graph, NER
-    // embeddings, temporal facts) must run on the merged copy, not the request.
-    let needs_graph_rebuild = outcome.needs_graph_rebuild();
-    let experience = outcome.merged_experience.clone().unwrap_or(experience);
+                // A merge that added entities makes the memory's stored
+                // experience RICHER than the one this request carried, so every
+                // downstream pass (graph, NER embeddings, temporal facts) must
+                // run on the merged copy, not the request.
+                let needs_rebuild = outcome.needs_graph_rebuild();
+                let merged = outcome.merged_experience.clone().unwrap_or(experience);
+                (
+                    outcome.id.clone(),
+                    outcome.deduped,
+                    false,
+                    needs_rebuild,
+                    merged,
+                    "success",
+                )
+            }
+        };
+
     let stored_entities = experience.entities.clone();
 
     let duration = op_start.elapsed().as_secs_f64();
     metrics::MEMORY_STORE_DURATION.observe(duration);
     metrics::MEMORY_STORE_TOTAL
-        .with_label_values(&["success"])
+        .with_label_values(&[metric_label])
         .inc();
 
     state.emit_event(MemoryEvent {
-        event_type: "CREATE".to_string(),
+        event_type: if was_update {
+            "UPDATE".to_string()
+        } else {
+            "CREATE".to_string()
+        },
         timestamp: Utc::now(),
         user_id: user_id.clone(),
         memory_id: Some(memory_id.0.to_string()),
@@ -346,6 +421,7 @@ pub async fn ingest_experience(
     Ok(IngestOutcome {
         memory_id,
         deduped,
+        was_update,
         entities: stored_entities,
         experience_type_label,
     })

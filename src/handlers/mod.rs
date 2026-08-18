@@ -46,6 +46,9 @@ pub mod webhooks;
 // External integrations
 pub mod integrations;
 
+// Ingestion source registry (connectors)
+pub mod sources;
+
 // Session and user management
 pub mod sessions;
 pub mod users;
