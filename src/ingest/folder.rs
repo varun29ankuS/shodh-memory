@@ -492,7 +492,7 @@ fn walk_root(
                 if EXCLUDED_DIR_NAMES.contains(&name.as_str()) {
                     continue;
                 }
-                if depth + 1 <= cfg.max_depth {
+                if depth < cfg.max_depth {
                     stack.push((path, depth + 1));
                 }
                 continue;
@@ -1408,8 +1408,7 @@ mod tests {
     #[test]
     fn split_keeps_every_part_storable_and_loses_nothing() {
         let paragraph = "x".repeat(1_000);
-        let doc = std::iter::repeat(paragraph.as_str())
-            .take(120)
+        let doc = std::iter::repeat_n(paragraph.as_str(), 120)
             .collect::<Vec<_>>()
             .join("\n\n");
         assert!(doc.len() > validation::MAX_CONTENT_LENGTH);
