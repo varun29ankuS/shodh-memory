@@ -52,25 +52,32 @@ function UsageFooter({ turn }: { turn: ChatTurn }) {
 
 function Turn({
   turn,
+  turnIndex,
   conversationId,
   model,
 }: {
   turn: ChatTurn;
+  /** Position in `ConvoLive.turns`. `turn.turn` is the seat's LABEL for this
+   *  turn and is displayed; it is never used to address anything. */
+  turnIndex: number;
   conversationId: string;
   model: ModelRef | null;
 }) {
   const select = useChat((s) => s.select);
 
-  // Citation targets: every memory this turn put in front of the model.
+  // Citation targets: every memory this turn put in front of the model, and
+  // WHICH op put it there. A citation names a memory, but the evidence panel
+  // shows one op's result — its score, its attribution, its siblings — so the
+  // target has to carry the op too. Last writer wins, as before: when several
+  // of a turn's searches returned the same memory, the most recent one is the
+  // context the model was answering out of.
   const citationMap = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const op of turn.ops) {
-      if (op.type === "memory_recall") {
-        for (const memory of op.memories) map.set(shortId(memory.id), memory.id);
-      } else if (op.type === "proactive_context") {
-        for (const memory of op.memories) map.set(shortId(memory.id), memory.id);
+    const map = new Map<string, { memoryId: string; opIndex: number }>();
+    turn.ops.forEach((op, opIndex) => {
+      if (op.type === "memory_recall" || op.type === "proactive_context") {
+        for (const memory of op.memories) map.set(shortId(memory.id), { memoryId: memory.id, opIndex });
       }
-    }
+    });
     return map;
   }, [turn.ops]);
 
@@ -87,12 +94,32 @@ function Turn({
       {turn.ops.length > 0 ? (
         <div className="flex max-w-[92%] flex-col gap-1.5">
           {turn.ops.map((op, index) => {
-            const key = `${turn.turn}-${index}`;
+            // Keyed by position in `turn.ops` and by the turn's own position,
+            // not by `turn.turn` — the seat's turn label is written onto the
+            // last turn by `turn_start` and is not guaranteed to equal position
+            // + 1, so two turns can carry one number and one key.
+            const key = `${turnIndex}-${index}`;
             switch (op.type) {
               case "memory_recall":
-                return <RecallBlock key={key} op={op} turn={turn.turn} conversationId={conversationId} />;
+                return (
+                  <RecallBlock
+                    key={key}
+                    op={op}
+                    turnIndex={turnIndex}
+                    opIndex={index}
+                    conversationId={conversationId}
+                  />
+                );
               case "proactive_context":
-                return <ProactiveBlock key={key} op={op} turn={turn.turn} conversationId={conversationId} />;
+                return (
+                  <ProactiveBlock
+                    key={key}
+                    op={op}
+                    turnIndex={turnIndex}
+                    opIndex={index}
+                    conversationId={conversationId}
+                  />
+                );
               case "memory_reinforce":
                 return <ReinforceBlock key={key} op={op} />;
               case "memory_write":
@@ -135,8 +162,15 @@ function Turn({
           <Markdown
             text={turn.assistantText}
             onCitationClick={(cited) => {
-              const memoryId = citationMap.get(cited.slice(0, 8));
-              if (memoryId) select({ conversationId, turn: turn.turn, memoryId });
+              const target = citationMap.get(cited.slice(0, 8));
+              if (target) {
+                select({
+                  conversationId,
+                  turnIndex,
+                  opIndex: target.opIndex,
+                  memoryId: target.memoryId,
+                });
+              }
             }}
           />
           {turn.pending ? (
@@ -187,8 +221,19 @@ export function MessageList({
       className="min-h-0 flex-1 overflow-y-auto"
     >
       <div className={cn("mx-auto flex w-full max-w-[760px] flex-col gap-6 px-4 py-5")}>
-        {turns.map((turn) => (
-          <Turn key={turn.turn} turn={turn} conversationId={conversationId} model={model} />
+        {turns.map((turn, turnIndex) => (
+          <Turn
+            // Position, not `turn.turn`. Turns are only ever appended, so the
+            // index is stable identity; the seat's label is not — `turn_start`
+            // rewrites it on the last turn from a counter this client does not
+            // own, and two turns carrying one number is two React children
+            // carrying one key.
+            key={turnIndex}
+            turn={turn}
+            turnIndex={turnIndex}
+            conversationId={conversationId}
+            model={model}
+          />
         ))}
       </div>
     </div>

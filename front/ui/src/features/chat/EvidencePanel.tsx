@@ -52,29 +52,51 @@ interface ResolvedMemory {
   siblings: RecallMemory[];
 }
 
-function resolveSelection(
+/**
+ * The one op a selection names, and the memory inside it.
+ *
+ * ADDRESSES ONE OP, NOT THE WHOLE TURN. This used to take a turn number, index
+ * the array with it, and then scan every op in that turn for the first
+ * matching memory id — two separate ways of answering with the wrong record.
+ *
+ * The scan is the one that fired constantly. A turn runs several recalls and
+ * they overlap: measured on a live conversation, five turns held 42 rows whose
+ * (turn, memory) pair named two different results, and EVERY colliding pair
+ * carried a different score. Memory `a8ca63ff` came back at 0.0816 from the
+ * search "IVF-PQ index codebook adc kmeans quantization" and at 0.95 from
+ * "product quantization codebook centroid probe rerank distance" in the same
+ * turn. Clicking the row drawn at 95% opened a breakdown reading
+ * `Vector + keyword 0.0589 · Final score 0.0418` — the other search's working,
+ * under this search's row. This panel exists to show what retrieval did; it
+ * was showing a different retrieval.
+ *
+ * The index is the other. `turns[turn - 1]` assumed the seat's turn LABEL
+ * equals array position, and `applyEvent`'s `turn_start` overwrites that label
+ * on the last turn from the server's own counter.
+ */
+export function resolveSelection(
   turns: ChatTurn[],
-  turn: number,
+  turnIndex: number,
+  opIndex: number,
   memoryId: string,
 ): ResolvedMemory | null {
-  const target = turns[turn - 1];
-  if (!target) return null;
-  for (const op of target.ops) {
-    if (op.type === "memory_recall") {
-      const memory = op.memories.find((candidate) => candidate.id === memoryId);
-      if (memory) {
-        return {
-          kind: "recalled",
-          memory,
-          proactive: null,
-          lineage: op.lineage.filter((edge) => edge.from === memoryId || edge.to === memoryId),
-          siblings: op.memories,
-        };
-      }
-    } else if (op.type === "proactive_context") {
-      const memory = op.memories.find((candidate) => candidate.id === memoryId);
-      if (memory) return { kind: "surfaced", memory: null, proactive: memory, lineage: [], siblings: [] };
-    }
+  const op = turns[turnIndex]?.ops[opIndex];
+  if (!op) return null;
+  if (op.type === "memory_recall") {
+    const memory = op.memories.find((candidate) => candidate.id === memoryId);
+    if (!memory) return null;
+    return {
+      kind: "recalled",
+      memory,
+      proactive: null,
+      lineage: op.lineage.filter((edge) => edge.from === memoryId || edge.to === memoryId),
+      siblings: op.memories,
+    };
+  }
+  if (op.type === "proactive_context") {
+    const memory = op.memories.find((candidate) => candidate.id === memoryId);
+    if (!memory) return null;
+    return { kind: "surfaced", memory: null, proactive: memory, lineage: [], siblings: [] };
   }
   return null;
 }
@@ -113,11 +135,13 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 function MemoryDetail({
   resolved,
   conversationId,
-  turn,
+  turnIndex,
+  opIndex,
 }: {
   resolved: ResolvedMemory;
   conversationId: string;
-  turn: number;
+  turnIndex: number;
+  opIndex: number;
 }) {
   const select = useChat((s) => s.select);
   const memory = resolved.memory;
@@ -194,7 +218,13 @@ function MemoryDetail({
                   key={`${edge.from}-${edge.to}-${index}`}
                   type="button"
                   disabled={!other}
-                  onClick={() => select({ conversationId, turn, memoryId: otherId })}
+                  // Stays inside the op that produced this record: `siblings`
+                  // is that one op's result set, so a lineage hop resolved
+                  // turn-wide could land on another search's copy of the same
+                  // memory, with another search's score attribution.
+                  onClick={() =>
+                    select({ conversationId, turnIndex, opIndex, memoryId: otherId })
+                  }
                   className="hover:bg-accent/60 focus-visible:ring-ring rounded px-2 py-1.5 text-left transition-colors focus-visible:ring-2 focus-visible:outline-none disabled:opacity-50"
                 >
                   <span className="text-primary mono text-[10px]">
@@ -219,27 +249,53 @@ function MemoryDetail({
   );
 }
 
+/**
+ * One turn's evidence, one row per result.
+ *
+ * A ROW IS AN (OP, MEMORY) PAIR, NOT A MEMORY. The same memory answering two
+ * of a turn's searches is two results with two scores, and both are true — the
+ * digest keeps both and draws two bars. What it must not do is give them one
+ * identity, which `${turn.turn}-${id}-${label}` did: 252 React duplicate-key
+ * errors on a single conversation, and one destination for two different
+ * clicks. The op index rides on each row, so the key is unique and the click
+ * lands on the search the reader pointed at.
+ */
 function TurnDigest({
   turn,
+  turnIndex,
   conversationId,
 }: {
   turn: ChatTurn;
+  /** Position in `ConvoLive.turns` — the selection's address, and the key. */
+  turnIndex: number;
   conversationId: string;
 }) {
   const select = useChat((s) => s.select);
-  const groups = turn.ops.filter(
-    (op): op is Extract<SeatEvent, { type: "memory_recall" | "proactive_context" }> =>
-      (op.type === "memory_recall" && op.scope === "user") || op.type === "proactive_context",
-  );
-  const rows = groups.flatMap((op) =>
+  // Indices are captured against `turn.ops` BEFORE the filter, because that is
+  // the array `resolveSelection` indexes back into.
+  const groups = turn.ops
+    .map((op, opIndex) => ({ op, opIndex }))
+    .filter(
+      (
+        entry,
+      ): entry is {
+        op: Extract<SeatEvent, { type: "memory_recall" | "proactive_context" }>;
+        opIndex: number;
+      } =>
+        (entry.op.type === "memory_recall" && entry.op.scope === "user") ||
+        entry.op.type === "proactive_context",
+    );
+  const rows = groups.flatMap(({ op, opIndex }) =>
     op.type === "memory_recall"
       ? op.memories.map((memory) => ({
+          opIndex,
           id: memory.id,
           content: memory.experience.content,
           score: memory.score,
           label: "recall",
         }))
       : op.memories.map((memory) => ({
+          opIndex,
           id: memory.id,
           content: memory.content,
           score: memory.score,
@@ -252,10 +308,17 @@ function TurnDigest({
     <section className="border-border border-b px-4 py-3">
       <h3 className="text-muted-foreground text-[10px] tracking-wide uppercase">
         Turn {turn.turn}
-        {groups.some((op) => op.type === "memory_recall") ? (
+        {groups.some(({ op }) => op.type === "memory_recall") ? (
           <span className="normal-case">
             {" — “"}
-            {(groups.find((op) => op.type === "memory_recall") as Extract<SeatEvent, { type: "memory_recall" }>).query}
+            {
+              (
+                groups.find(({ op }) => op.type === "memory_recall")!.op as Extract<
+                  SeatEvent,
+                  { type: "memory_recall" }
+                >
+              ).query
+            }
             {"”"}
           </span>
         ) : null}
@@ -263,9 +326,11 @@ function TurnDigest({
       <div className="mt-2 flex flex-col gap-0.5">
         {rows.map((row) => (
           <button
-            key={`${turn.turn}-${row.id}-${row.label}`}
+            key={`${row.opIndex}-${row.id}-${row.label}`}
             type="button"
-            onClick={() => select({ conversationId, turn: turn.turn, memoryId: row.id })}
+            onClick={() =>
+              select({ conversationId, turnIndex, opIndex: row.opIndex, memoryId: row.id })
+            }
             className="hover:bg-accent/60 focus-visible:ring-ring flex items-start gap-2 rounded px-1.5 py-1 text-left transition-colors focus-visible:ring-2 focus-visible:outline-none"
           >
             <span className="bg-border mt-[7px] h-[3px] w-10 shrink-0 overflow-hidden rounded-full">
@@ -301,7 +366,7 @@ export function EvidencePanel({
 
   const resolved = useMemo(() => {
     if (!selected || !convo || selected.conversationId !== conversationId) return null;
-    return resolveSelection(convo.turns, selected.turn, selected.memoryId);
+    return resolveSelection(convo.turns, selected.turnIndex, selected.opIndex, selected.memoryId);
   }, [selected, convo, conversationId]);
 
   // A swap that this conversation actually performed. The op only reaches the
@@ -314,17 +379,21 @@ export function EvidencePanel({
     [convo],
   );
 
+  // Position in `convo.turns` is captured BEFORE the filter and the reverse.
+  // Keying on position within this derived array would renumber every digest
+  // each time a new evidence-bearing turn arrives — a full remount of the
+  // panel per turn, and a fresh wrong answer out of `resolveSelection`.
   const turnsWithEvidence = useMemo(
     () =>
       (convo?.turns ?? [])
-        .filter((turn) =>
+        .map((turn, turnIndex) => ({ turn, turnIndex }))
+        .filter(({ turn }) =>
           turn.ops.some(
             (op) =>
               (op.type === "memory_recall" && op.scope === "user") ||
               (op.type === "proactive_context" && op.memories.length > 0),
           ),
         )
-        .slice()
         .reverse(),
     [convo],
   );
@@ -357,10 +426,20 @@ export function EvidencePanel({
 
       <ScrollArea className="min-h-0 flex-1">
         {resolved && selected ? (
-          <MemoryDetail resolved={resolved} conversationId={selected.conversationId} turn={selected.turn} />
+          <MemoryDetail
+            resolved={resolved}
+            conversationId={selected.conversationId}
+            turnIndex={selected.turnIndex}
+            opIndex={selected.opIndex}
+          />
         ) : turnsWithEvidence.length > 0 ? (
-          turnsWithEvidence.map((turn) => (
-            <TurnDigest key={turn.turn} turn={turn} conversationId={conversationId ?? ""} />
+          turnsWithEvidence.map(({ turn, turnIndex }) => (
+            <TurnDigest
+              key={turnIndex}
+              turn={turn}
+              turnIndex={turnIndex}
+              conversationId={conversationId ?? ""}
+            />
           ))
         ) : (
           <div className="px-4 py-3">

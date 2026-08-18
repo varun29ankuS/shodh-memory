@@ -85,10 +85,34 @@ export interface ConvoLive {
   transportError: string | null;
 }
 
-/** What the evidence panel is focused on. */
+/**
+ * What the evidence panel is focused on.
+ *
+ * ADDRESSED BY POSITION, NOT BY DISPLAYED TURN NUMBER, and by the OP inside
+ * that turn rather than by the turn alone. Both halves were real defects.
+ *
+ * `turnIndex` is the index into `ConvoLive.turns`. `ChatTurn.turn` is the
+ * number the seat assigns (`this.turn += 1` per sent message, restored from
+ * persistence), and `applyEvent`'s `turn_start` writes it onto whichever turn
+ * is last — so it is a LABEL, and nothing guarantees it equals position + 1.
+ * The resolver indexed the array with it anyway, which is a wrong-turn lookup
+ * the moment the two disagree, and the same number was a React key, which is a
+ * duplicate key at the same moment.
+ *
+ * `opIndex` is the index into `ChatTurn.ops`. A single turn routinely runs
+ * SEVERAL recalls — five in one measured turn — and they overlap: on the live
+ * `claude-code` seat, memory `a8ca63ff` came back from two searches in one turn
+ * at scores 0.0816 and 0.95. Identifying evidence by `(turn, memoryId)` cannot
+ * tell those two apart, so the resolver returned whichever op scanned first and
+ * the panel showed the wrong search's score attribution under the right
+ * memory's text.
+ */
 export interface EvidenceSelection {
   conversationId: string;
-  turn: number;
+  /** Index into `ConvoLive.turns` — never `ChatTurn.turn`. */
+  turnIndex: number;
+  /** Index into `ChatTurn.ops` — which recall produced this row. */
+  opIndex: number;
   memoryId: string;
 }
 

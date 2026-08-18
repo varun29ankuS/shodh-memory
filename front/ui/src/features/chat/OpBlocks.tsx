@@ -101,11 +101,15 @@ function MemoryRow({
 
 export function RecallBlock({
   op,
-  turn,
+  turnIndex,
+  opIndex,
   conversationId,
 }: {
   op: Extract<SeatEvent, { type: "memory_recall" }>;
-  turn: number;
+  /** Position in `ConvoLive.turns`, never the seat's turn label. */
+  turnIndex: number;
+  /** Position in `ChatTurn.ops` — which of the turn's searches this block is. */
+  opIndex: number;
   conversationId: string;
 }) {
   const selected = useChat((s) => s.selected);
@@ -153,8 +157,19 @@ export function RecallBlock({
               content={memory.experience.content}
               score={memory.score}
               sources={memory.score_attribution?.sources}
-              selected={selected?.memoryId === memory.id && selected.turn === turn}
-              onSelect={() => select({ conversationId, turn, memoryId: memory.id })}
+              // A turn runs several searches and they return overlapping
+              // memories at different scores. Comparing on memory id and turn
+              // alone lit the same row in every block of the turn, and the
+              // selection they produced was indistinguishable, so the panel
+              // resolved all of them to whichever search came first.
+              selected={
+                selected?.memoryId === memory.id &&
+                selected.turnIndex === turnIndex &&
+                selected.opIndex === opIndex
+              }
+              onSelect={() =>
+                select({ conversationId, turnIndex, opIndex, memoryId: memory.id })
+              }
             />
           ))}
           {extra > 0 ? (
@@ -162,7 +177,7 @@ export function RecallBlock({
               type="button"
               onClick={() => {
                 const next = op.memories[3];
-                if (next) select({ conversationId, turn, memoryId: next.id });
+                if (next) select({ conversationId, turnIndex, opIndex, memoryId: next.id });
               }}
               className="text-muted-foreground hover:text-foreground focus-visible:ring-ring self-start rounded px-1.5 py-0.5 text-[11px] focus-visible:ring-2 focus-visible:outline-none"
             >
@@ -177,11 +192,13 @@ export function RecallBlock({
 
 export function ProactiveBlock({
   op,
-  turn,
+  turnIndex,
+  opIndex,
   conversationId,
 }: {
   op: Extract<SeatEvent, { type: "proactive_context" }>;
-  turn: number;
+  turnIndex: number;
+  opIndex: number;
   conversationId: string;
 }) {
   const selected = useChat((s) => s.selected);
@@ -205,8 +222,14 @@ export function ProactiveBlock({
                 id={memory.id}
                 content={memory.content}
                 score={memory.score}
-                selected={selected?.memoryId === memory.id && selected.turn === turn}
-                onSelect={() => select({ conversationId, turn, memoryId: memory.id })}
+                selected={
+                  selected?.memoryId === memory.id &&
+                  selected.turnIndex === turnIndex &&
+                  selected.opIndex === opIndex
+                }
+                onSelect={() =>
+                  select({ conversationId, turnIndex, opIndex, memoryId: memory.id })
+                }
               />
             ))}
           </div>
