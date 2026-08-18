@@ -75,7 +75,7 @@ use crate::memory::{ForgetCriteria, Query};
 use crate::recall_harness::fixtures::CorpusItem;
 use crate::recall_harness::report::{BridgeDamageRow, BridgeReport};
 use crate::recall_harness::runner::{
-    build_manager, ingest_corpus, RunInputs, EVAL_USER, HARNESS_CLOCK_ANCHOR,
+    build_manager, ingest_corpus, pin_harness_threads, RunInputs, EVAL_USER,
 };
 
 /// Default number of independent two-cluster worlds.
@@ -434,28 +434,6 @@ pub fn generate_bridge_fixtures(
     }
 }
 
-/// Set the harness's deterministic env floor (single-threaded reductions, frozen
-/// scoring clock, read-only recall) only where the caller has not already pinned
-/// it. Mirrors `runner::pin_harness_threads`, which is private to that module.
-fn pin_env() {
-    // SAFETY: env mutation is process-wide; the harness is the sole caller and the
-    // production server never invokes it. Single-threaded at harness entry.
-    unsafe {
-        for (k, v) in [
-            ("SHODH_ONNX_THREADS", "1"),
-            ("RAYON_NUM_THREADS", "1"),
-            ("SHODH_RECALL_READONLY", "1"),
-        ] {
-            if std::env::var_os(k).is_none() {
-                std::env::set_var(k, v);
-            }
-        }
-        if std::env::var_os("SHODH_EVAL_NOW").is_none() {
-            std::env::set_var("SHODH_EVAL_NOW", HARNESS_CLOCK_ANCHOR);
-        }
-    }
-}
-
 /// Bridge-crossing recall at each cutoff in `cutoffs`, over `cases`.
 ///
 /// Every case is queried ONCE at `max_results = max(cutoffs)`; the gold's rank in
@@ -625,7 +603,7 @@ pub fn analyze_bridge_recall(
     cluster_size: usize,
     bridges_per_unit: usize,
 ) -> Result<BridgeReport> {
-    pin_env();
+    let _harness_env = pin_harness_threads();
     let fx = generate_bridge_fixtures(units, cluster_size, bridges_per_unit);
     let total_nodes = fx.corpus.len();
 
@@ -956,7 +934,7 @@ mod tests {
     fn ingested_graph_contains_bridge_entities() {
         let dir = unique_storage_dir("topology");
         let inputs = test_inputs(dir.clone());
-        pin_env();
+        let _harness_env = pin_harness_threads();
         let units = 4;
         let fx = generate_bridge_fixtures(units, 4, 1);
         let (manager, _id_map) = ingest_fresh(&inputs, &fx, "topology").expect("ingest");
