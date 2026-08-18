@@ -478,6 +478,10 @@ struct MultiUserMemoryManagerRotationHelper {
     audit_logs: Arc<DashMap<String, Arc<parking_lot::RwLock<VecDeque<AuditEvent>>>>>,
     audit_retention_days: i64,
     audit_max_entries: usize,
+    /// Where to archive records before deleting them. `None` (the default)
+    /// means no archive and byte-identical rotation behaviour — see
+    /// [`crate::config::ServerConfig::audit_archive_path`].
+    audit_archive_dir: Option<std::path::PathBuf>,
 }
 
 const CF_AUDIT: &str = "audit";
@@ -491,24 +495,124 @@ const CF_AUDIT: &str = "audit";
 struct RotationOutcome {
     /// Keys deleted from `CF_AUDIT`.
     removed: usize,
-    /// Keys rotation could not fully interpret and therefore did not touch.
+    /// Records rotation could not fully interpret and therefore did not touch:
+    /// keys whose timestamp would not parse, plus — when archiving is enabled —
+    /// records whose stored value would not decode. A record that cannot be
+    /// copied cannot be safely deleted either.
     retained_unreadable: usize,
+    /// Records written to the JSONL archive before deletion. Always 0 when
+    /// archiving is off. When archiving is on this equals [`Self::removed`].
+    archived: usize,
 }
 
-/// Parse the nanosecond stamp out of a `{user_id}:{timestamp_nanos:020}` audit
-/// key.
+/// Parse a `{user_id}:{timestamp_nanos:020}` audit key into its text form and
+/// its nanosecond stamp.
 ///
 /// Returns `None` for anything rotation cannot fully interpret: bytes that are
 /// not UTF-8, a key that does not carry the expected `{user_id}:` prefix, or a
 /// suffix that is not an `i64`. `None` means "unknown", never "zero" — see
 /// [`MultiUserMemoryManagerRotationHelper::rotate_user_audit_logs`] for why
 /// that distinction is the whole point.
-fn parse_audit_key_nanos(key: &[u8], prefix: &str) -> Option<i64> {
-    std::str::from_utf8(key)
-        .ok()?
-        .strip_prefix(prefix)?
-        .parse::<i64>()
-        .ok()
+fn parse_audit_key<'k>(key: &'k [u8], prefix: &str) -> Option<(&'k str, i64)> {
+    let key_str = std::str::from_utf8(key).ok()?;
+    let nanos = key_str.strip_prefix(prefix)?.parse::<i64>().ok()?;
+    Some((key_str, nanos))
+}
+
+/// Serialises archive appends across the process.
+///
+/// Per-user rotation runs on `spawn_blocking`, so two rotations can be in
+/// flight at once, each holding its own `File` handle on the same daily path.
+/// Without this they would be free to interleave partial lines. Rotation is
+/// rare and the critical section is a single buffered write plus one fsync.
+static AUDIT_ARCHIVE_WRITE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// One archived audit record, as written to the JSONL durability copy.
+#[derive(serde::Serialize)]
+struct ArchivedAuditRecord<'a> {
+    /// Memory namespace the record belonged to.
+    user_id: &'a str,
+    /// The exact `CF_AUDIT` key, so the record can be restored verbatim.
+    key: &'a str,
+    /// The decoded event.
+    event: &'a AuditEvent,
+}
+
+/// Append-only JSONL copy of audit records that rotation is about to delete.
+///
+/// # This is a durability copy, not an integrity chain
+///
+/// `CF_OPLOG` is already the hash-chained tamper-evident log. This file is
+/// deliberately not a second one: no chaining, no digests, no sequence numbers.
+/// A plain file that an operator can move, compress or truncate cannot make a
+/// tamper-evidence promise, and stamping hashes on it would advertise a
+/// guarantee it does not have. What it does promise is narrower and real:
+/// **nothing is deleted from `CF_AUDIT` that was not first written and fsynced
+/// here.**
+///
+/// # Duplicates are expected
+///
+/// Deletes are committed in batches. A crash between an archive fsync and its
+/// delete batch leaves those records in both the archive and the CF, and a
+/// later rotation will archive them again. Collapse on the (`user_id`, `key`)
+/// pair when reading. Duplicating a record is the correct failure direction for
+/// a durability copy; losing one is not.
+struct AuditArchiveWriter {
+    file: std::fs::File,
+    path: std::path::PathBuf,
+}
+
+impl AuditArchiveWriter {
+    /// Open (creating as needed) today's archive file.
+    ///
+    /// Called before rotation scans anything, so an unusable archive path fails
+    /// the pass before a single delete is issued rather than partway through.
+    fn open(dir: &std::path::Path) -> Result<Self> {
+        std::fs::create_dir_all(dir).with_context(|| {
+            format!("audit archive directory {} is not usable", dir.display())
+        })?;
+        let path = dir.join(format!(
+            "audit-{}.jsonl",
+            chrono::Utc::now().format("%Y-%m-%d")
+        ));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("cannot open audit archive {}", path.display()))?;
+        Ok(Self { file, path })
+    }
+
+    /// Append one batch and make it durable, returning the number of records
+    /// written. Any error must abort the caller's delete.
+    fn append(&mut self, user_id: &str, records: &[(String, AuditEvent)]) -> Result<usize> {
+        use std::io::Write;
+
+        if records.is_empty() {
+            return Ok(0);
+        }
+
+        let mut buf = String::new();
+        for (key, event) in records {
+            let line = serde_json::to_string(&ArchivedAuditRecord {
+                user_id,
+                key,
+                event,
+            })
+            .with_context(|| format!("cannot serialise audit record {key}"))?;
+            buf.push_str(&line);
+            buf.push('\n');
+        }
+
+        let _guard = AUDIT_ARCHIVE_WRITE_LOCK.lock();
+        self.file
+            .write_all(buf.as_bytes())
+            .with_context(|| format!("cannot append to audit archive {}", self.path.display()))?;
+        self.file
+            .sync_data()
+            .with_context(|| format!("cannot fsync audit archive {}", self.path.display()))?;
+        Ok(records.len())
+    }
 }
 
 impl MultiUserMemoryManagerRotationHelper {
@@ -558,6 +662,26 @@ impl MultiUserMemoryManagerRotationHelper {
     /// silent. They are also excluded from the cap arithmetic: excess is
     /// computed over readable keys only, so an unreadable key can neither be
     /// deleted by the cap nor push a well-formed key over it.
+    ///
+    /// # Archiving (opt-in, off by default)
+    ///
+    /// With [`Self::audit_archive_dir`] set, every record about to be deleted
+    /// is first appended to a JSONL file and fsynced. The invariant is
+    /// **deleted ⊆ archived**, enforced structurally: each batch's
+    /// [`AuditArchiveWriter::append`] is `?`-propagated *before* the delete
+    /// batch is written, so an archive failure returns `Err` and that batch's
+    /// deletes never reach RocksDB. The archive handle is opened before the
+    /// scan begins, so an unusable path deletes nothing at all.
+    ///
+    /// Note the honest granularity: with more than `BATCH_FLUSH_SIZE` deletions
+    /// pending, earlier batches are already deleted (and already archived) when
+    /// a later batch fails. "Nothing was deleted" holds for an open failure and
+    /// for any pass that fits in one batch; "nothing was deleted that was not
+    /// archived" holds always.
+    ///
+    /// A record whose stored value will not decode cannot be archived, so it is
+    /// retained rather than deleted — the same rule as an unparseable key. When
+    /// archiving is off, values are never decoded and this cannot arise.
     fn rotate_user_audit_logs(&self, user_id: &str) -> Result<RotationOutcome> {
         let cutoff_time = chrono::Utc::now() - chrono::Duration::days(self.audit_retention_days);
         let cutoff_nanos = cutoff_time.timestamp_nanos_opt().unwrap_or_else(|| {
@@ -567,6 +691,13 @@ impl MultiUserMemoryManagerRotationHelper {
         let prefix = format!("{user_id}:");
         let prefix_bytes = prefix.as_bytes();
         let audit = self.audit_cf();
+
+        // Opened before anything is scanned: an unusable archive path must fail
+        // the whole pass, not surprise it partway through.
+        let mut archive = match self.audit_archive_dir.as_deref() {
+            Some(dir) => Some(AuditArchiveWriter::open(dir)?),
+            None => None,
+        };
 
         // Pass 1: count entries to determine the excess over the cap. Only
         // readable keys are counted, because only readable keys are deletable.
@@ -579,7 +710,7 @@ impl MultiUserMemoryManagerRotationHelper {
             if !key.starts_with(prefix_bytes) {
                 break;
             }
-            if parse_audit_key_nanos(&key, &prefix).is_some() {
+            if parse_audit_key(&key, &prefix).is_some() {
                 readable_count += 1;
             } else {
                 retained_unreadable += 1;
@@ -600,6 +731,7 @@ impl MultiUserMemoryManagerRotationHelper {
             return Ok(RotationOutcome {
                 removed: 0,
                 retained_unreadable,
+                archived: 0,
             });
         }
 
@@ -611,17 +743,21 @@ impl MultiUserMemoryManagerRotationHelper {
         const BATCH_FLUSH_SIZE: usize = 10_000;
         let mut batch = rocksdb::WriteBatch::default();
         let mut removed = 0usize;
+        let mut archived = 0usize;
         let mut pending = 0usize;
+        // Records staged for the archive alongside the current delete batch.
+        // Stays empty when archiving is off — values are not even decoded then.
+        let mut pending_records: Vec<(String, AuditEvent)> = Vec::new();
         // Position among READABLE keys only, so the positional cap is not
         // shifted by keys that are never candidates for deletion.
         let mut readable_position = 0usize;
 
         let iter = self.shared_db.prefix_iterator_cf(audit, prefix_bytes);
-        for (key, _) in iter.flatten() {
+        for (key, value) in iter.flatten() {
             if !key.starts_with(prefix_bytes) {
                 break;
             }
-            let Some(ts) = parse_audit_key_nanos(&key, &prefix) else {
+            let Some((key_str, ts)) = parse_audit_key(&key, &prefix) else {
                 // Already counted in pass 1. Left in place, deliberately.
                 continue;
             };
@@ -632,22 +768,45 @@ impl MultiUserMemoryManagerRotationHelper {
                 continue;
             }
 
+            if archive.is_some() {
+                match crate::serialization::decode::<AuditEvent>(&value) {
+                    Ok(event) => pending_records.push((key_str.to_string(), event)),
+                    Err(e) => {
+                        // A record that cannot be copied cannot be safely
+                        // deleted. Same rule as an unparseable key.
+                        retained_unreadable += 1;
+                        tracing::warn!(
+                            "Audit record {} could not be decoded for archiving and was RETAINED: {}",
+                            key_str,
+                            e
+                        );
+                        continue;
+                    }
+                }
+            }
+
             batch.delete_cf(audit, &key);
             pending += 1;
 
             if pending >= BATCH_FLUSH_SIZE {
-                self.shared_db
-                    .write(std::mem::take(&mut batch))
-                    .map_err(|e| anyhow::anyhow!("Failed to write rotation batch: {e}"))?;
+                archived += self.commit_rotation_batch(
+                    user_id,
+                    archive.as_mut(),
+                    &mut pending_records,
+                    std::mem::take(&mut batch),
+                )?;
                 removed += pending;
                 pending = 0;
             }
         }
 
         if pending > 0 {
-            self.shared_db
-                .write(batch)
-                .map_err(|e| anyhow::anyhow!("Failed to write rotation batch: {e}"))?;
+            archived += self.commit_rotation_batch(
+                user_id,
+                archive.as_mut(),
+                &mut pending_records,
+                batch,
+            )?;
             removed += pending;
         }
 
@@ -670,7 +829,41 @@ impl MultiUserMemoryManagerRotationHelper {
         Ok(RotationOutcome {
             removed,
             retained_unreadable,
+            archived,
         })
+    }
+
+    /// Make one batch durable: archive first, delete second.
+    ///
+    /// The ordering here is the whole guarantee. `append` is `?`-propagated, so
+    /// if the archive write or its fsync fails this returns `Err` and the
+    /// `WriteBatch` is dropped un-written — the records it would have deleted
+    /// are still in `CF_AUDIT`. Reversing these two statements would silently
+    /// convert "we rotate" into "we lost it and believed otherwise", which is
+    /// strictly worse than having no archive.
+    ///
+    /// Returns the number of records archived (0 when archiving is off).
+    fn commit_rotation_batch(
+        &self,
+        user_id: &str,
+        archive: Option<&mut AuditArchiveWriter>,
+        records: &mut Vec<(String, AuditEvent)>,
+        batch: rocksdb::WriteBatch,
+    ) -> Result<usize> {
+        let archived = match archive {
+            Some(writer) => {
+                let written = writer.append(user_id, records)?;
+                records.clear();
+                written
+            }
+            None => 0,
+        };
+
+        self.shared_db
+            .write(batch)
+            .map_err(|e| anyhow::anyhow!("Failed to write rotation batch: {e}"))?;
+
+        Ok(archived)
     }
 }
 
@@ -1286,6 +1479,7 @@ impl MultiUserMemoryManager {
 
             let audit_retention_days = self.server_config.audit_retention_days as i64;
             let audit_max_entries = self.server_config.audit_max_entries_per_user;
+            let audit_archive_dir = self.server_config.audit_archive_path.clone();
 
             tokio::task::spawn_blocking(move || {
                 let manager = MultiUserMemoryManagerRotationHelper {
@@ -1293,6 +1487,7 @@ impl MultiUserMemoryManager {
                     audit_logs,
                     audit_retention_days,
                     audit_max_entries,
+                    audit_archive_dir,
                 };
                 match manager.rotate_user_audit_logs(&user_id_clone) {
                     Ok(outcome) => {
@@ -2040,9 +2235,11 @@ impl MultiUserMemoryManager {
             audit_logs: self.audit_logs.clone(),
             audit_retention_days: self.server_config.audit_retention_days as i64,
             audit_max_entries: self.server_config.audit_max_entries_per_user,
+            audit_archive_dir: self.server_config.audit_archive_path.clone(),
         };
 
         let mut total_retained_unreadable = 0usize;
+        let mut total_archived = 0usize;
         for user_id in user_ids {
             match helper.rotate_user_audit_logs(&user_id) {
                 Ok(outcome) => {
@@ -2054,6 +2251,7 @@ impl MultiUserMemoryManager {
                         total_removed += outcome.removed;
                     }
                     total_retained_unreadable += outcome.retained_unreadable;
+                    total_archived += outcome.archived;
                 }
                 Err(e) => {
                     tracing::warn!("  Failed to rotate audit logs for user {}: {}", user_id, e);
@@ -2063,8 +2261,8 @@ impl MultiUserMemoryManager {
 
         if total_removed > 0 {
             info!(
-                "Audit log rotation complete: removed {} total entries",
-                total_removed
+                "Audit log rotation complete: removed {} total entries ({} archived first)",
+                total_removed, total_archived
             );
         }
 
@@ -5288,7 +5486,39 @@ mod audit_rotation_tests {
             audit_logs: Arc::new(DashMap::new()),
             audit_retention_days: retention_days,
             audit_max_entries: max_entries,
+            audit_archive_dir: None,
         }
+    }
+
+    fn helper_with_archive(
+        db: Arc<rocksdb::DB>,
+        retention_days: i64,
+        max_entries: usize,
+        archive_dir: std::path::PathBuf,
+    ) -> MultiUserMemoryManagerRotationHelper {
+        MultiUserMemoryManagerRotationHelper {
+            audit_archive_dir: Some(archive_dir),
+            ..helper(db, retention_days, max_entries)
+        }
+    }
+
+    /// Every JSONL line currently in the archive directory.
+    fn archive_lines(dir: &std::path::Path) -> Vec<serde_json::Value> {
+        let mut lines = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return lines;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).expect("read archive file");
+            for line in body.lines().filter(|l| !l.trim().is_empty()) {
+                lines.push(serde_json::from_str(line).expect("archive line is JSON"));
+            }
+        }
+        lines
     }
 
     /// A key whose timestamp cannot be parsed is not evidence of age. Rotation
@@ -5436,5 +5666,190 @@ mod audit_rotation_tests {
             db.get_cf(&cf, &raw_key).expect("read back").is_some(),
             "a non-UTF-8 audit key must survive rotation"
         );
+    }
+
+    /// THE decisive archive test. With archiving on and the archive write
+    /// forced to fail, rotation must delete nothing. An archive that fails
+    /// while rotation carries on turns "we rotate" into "we lost it and
+    /// believed otherwise", which is worse than having no archive at all.
+    ///
+    /// The failure is induced without fault injection: the archive directory
+    /// path is occupied by a regular FILE, so `create_dir_all` cannot produce
+    /// it and the writer cannot be opened. This is portable on Windows and
+    /// Unix alike.
+    #[test]
+    fn failed_archive_deletes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = open_audit_db(&dir.path().join("db"));
+        let user = "archived-user";
+        let now = chrono::Utc::now();
+
+        let ancient_a = well_formed(&db, user, now - chrono::Duration::days(120));
+        let ancient_b = well_formed(&db, user, now - chrono::Duration::days(90));
+        let recent = well_formed(&db, user, now);
+
+        // Occupy the archive path with a file so the directory cannot exist.
+        let blocked = dir.path().join("archive");
+        std::fs::write(&blocked, b"this path is a file, not a directory")
+            .expect("write blocking file");
+
+        let error = helper_with_archive(db.clone(), 30, 1_000, blocked)
+            .rotate_user_audit_logs(user)
+            .expect_err("rotation must fail when the archive cannot be opened");
+        assert!(
+            error.to_string().contains("audit archive"),
+            "error should name the archive: {error}"
+        );
+
+        let survivors = surviving_keys(&db, user);
+        assert_eq!(
+            survivors.len(),
+            3,
+            "a failed archive must abort the delete: {survivors:?}"
+        );
+        for key in [&ancient_a, &ancient_b, &recent] {
+            assert!(
+                survivors.contains(key),
+                "{key} was deleted despite the archive failing"
+            );
+        }
+    }
+
+    /// With archiving on and working, every record rotation deletes must be
+    /// present in the JSONL first — `deleted ⊆ archived`.
+    #[test]
+    fn archive_receives_every_deleted_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = open_audit_db(&dir.path().join("db"));
+        let archive_dir = dir.path().join("archive");
+        let user = "archived-user";
+        let now = chrono::Utc::now();
+
+        let ancient_a = well_formed(&db, user, now - chrono::Duration::days(120));
+        let ancient_b = well_formed(&db, user, now - chrono::Duration::days(90));
+        let recent = well_formed(&db, user, now);
+
+        let outcome = helper_with_archive(db.clone(), 30, 1_000, archive_dir.clone())
+            .rotate_user_audit_logs(user)
+            .expect("rotation succeeds");
+
+        assert_eq!(outcome.removed, 2);
+        assert_eq!(
+            outcome.archived, outcome.removed,
+            "every deleted record must have been archived"
+        );
+
+        let lines = archive_lines(&archive_dir);
+        let archived_keys: Vec<String> = lines
+            .iter()
+            .map(|v| v["key"].as_str().expect("key field").to_string())
+            .collect();
+        assert_eq!(archived_keys.len(), 2, "archive lines: {lines:?}");
+        assert!(archived_keys.contains(&ancient_a) && archived_keys.contains(&ancient_b));
+        assert!(
+            !archived_keys.contains(&recent),
+            "a surviving record must not be archived"
+        );
+
+        // The archive is a faithful copy, not a summary: the event body is there.
+        assert_eq!(lines[0]["user_id"].as_str(), Some(user));
+        assert_eq!(lines[0]["event"]["event_type"].as_str(), Some("test_event"));
+
+        let survivors = surviving_keys(&db, user);
+        assert_eq!(survivors, vec![recent]);
+    }
+
+    /// Archiving is opt-in. With it off — the default — rotation deletes
+    /// exactly as it did before and writes no file anywhere.
+    #[test]
+    fn archiving_off_by_default_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = open_audit_db(&dir.path().join("db"));
+        let archive_dir = dir.path().join("archive");
+        let user = "plain-user";
+        let now = chrono::Utc::now();
+
+        well_formed(&db, user, now - chrono::Duration::days(90));
+        let recent = well_formed(&db, user, now);
+
+        assert!(
+            crate::config::ServerConfig::default()
+                .audit_archive_path
+                .is_none(),
+            "audit archiving must default to off"
+        );
+
+        let outcome = helper(db.clone(), 30, 1_000)
+            .rotate_user_audit_logs(user)
+            .expect("rotation succeeds");
+
+        assert_eq!(outcome.removed, 1);
+        assert_eq!(outcome.archived, 0);
+        assert!(!archive_dir.exists(), "no archive directory may be created");
+        assert_eq!(surviving_keys(&db, user), vec![recent]);
+    }
+
+    /// A record whose stored value will not decode cannot be copied, so with
+    /// archiving on it is retained rather than deleted — the same rule as an
+    /// unparseable key, applied to the value side.
+    #[test]
+    fn undecodable_value_is_retained_when_archiving() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = open_audit_db(&dir.path().join("db"));
+        let archive_dir = dir.path().join("archive");
+        let user = "corrupt-value-user";
+        let now = chrono::Utc::now();
+
+        let good = well_formed(&db, user, now - chrono::Duration::days(120));
+        // Well-formed KEY, garbage VALUE, also past the retention cutoff.
+        let corrupt_nanos = (now - chrono::Duration::days(90))
+            .timestamp_nanos_opt()
+            .expect("in range");
+        let corrupt = format!("{user}:{corrupt_nanos:020}");
+        let cf = db.cf_handle(CF_AUDIT).expect("audit cf");
+        db.put_cf(&cf, corrupt.as_bytes(), b"not a postcard record".as_slice())
+            .expect("put corrupt value");
+
+        let outcome = helper_with_archive(db.clone(), 30, 1_000, archive_dir.clone())
+            .rotate_user_audit_logs(user)
+            .expect("rotation succeeds");
+
+        assert_eq!(outcome.removed, 1, "only the decodable aged-out record");
+        assert_eq!(outcome.archived, 1);
+        assert_eq!(outcome.retained_unreadable, 1);
+
+        let survivors = surviving_keys(&db, user);
+        assert!(
+            survivors.contains(&corrupt),
+            "an undecodable record must not be deleted: {survivors:?}"
+        );
+        assert!(!survivors.contains(&good));
+    }
+
+    /// The rotation cadence override is new. Zero must be rejected: it makes
+    /// `count.is_multiple_of(interval) && count > 0` unsatisfiable, silently
+    /// disabling rotation forever — a policy change wearing a tuning knob's
+    /// costume.
+    #[test]
+    fn rotation_interval_override_rejects_values_that_would_disable_rotation() {
+        use crate::config::parse_rotation_interval;
+
+        for bad in ["0", "-5", "", "   ", "many", "1.5"] {
+            assert!(
+                parse_rotation_interval(bad).is_none(),
+                "{bad:?} must be rejected, not accepted as a cadence"
+            );
+        }
+        assert_eq!(parse_rotation_interval("1"), Some(1));
+        assert_eq!(parse_rotation_interval(" 250 "), Some(250));
+
+        // And the rejected value would in fact have disabled rotation.
+        let disabled_interval = 0usize;
+        for count in 1..500usize {
+            assert!(
+                !(count.is_multiple_of(disabled_interval) && count > 0),
+                "interval 0 must never fire rotation"
+            );
+        }
     }
 }

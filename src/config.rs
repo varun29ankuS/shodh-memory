@@ -261,6 +261,25 @@ pub struct ServerConfig {
     /// Audit log retention days (default: 30)
     pub audit_retention_days: u64,
 
+    /// Directory to archive audit records into before rotation deletes them.
+    ///
+    /// **Opt-in, default `None` = archiving off.** Set
+    /// `SHODH_AUDIT_ARCHIVE_PATH` to enable. With it unset, rotation behaves
+    /// exactly as it always has: records past `audit_retention_days` or beyond
+    /// `audit_max_entries_per_user` are deleted and not copied anywhere.
+    ///
+    /// With it set, every record rotation is about to delete is first appended
+    /// to a JSONL file in this directory and fsynced. **A failed archive aborts
+    /// the delete** — see
+    /// `MultiUserMemoryManagerRotationHelper::rotate_user_audit_logs`. An
+    /// archive that fails while rotation carries on would be worse than no
+    /// archive at all, because it turns "we rotate" into "we lost it and
+    /// believed otherwise".
+    ///
+    /// This is a durability copy, not a tamper-evidence mechanism; `CF_OPLOG`
+    /// is the hash-chained log and the archive deliberately does not imitate it.
+    pub audit_archive_path: Option<PathBuf>,
+
     /// Rate limit: requests per second (default: 4000 - LLM-friendly)
     pub rate_limit_per_second: u64,
 
@@ -343,6 +362,18 @@ pub struct ServerConfig {
     pub telemetry_interval_secs: u64,
 }
 
+/// Interpret a `SHODH_AUDIT_ROTATION_INTERVAL` value.
+///
+/// `None` means "reject and keep the current value". Zero is rejected on
+/// purpose: `log_event` gates rotation on
+/// `count.is_multiple_of(audit_rotation_check_interval) && count > 0`, and an
+/// interval of 0 makes that condition unsatisfiable — rotation would never run
+/// again. That is a retention policy change disguised as a tuning knob, and it
+/// is not something an operator should be able to do by typo.
+pub(crate) fn parse_rotation_interval(raw: &str) -> Option<usize> {
+    raw.trim().parse::<usize>().ok().filter(|n| *n >= 1)
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -353,6 +384,7 @@ impl Default for ServerConfig {
             audit_max_entries_per_user: 10_000,
             audit_rotation_check_interval: 100,
             audit_retention_days: 30,
+            audit_archive_path: None,
             rate_limit_per_second: 4000,
             rate_limit_burst: 8000,
             public_rate_limit: true,
@@ -422,6 +454,31 @@ impl ServerConfig {
         if let Ok(val) = env::var("SHODH_AUDIT_RETENTION_DAYS") {
             if let Ok(n) = val.parse() {
                 config.audit_retention_days = n;
+            }
+        }
+
+        // Rotation cadence had no override at all, so an operator could not
+        // slow rotation down without also changing what it deletes. Rejected
+        // below 1: `log_event` gates on `count.is_multiple_of(interval)`, and 0
+        // there silently means "never rotate", which is a policy change wearing
+        // the costume of a tuning knob.
+        if let Ok(val) = env::var("SHODH_AUDIT_ROTATION_INTERVAL") {
+            match parse_rotation_interval(&val) {
+                Some(n) => config.audit_rotation_check_interval = n,
+                None => tracing::warn!(
+                    "SHODH_AUDIT_ROTATION_INTERVAL={} is not a positive integer; keeping {}",
+                    val,
+                    config.audit_rotation_check_interval
+                ),
+            }
+        }
+
+        // Audit archiving is OPT-IN. Absent or empty leaves it off and rotation
+        // behaves exactly as before.
+        if let Ok(val) = env::var("SHODH_AUDIT_ARCHIVE_PATH") {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                config.audit_archive_path = Some(PathBuf::from(trimmed));
             }
         }
 
@@ -593,6 +650,10 @@ impl ServerConfig {
         info!("   Max concurrent: {}", self.max_concurrent_requests);
         info!("   Request timeout: {}s", self.request_timeout_secs);
         info!("   Audit retention: {} days", self.audit_retention_days);
+        match &self.audit_archive_path {
+            Some(path) => info!("   Audit archive: {} (JSONL)", path.display()),
+            None => info!("   Audit archive: disabled (rotation deletes without a copy)"),
+        }
         if self.cors.is_restricted() {
             info!("   CORS origins: {:?}", self.cors.allowed_origins);
         } else {
@@ -655,6 +716,13 @@ pub fn print_env_help() {
     println!("  SHODH_ROCKSDB_BLOCK_CACHE_MB - Shared RocksDB block cache in MiB (default: 256)");
     println!("  SHODH_AUDIT_MAX_ENTRIES    - Max audit entries per user (default: 10000)");
     println!("  SHODH_AUDIT_RETENTION_DAYS - Audit log retention days (default: 30)");
+    println!(
+        "  SHODH_AUDIT_ROTATION_INTERVAL - Rotate every Nth audit event per user (default: 100, min 1)"
+    );
+    println!(
+        "  SHODH_AUDIT_ARCHIVE_PATH   - Directory to archive audit records to (JSONL) before \
+         rotation deletes them (default: unset = no archive). A failed archive aborts the delete."
+    );
     println!();
     println!("Security (secure defaults — override only if you understand the risk):");
     println!("  SHODH_ALLOW_UNSIGNED_WEBHOOKS - Accept webhooks when no *_WEBHOOK_SECRET is set (default: false = reject)");
