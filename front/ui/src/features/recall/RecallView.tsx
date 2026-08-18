@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 import { ApiError, NetworkError, outageOf, type Reachability } from "@/lib/api";
 import { corpusToRecallMemory, useCorpus, type CorpusMemory } from "@/lib/api/corpus";
 import { EmptyState } from "@/components/ui/empty-state";
+import { formatCount, isPartialRead } from "@/lib/format";
 import { InfoHint } from "@/components/ui/info-hint";
 import { Meta, Stat } from "@/components/ui/meta";
 import { useSession } from "@/stores/session";
@@ -53,7 +54,20 @@ const RECENT_LIMIT = 50;
  * tags are all lower-case debris this renders no row at all, which is the
  * correct outcome: an empty row is honest, an invented cue is not.
  */
-function CorpusHead({ memories, total }: { memories: CorpusMemory[] | undefined; total: number }) {
+function CorpusHead({
+  memories,
+  total,
+  read,
+  shown,
+}: {
+  memories: CorpusMemory[] | undefined;
+  /** Every memory the profile holds — `ListResponse.total`, not a page size. */
+  total: number;
+  /** Rows the request actually fetched: one capped page. */
+  read: number;
+  /** Rows rendered below this head. */
+  shown: number;
+}) {
   const setActiveQuery = useSession((s) => s.setActiveQuery);
   const cues = useMemo(() => corpusCues(memories), [memories]);
 
@@ -62,10 +76,31 @@ function CorpusHead({ memories, total }: { memories: CorpusMemory[] | undefined;
       {/* Two facts, not a sentence. "Search to rank them by relevance" was
           telling a reader looking at a search field what a search field does;
           the cue row below is a better version of the same instruction, because
-          pressing one carries it out. */}
+          pressing one carries it out.
+
+          THE ORDERING CLAIM IS TRUE AND STAYS; ITS SCOPE IS WHAT WAS WRONG.
+          "19553 memories · newest first" invited the reading that these rows
+          are the newest of 19,553. They are the newest of the ONE PAGE this
+          view fetched — `ResultPane` sorts that page itself, so the ordering
+          holds whatever the server does with it, but the page is a page. The
+          head now says which of the three numbers each word applies to.
+
+          Deployment-invariant on purpose. The server-side sort exists
+          (handlers/crud.rs, newest-first before offset/limit) but the running
+          binary is not always the one carrying it — measured on 2026-08-18 the
+          live listing came back unsorted. This wording is true either way,
+          which is the property to hold on to: the page becomes the genuine
+          newest page when that sort ships, and this line does not have to
+          change to notice. */}
       <Meta>
-        <Stat value={total} label={total === 1 ? "memory" : "memories"} />
-        <span>newest first</span>
+        <Stat value={formatCount(total)} label={total === 1 ? "memory" : "memories"} />
+        {isPartialRead(read, total) ? (
+          <span>
+            newest {formatCount(shown)} of {formatCount(read)} read
+          </span>
+        ) : (
+          <span>newest first</span>
+        )}
       </Meta>
 
       {cues.length > 0 ? (
@@ -202,9 +237,16 @@ function ResultPane({ reach }: { reach: Reachability }) {
   const { data, error, isFetching, profile, query } = useRecall(reach);
   const corpus = useCorpus(reach);
 
-  // The pre-query listing: newest first. The corpus endpoint already returns
-  // newest-first, but sorting here keeps the promise in the heading true even
-  // if that ordering ever changes server-side.
+  // The pre-query listing: newest first. This sort is NOT belt-and-braces over
+  // a server that already ordered the page — measured against the live server
+  // on 2026-08-18, `GET /api/list/{user}?limit=500` came back in tier-then-
+  // storage order (RocksDB key order, i.e. by UUID), and the first three rows
+  // were 08-17T18:19, 08-18T01:15, 08-17T15:59. The server-side sort exists in
+  // handlers/crud.rs; the deployed binary did not have it. This line is the
+  // only reason the heading above can say "newest" at all, and it stays after
+  // that sort ships, because a client that trusts an ordering it did not
+  // impose is a client that silently mis-labels its own rows when a deploy
+  // lags.
   const recent = useMemo(
     () =>
       [...(corpus.data?.memories ?? [])]
@@ -247,6 +289,8 @@ function ResultPane({ reach }: { reach: Reachability }) {
         <CorpusHead
           memories={corpus.data?.memories}
           total={corpus.data?.total ?? recent.length}
+          read={corpus.data?.memories.length ?? recent.length}
+          shown={recent.length}
         />
         <ResultList memories={recent} />
       </div>

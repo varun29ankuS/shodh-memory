@@ -4,6 +4,7 @@ import { MapPin, Ruler, Unlink, type LucideIcon } from "lucide-react";
 import { ApiError, NetworkError, outageOf, type Reachability } from "@/lib/api";
 import { fetchAnomalies } from "@/lib/api/anomalies";
 import { useCorpus } from "@/lib/api/corpus";
+import { formatCount, sampleNote } from "@/lib/format";
 import { useSession } from "@/stores/session";
 import { EmptyState } from "@/components/ui/empty-state";
 import { InfoHint } from "@/components/ui/info-hint";
@@ -444,6 +445,19 @@ export function AnomaliesView({ reach }: { reach: Reachability }) {
     return ids.size;
   }, [lenses, surprise]);
 
+  /* THE HEADER NOW AGREES WITH ITS OWN CHILDREN.
+     Every sub-row on this screen already states its denominator — "0 of 500
+     placed", "61 of 500 state a unit", "470 of 500 have terms to compare" —
+     because each measure knows it ran over a page. The header read "500
+     memories" on a 19,553-memory profile, which is the one line here that
+     named the page as if it were the corpus, and it is the line a reader takes
+     the whole screen's scope from. It states the fraction now, in the same
+     shape the rows below use. Null on a profile the page fully covers, where
+     "500 memories" was true all along. */
+  const read = memories.length;
+  const heldTotal = data?.total ?? read;
+  const sample = sampleNote(read, heldTotal);
+
   const patternCount = useMemo(
     () =>
       lenses.reduce(
@@ -532,7 +546,11 @@ export function AnomaliesView({ reach }: { reach: Reachability }) {
           <Meta className="text-[12px]">
             <Stat value={flagged} label="flagged" />
             {patternCount > 0 ? <Stat value={patternCount} label="pattern" /> : null}
-            <Stat value={memories.length} label="memories" />
+            {sample ? (
+              <span>{sample}</span>
+            ) : (
+              <Stat value={formatCount(read)} label={read === 1 ? "memory" : "memories"} />
+            )}
             <Stat value={lenses.length + 1} label="measures" />
           </Meta>
           {/* Not "No model": the seat's egress badge already occupies that
@@ -544,7 +562,9 @@ export function AnomaliesView({ reach }: { reach: Reachability }) {
               Every finding on this screen is arithmetic over the memories already stored here — a
               median centre and a robust spread, unit-matched number comparison, and term overlap.
               No model is called, here or on the server, and nothing is inferred that the corpus
-              does not already state.
+              does not already state. The three content measures read one page of the profile, and
+              every count they report is against that page; the server&rsquo;s deviation scoring
+              ranks its own scan.
             </InfoHint>
           </span>
         </header>

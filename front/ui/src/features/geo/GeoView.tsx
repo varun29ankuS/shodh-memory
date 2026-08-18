@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { outageOf, type Reachability } from "@/lib/api";
 import { corpusToRecallMemory, useCorpus } from "@/lib/api/corpus";
+import { formatCount, sampleNote } from "@/lib/format";
 import { EmptyState } from "@/components/ui/empty-state";
 import { InfoHint } from "@/components/ui/info-hint";
 import { Meta, Stat } from "@/components/ui/meta";
@@ -83,6 +84,18 @@ export function GeoView({ reach }: { reach: Reachability }) {
   const located = plotted.filter((m) => m.experience.geo_location);
   const matched = results.filter((m) => m.experience.geo_location);
 
+  /* HOW MUCH OF THE PROFILE THIS SCREEN ACTUALLY LOOKED AT.
+     `useCorpus` fetches ONE capped page — 500 rows — and every context point on
+     this map comes out of it. On the `claude-code` profile that page is 2.6% of
+     19,553 memories, and this view used to answer "does this profile have any
+     located memory?" out of it with an unqualified no. A negative drawn from
+     2.6% of a corpus is a statement about the request, not about the corpus.
+     `sampleNote` is null when the page covered everything, so a profile smaller
+     than the cap pays nothing for this and keeps the absolute claim it earns. */
+  const read = corpus.data?.memories.length ?? 0;
+  const heldTotal = corpus.data?.total ?? read;
+  const sample = sampleNote(read, heldTotal);
+
   // A REJECTED KEY IS NOT A STOPPED SERVER — see `outageOf`. The sentence
   // below is the offline case only.
   const outage = outageOf(reach, "The map draws from memory, which needs the server running.");
@@ -104,12 +117,24 @@ export function GeoView({ reach }: { reach: Reachability }) {
 
   if (located.length === 0) {
     return (
-      // Factual, not apologetic: the reason is a property of the data.
+      // Factual, not apologetic: the reason is a property of the data — and the
+      // claim is only ever as wide as the read behind it. The second sentence
+      // of this body used to be "One appears here the moment a memory is
+      // written with coordinates", which `more` already says in its last line;
+      // dropping it pays for the denominator twice over.
       <EmptyState
         size="page"
         title="Geo plots the memories that carry a place"
-        body="None in this profile does yet. One appears here the moment a memory is written with coordinates — no search needed."
-        more="A memory only carries coordinates when whatever wrote it supplied them — imported corpora like GDELT do, session captures do not. The first one that does appears here without any search."
+        body={
+          sample
+            ? `None of the ${formatCount(read)} read from this profile's ${formatCount(heldTotal)} does.`
+            : "None in this profile does yet."
+        }
+        more={
+          sample
+            ? `Geo reads one page of ${formatCount(read)} memories, so this says nothing about the other ${formatCount(heldTotal - read)}. A memory only carries coordinates when whatever wrote it supplied them — imported corpora like GDELT do, session captures do not — and the first one on this page appears here without any search.`
+            : "A memory only carries coordinates when whatever wrote it supplied them — imported corpora like GDELT do, session captures do not. The first one that does appears here without any search."
+        }
       />
     );
   }
@@ -172,10 +197,17 @@ export function GeoView({ reach }: { reach: Reachability }) {
             <Stat value={matched.length} label="matched" />
           ) : null}
           <Stat value={located.length} label="located" />
+          {/* The denominator, immediately after the figure it qualifies. It
+              scopes `located` and NOT `matched`: the context points come off
+              one capped page, while a search runs against the whole profile,
+              and collapsing the two would weaken a true claim to fix a false
+              one. Absent entirely on a profile the page fully covers. */}
+          {sample ? <span>{sample}</span> : null}
           <InfoHint label="map controls" align="right" side="up">
             Scroll to zoom, drag to pan, click a point to inspect it. A search does not change
             which points are drawn — it raises the ones that match and dims the rest, so an answer
-            is always seen against the corpus it came from.
+            is always seen against the corpus it came from. The context points come from one page
+            of the corpus; a search reaches all of it.
           </InfoHint>
         </Meta>
       </div>
