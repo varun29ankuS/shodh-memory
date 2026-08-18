@@ -445,7 +445,14 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
             )?;
         } else if key.len() == 16 {
             // Memory record (16-byte UUID key) — uses SHO envelope
-            if let Some((version, _payload)) = serialization::unwrap_sho(&value) {
+            // A corrupt envelope is NOT "already postcard" and is NOT a
+            // pre-envelope record: it falls through to the decode below, which
+            // now refuses it outright instead of laundering it through the
+            // legacy chain, and it is reported as a warning rather than
+            // rewritten in place.
+            if let serialization::ShoEnvelope::Valid { version, .. } =
+                serialization::read_sho_envelope(&value)
+            {
                 if version == serialization::SHO_VERSION_POSTCARD {
                     // Already postcard
                     counts.memories_skipped += 1;

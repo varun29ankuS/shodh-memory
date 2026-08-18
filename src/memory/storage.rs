@@ -785,40 +785,120 @@ fn decode_postcard_memory(payload: &[u8]) -> Result<(Memory, bool)> {
     }
 }
 
+/// Decode a stored memory value.
+///
+/// # A failed checksum is an error, not a hint to try harder
+///
+/// The SHO envelope carries a CRC32 per record. It used to be decorative: on a
+/// mismatch the envelope reader returned `None`, and `None` here meant "no
+/// envelope, try the legacy chain" — so a record whose checksum FAILED was
+/// handed, magic bytes and all, to [`deserialize_with_fallback`], whose last
+/// branch ([`try_raw_memory_parse`]) fabricates a `Memory` out of any
+/// twenty-one bytes it is given. The one mechanism able to detect real
+/// corruption had its failure signal laundered into a decode attempt by the
+/// path most likely to invent a plausible wrong answer.
+///
+/// [`crate::serialization::read_sho_envelope`] now separates the two states,
+/// and they are treated as opposites here:
+///
+/// - `Absent` — a pre-cutover record. Legitimately falls through to the legacy
+///   chain; every record written before the envelope existed depends on that,
+///   which is why the distinction had to be drawn rather than the fallback
+///   simply removed.
+/// - `ChecksumMismatch` / `Truncated` — damaged bytes. A hard error that never
+///   reaches a fallback decoder.
+///
+/// An envelope carrying a version this build does not know is an error too: its
+/// payload is by definition in a format the legacy chain predates, so running
+/// seventeen legacy branches over it can only produce a fabrication.
 fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
-    use crate::serialization::{SHO_VERSION_BINCODE2, SHO_VERSION_POSTCARD};
+    use crate::serialization::{ShoEnvelope, SHO_VERSION_BINCODE2, SHO_VERSION_POSTCARD};
 
-    // Check for versioned format: SHO + version byte + payload + 4-byte CRC32
-    if let Some((version, payload)) = crate::serialization::unwrap_sho(data) {
-        match version {
-            SHO_VERSION_POSTCARD => {
-                // Current format: postcard, tolerating records written before
-                // the trailing fields listed in MEMORY_DEFAULT_SUFFIX existed,
-                // and before `NerEntityRecord::fine_label` existed.
-                let (memory, defaulted) = decode_postcard_memory(payload)
-                    .map_err(|e| anyhow!("SHO v2 postcard decode failed: {e}"))?;
-                // `defaulted` marks the record for rewrite in the current schema,
-                // the same signal the legacy-format branches return.
-                Ok((memory, defaulted))
-            }
-            SHO_VERSION_BINCODE2 => {
-                // Legacy SHO v1: bincode 2.x — decode and mark for migration
-                let (memory, _): (Memory, _) =
-                    bincode::serde::decode_from_slice(payload, crate::bincode_safe_config())
-                        .map_err(|e| anyhow!("SHO v1 bincode decode failed: {e}"))?;
-                Ok((memory, true))
-            }
-            _ => {
-                // Unknown version — try the legacy fallback chain
-                deserialize_with_fallback(payload)
-                    .map_err(|e| anyhow!("SHO v{version} decode failed: {e}"))
-            }
+    match crate::serialization::read_sho_envelope(data) {
+        ShoEnvelope::Valid {
+            version: SHO_VERSION_POSTCARD,
+            payload,
+        } => {
+            // Current format: postcard, tolerating records written before
+            // the trailing fields listed in MEMORY_DEFAULT_SUFFIX existed,
+            // and before `NerEntityRecord::fine_label` existed.
+            let (memory, defaulted) = decode_postcard_memory(payload)
+                .map_err(|e| anyhow!("SHO v2 postcard decode failed: {e}"))?;
+            // `defaulted` marks the record for rewrite in the current schema,
+            // the same signal the legacy-format branches return.
+            Ok((memory, defaulted))
         }
-    } else {
-        // No SHO header — legacy format (raw bincode/msgpack)
-        deserialize_with_fallback(data)
-            .map_err(|e| anyhow!("legacy (no SHO header) decode failed: {e}"))
+        ShoEnvelope::Valid {
+            version: SHO_VERSION_BINCODE2,
+            payload,
+        } => {
+            // Legacy SHO v1: bincode 2.x — decode and mark for migration
+            let (memory, _): (Memory, _) =
+                bincode::serde::decode_from_slice(payload, crate::bincode_safe_config())
+                    .map_err(|e| anyhow!("SHO v1 bincode decode failed: {e}"))?;
+            Ok((memory, true))
+        }
+        ShoEnvelope::Valid { version, .. } => Err(anyhow!(
+            "SHO envelope version {version} is not readable by this build ({} \
+             bytes); refusing to guess at it with the legacy decoders",
+            data.len()
+        )),
+        ShoEnvelope::ChecksumMismatch { stored, computed } => Err(anyhow!(
+            "SHO envelope checksum mismatch (stored {stored:08x}, computed \
+             {computed:08x}, {} bytes): the bytes on disk are not the bytes that \
+             were written. Refusing to decode — a fallback decode of corrupted \
+             bytes returns a fabricated memory, not a recovered one",
+            data.len()
+        )),
+        ShoEnvelope::Truncated { len } => Err(anyhow!(
+            "SHO envelope truncated to {len} bytes, below the minimum envelope \
+             size; refusing to decode"
+        )),
+        ShoEnvelope::Absent => {
+            // No SHO header — legacy format (raw bincode/msgpack)
+            deserialize_with_fallback(data)
+                .map_err(|e| anyhow!("legacy (no SHO header) decode failed: {e}"))
+        }
     }
+}
+
+/// Decode a stored memory value and verify it is the record its key claims.
+///
+/// # Why this is on the read path
+///
+/// Corruption on the memory side rarely announces itself. Every shape in the
+/// legacy fallback chain derives the id from the VALUE; the writer derives the
+/// key from the RECORD. A fabrication therefore cannot agree with its own key
+/// — `try_raw_memory_parse` reads the first sixteen bytes of the value as a
+/// UUID, which for an enveloped record is `SHO` + version + payload, and for
+/// arbitrary garbage is arbitrary garbage. The check has no false positive by
+/// construction: nothing in this codebase stores a memory under a key other
+/// than its own id.
+///
+/// The cost is a sixteen-byte comparison against a value that has already cost
+/// a RocksDB read and a full postcard decode — far below the noise floor of
+/// the work done to produce the thing being checked. There is no perf argument
+/// for serving a record that disagrees with its own key, and serving one is
+/// worse than serving nothing: the caller cannot tell it apart from fact.
+fn deserialize_memory_checked(key: &[u8], data: &[u8]) -> Result<(Memory, bool)> {
+    let (memory, needs_migration) = deserialize_memory(data)?;
+    if memory.id.0.as_bytes() != key {
+        tracing::warn!(
+            decoded_id = %memory.id.0,
+            key = %hex::encode(key),
+            bytes = data.len(),
+            "decoded memory id disagrees with the key it was stored under — \
+             treating it as corruption, not as a memory"
+        );
+        return Err(anyhow!(
+            "decoded memory id {} does not match its key {} ({} bytes): the \
+             record decoded into something the writer could not have written",
+            memory.id.0,
+            hex::encode(key),
+            data.len()
+        ));
+    }
+    Ok((memory, needs_migration))
 }
 
 /// Public wrapper around the full legacy fallback chain, used by the migration module.
@@ -1891,13 +1971,18 @@ impl MemoryStorage {
         let key = id.0.as_bytes();
         match self.db.get(key)? {
             Some(value) => {
-                let (memory, needs_migration) = deserialize_memory(&value).with_context(|| {
-                    format!(
-                        "Failed to deserialize memory {} ({} bytes)",
-                        id.0,
-                        value.len()
-                    )
-                })?;
+                // Checked against the key it was fetched under: a decode whose
+                // id disagrees with its key is a fabrication, and the error
+                // returns BEFORE the lazy migration below so a fabrication is
+                // never written anywhere.
+                let (memory, needs_migration) =
+                    deserialize_memory_checked(key, &value).with_context(|| {
+                        format!(
+                            "Failed to deserialize memory {} ({} bytes)",
+                            id.0,
+                            value.len()
+                        )
+                    })?;
 
                 // Lazy migration: re-write legacy formats in current format
                 if needs_migration {
@@ -2744,7 +2829,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory_checked(&key, &value) {
                 if memory.parent_id.is_none() {
                     roots.push(memory.id);
                 }
@@ -2857,7 +2942,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory_checked(&key, &value) {
                 if !memory.is_forgotten() {
                     memories.push(memory);
                 }
@@ -2882,7 +2967,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory_checked(&key, &value) {
                 if !memory.is_forgotten() {
                     f(memory)?;
                 }
@@ -2900,7 +2985,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory_checked(&key, &value) {
                 if !memory.compressed && !memory.is_forgotten() && memory.created_at < cutoff {
                     memories.push(memory);
                 }
@@ -2953,7 +3038,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((mut memory, _)) = deserialize_memory(&value) {
+            if let Ok((mut memory, _)) = deserialize_memory_checked(&key, &value) {
                 if memory.is_forgotten() {
                     continue;
                 }
@@ -3007,7 +3092,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((mut memory, _)) = deserialize_memory(&value) {
+            if let Ok((mut memory, _)) = deserialize_memory_checked(&key, &value) {
                 if memory.is_forgotten() {
                     continue;
                 }
@@ -3052,7 +3137,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory_checked(&key, &value) {
                 if regex.is_match(&memory.experience.content) {
                     to_delete.push(memory.id);
                     count += 1;
@@ -3108,7 +3193,7 @@ impl MemoryStorage {
                         continue;
                     }
 
-                    match deserialize_memory(&value) {
+                    match deserialize_memory_checked(&key, &value) {
                         Ok((memory, _)) => {
                             if memory.is_forgotten() {
                                 continue;
@@ -3231,6 +3316,12 @@ impl MemoryStorage {
                 );
                 to_delete.push(key.to_vec());
             } else if deserialize_memory(&value).is_err() {
+                // Deliberately the UNCHECKED decode. This branch deletes, and a
+                // record that decodes but disagrees with its key is exactly the
+                // evidence an operator needs to see; turning that disagreement
+                // into a delete would destroy it without anyone in the loop.
+                // Undecodable records are a different matter — they are already
+                // unreadable, so deleting them loses nothing that was readable.
                 tracing::debug!(
                     "Marking for deletion: valid key but corrupted value ({} bytes)",
                     value.len()
@@ -3297,8 +3388,11 @@ impl MemoryStorage {
             // still needs converting to postcard. So gate on the SHO envelope
             // version directly.
             let is_current_postcard = matches!(
-                crate::serialization::unwrap_sho(&value),
-                Some((crate::serialization::SHO_VERSION_POSTCARD, _))
+                crate::serialization::read_sho_envelope(&value),
+                crate::serialization::ShoEnvelope::Valid {
+                    version: crate::serialization::SHO_VERSION_POSTCARD,
+                    ..
+                }
             );
             if is_current_postcard {
                 already_current += 1;
@@ -3309,7 +3403,11 @@ impl MemoryStorage {
             // decode via the full fallback chain and queue it for re-encode to
             // postcard. A decode failure is counted as `failed`, never silently
             // skipped.
-            match deserialize_memory(&value) {
+            // Checked: this loop re-encodes what it decodes and writes it
+            // back OVER the original bytes at `key`. An unchecked pseudo-decode
+            // here does not merely serve a fabrication, it persists one and
+            // destroys the evidence of what the record used to be.
+            match deserialize_memory_checked(&key, &value) {
                 Ok((memory, _)) => {
                     to_migrate.push((key.to_vec(), memory));
                 }
@@ -4124,7 +4222,7 @@ impl MemoryStorage {
                 continue;
             }
 
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory_checked(&key, &value) {
                 let has_mapping = match self.get_vector_mapping(&memory.id) {
                     Ok(Some(entry)) => entry.text_vectors().is_some_and(|v| !v.is_empty()),
                     _ => false,
@@ -4366,6 +4464,255 @@ mod tests {
             Vec::new(),
             Vec::new(),
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // A failed checksum must not be laundered into a decode attempt.
+    //
+    // These bytes are constructed so the fallback chain PROVABLY fabricates a
+    // memory from them: printable ASCII end to end, so `try_raw_memory_parse`
+    // reads the first sixteen bytes as a UUID and the rest as content. If the
+    // test flipped a bit in a real record instead, the fallback might fail for
+    // an unrelated reason and the "it used to succeed" premise would hold only
+    // by luck.
+    // -----------------------------------------------------------------------
+
+    /// A complete SHO v2 envelope whose CRC32 trailer is `XXXX` — wrong by
+    /// construction — around an all-printable payload.
+    fn envelope_with_a_broken_checksum() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(crate::memory::storage::STORAGE_MAGIC);
+        bytes.push(crate::serialization::SHO_VERSION_POSTCARD);
+        bytes.extend_from_slice(b"corrupted-record-payload-bytes");
+        bytes.extend_from_slice(b"XXXX");
+        bytes
+    }
+
+    #[test]
+    fn a_failed_checksum_is_an_error_not_a_trip_through_the_fallback_chain() {
+        let bytes = envelope_with_a_broken_checksum();
+
+        // Premise 1: the envelope really is corrupt, not merely unparsed.
+        assert!(
+            matches!(
+                crate::serialization::read_sho_envelope(&bytes),
+                crate::serialization::ShoEnvelope::ChecksumMismatch { .. }
+            ),
+            "fixture must present a complete envelope with a wrong checksum"
+        );
+
+        // Premise 2, and the whole reason this defect mattered: the fallback
+        // chain these bytes used to be handed to does NOT reject them. It
+        // invents a Memory. Asserted permanently — if this ever starts failing,
+        // the fabrication has been fixed at its source and this test needs
+        // revisiting, but it does not mean the discrimination below is wrong.
+        let fabricated = deserialize_with_fallback(&bytes);
+        assert!(
+            fabricated.is_ok(),
+            "premise: the legacy chain fabricates a Memory from these bytes; \
+             it errored instead: {:?}",
+            fabricated.err()
+        );
+
+        // The fix: a record whose checksum fails never reaches that chain.
+        let err = deserialize_memory(&bytes)
+            .expect_err("a record with a failed checksum must be a hard error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("checksum mismatch"),
+            "the error must name the checksum, so it cannot pass by way of some \
+             unrelated decode failure; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_record_with_no_envelope_still_decodes_through_the_legacy_chain() {
+        // The other half of the discrimination, and the reason it is a
+        // discrimination rather than a removal: every record written before the
+        // SHO cutover carries no envelope, and must keep decoding.
+        let id = MemoryId(
+            uuid::Uuid::parse_str("6f0b1c2d-3e4f-4a5b-8c9d-0e1f2a3b4c5d").expect("static uuid"),
+        );
+        let memory = sample_memory(id.clone(), "written before the envelope existed");
+        let legacy_bytes =
+            bincode::serde::encode_to_vec(&memory, bincode::config::standard()).expect("encode");
+
+        assert_eq!(
+            crate::serialization::read_sho_envelope(&legacy_bytes),
+            crate::serialization::ShoEnvelope::Absent,
+            "fixture must carry no envelope at all"
+        );
+
+        let (decoded, needs_migration) = deserialize_memory(&legacy_bytes)
+            .expect("a pre-envelope record must still decode via the legacy chain");
+        assert_eq!(decoded.id, id);
+        assert_eq!(
+            decoded.experience.content,
+            "written before the envelope existed"
+        );
+        // Pinned as-is, not as it ought to be: the fallback chain reports raw
+        // bincode 2.x of the CURRENT struct shape as needing no migration, even
+        // though it still wants re-encoding as postcard. That is the wart
+        // `migrate_legacy` documents and works around by gating on the envelope
+        // version rather than on this flag. Asserting it here keeps the two
+        // statements consistent.
+        assert!(
+            !needs_migration,
+            "raw bincode 2.x of the current shape is reported as current"
+        );
+
+        // A genuinely older shape, from a deeper branch of the same chain, so
+        // the guarantee is not resting on the one branch nearest the surface.
+        let minimal = rmp_serde::to_vec(&LegacyMinimalFixture {
+            id: id.clone(),
+            content: "an even older record".to_string(),
+        })
+        .expect("msgpack");
+        assert_eq!(
+            crate::serialization::read_sho_envelope(&minimal),
+            crate::serialization::ShoEnvelope::Absent
+        );
+        let (from_minimal, needs_migration) =
+            deserialize_memory(&minimal).expect("a deep-legacy record must still decode");
+        assert_eq!(from_minimal.id, id);
+        assert_eq!(from_minimal.experience.content, "an even older record");
+        assert!(
+            needs_migration,
+            "a deep-legacy record must be marked for rewrite"
+        );
+    }
+
+    #[test]
+    fn legacy_wire_formats_never_begin_with_the_sho_magic() {
+        // The premise under "absent vs corrupt": no pre-envelope encoding can
+        // be mistaken for a damaged envelope, because none of them start with
+        // an ASCII S. Both legacy encoders length-prefix the leading UUID, so
+        // byte 0 is a small integer, never 0x53. Pinned rather than reasoned
+        // about, because the whole discrimination rests on it.
+        // 53 48 4f = "SHO": the worst case for the magic test.
+        let id = MemoryId(
+            uuid::Uuid::parse_str("53484f01-0000-4000-8000-000000000000").expect("static uuid"),
+        );
+        let memory = sample_memory(id, "a uuid whose first three bytes ARE the magic");
+
+        let bincode2 =
+            bincode::serde::encode_to_vec(&memory, bincode::config::standard()).expect("bincode");
+        let msgpack = rmp_serde::to_vec(&memory).expect("msgpack");
+
+        for (name, bytes) in [("bincode2", &bincode2), ("msgpack", &msgpack)] {
+            assert_ne!(
+                &bytes[0..3],
+                &crate::memory::storage::STORAGE_MAGIC[..],
+                "{name} encoding of a memory whose id starts with 53 48 4f must \
+                 still not begin with the SHO magic, or absent-vs-corrupt has a \
+                 false-positive population"
+            );
+            assert_eq!(
+                crate::serialization::read_sho_envelope(bytes),
+                crate::serialization::ShoEnvelope::Absent,
+                "{name} record must read as Absent"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pseudo_decode_is_refused_and_its_bytes_are_left_where_they_are() {
+        // Twenty-one bytes of garbage: enough for `try_raw_memory_parse` to
+        // take the first sixteen as a UUID and the rest as content, and
+        // fabricate every other field. It decodes. That is the defect.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = MemoryStorage::new(dir.path(), None).expect("storage");
+
+        let key = uuid::Uuid::parse_str("11112222-3333-4444-8555-666677778888").expect("uuid");
+        let mut garbage = vec![0xAB_u8; 16];
+        garbage.extend_from_slice(b"hello");
+        assert_eq!(garbage.len(), 21);
+
+        // The id the fabrication carries: derived from the VALUE, so it cannot
+        // agree with the key the record was fetched under.
+        let fabricated_id = MemoryId(uuid::Uuid::from_bytes([0xAB_u8; 16]));
+        assert_ne!(fabricated_id.0, key);
+
+        // Premise: unchecked, this decodes into a Memory with no error.
+        assert!(
+            deserialize_memory(&garbage).is_ok(),
+            "premise: garbage pseudo-decodes through the fallback chain"
+        );
+
+        storage
+            .db
+            .put(key.as_bytes(), &garbage)
+            .expect("seed the corrupted record");
+
+        let err = storage
+            .get_opt(&MemoryId(key))
+            .expect_err("a decode that disagrees with its key must not be served");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("does not match its key"),
+            "the error must name the id/key disagreement; got: {msg}"
+        );
+
+        // The evidence survives: the original bytes are still there, unchanged.
+        let on_disk = storage
+            .db
+            .get(key.as_bytes())
+            .expect("read back")
+            .expect("the corrupted record must still exist");
+        assert_eq!(
+            on_disk, garbage,
+            "the read path must not rewrite a record it could not trust"
+        );
+
+        // And no phantom was written at the fabricated id. `migrate_memory_format`
+        // keys its rewrite off the DECODED id, so an unguarded lazy migration of
+        // a pseudo-decode does not overwrite the original — it MANUFACTURES a
+        // second record, at a key nothing ever wrote to, visible to every
+        // full-CF scan in this file.
+        assert!(
+            storage
+                .db
+                .get(fabricated_id.0.as_bytes())
+                .expect("read back")
+                .is_none(),
+            "the lazy migration must not have persisted the fabrication under \
+             its invented id"
+        );
+    }
+
+    #[test]
+    fn a_scan_skips_the_record_whose_id_disagrees_with_its_key() {
+        // The same check on the paths that SERVE results in bulk. A fabrication
+        // that survives here is indistinguishable from a memory to every caller
+        // downstream.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = MemoryStorage::new(dir.path(), None).expect("storage");
+
+        let good = sample_memory(
+            MemoryId(uuid::Uuid::parse_str("aaaabbbb-cccc-4ddd-8eee-ffff00001111").unwrap()),
+            "a real record",
+        );
+        storage.store(&good).expect("store");
+
+        let key = uuid::Uuid::parse_str("99998888-7777-4666-8555-444433332222").expect("uuid");
+        let mut garbage = vec![0xCD_u8; 16];
+        garbage.extend_from_slice(b"fabricated content");
+        storage.db.put(key.as_bytes(), &garbage).expect("seed");
+
+        let all = storage.get_all().expect("get_all");
+        assert_eq!(
+            all.len(),
+            1,
+            "only the real record may be returned; got {:?}",
+            all.iter().map(|m| m.id.0).collect::<Vec<_>>()
+        );
+        assert_eq!(all[0].id, good.id);
+
+        // And the record is still on disk afterwards, untouched.
+        assert_eq!(
+            storage.db.get(key.as_bytes()).expect("read back"),
+            Some(garbage)
+        );
     }
 
     /// Build the SHO v2 bytes a pre-2026-07-12 build would have written for
@@ -4674,8 +5021,9 @@ mod tests {
         // shape. (encode_sho would emit current postcard and defeat the test.)
         let legacy_bytes =
             bincode::serde::encode_to_vec(&memory, bincode::config::standard()).expect("encode");
-        assert!(
-            crate::serialization::unwrap_sho(&legacy_bytes).is_none(),
+        assert_eq!(
+            crate::serialization::read_sho_envelope(&legacy_bytes),
+            crate::serialization::ShoEnvelope::Absent,
             "fixture must NOT carry an SHO header"
         );
         storage
@@ -4699,8 +5047,11 @@ mod tests {
             .expect("record present");
         assert!(
             matches!(
-                crate::serialization::unwrap_sho(&raw),
-                Some((crate::serialization::SHO_VERSION_POSTCARD, _))
+                crate::serialization::read_sho_envelope(&raw),
+                crate::serialization::ShoEnvelope::Valid {
+                    version: crate::serialization::SHO_VERSION_POSTCARD,
+                    ..
+                }
             ),
             "record must be rewritten as SHO v2 postcard"
         );
