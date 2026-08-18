@@ -2470,19 +2470,18 @@ mod tests {
         std::env::temp_dir().join(format!("shodh-recall-{label}-{id}"))
     }
 
-    /// The harness's process-wide env mutation is contained by
-    /// `pin_harness_threads` itself, which now returns an RAII pin: it takes the
-    /// crate-wide `RECALL_ENV_LOCK` and restores all four variables on drop.
-    ///
-    /// This module used to carry a local `HarnessEnvGuard` that tests had to
-    /// remember to acquire. It was the right diagnosis and the wrong location.
-    /// `pin_harness_threads` then set `SHODH_ONNX_THREADS`,
-    /// `RAYON_NUM_THREADS`, `SHODH_RECALL_READONLY` and `SHODH_EVAL_NOW` for
-    /// the PROCESS; the local guard restored exactly one of them, so the frozen
-    /// scoring clock leaked regardless — and any future test (or non-test
-    /// caller) that forgot the guard leaked all four. Tests below bind the pin
-    /// the same way the suite entry points do, and the lock is reentrant so
-    /// nesting is safe.
+    // The harness's process-wide env mutation is contained by
+    // `pin_harness_threads` itself, which returns an RAII pin: it takes the
+    // crate-wide `RECALL_ENV_LOCK` and restores every variable it set on drop.
+    //
+    // This module used to carry a local `HarnessEnvGuard` that tests had to
+    // remember to acquire. It was the right diagnosis and the wrong location.
+    // `pin_harness_threads` then set `SHODH_ONNX_THREADS`, `RAYON_NUM_THREADS`,
+    // `SHODH_RECALL_READONLY` and `SHODH_EVAL_NOW` for the PROCESS; the local
+    // guard restored exactly one of them, so the frozen scoring clock leaked
+    // regardless — and any future test (or non-test caller) that forgot the
+    // guard leaked all four. Tests below bind the pin the same way the suite
+    // entry points do, and the lock is reentrant so nesting is safe.
 
     /// Lineage repro (substrate diagnosis 2026-06-10): root-cause P@1 has been
     /// 0.0 through every fix, and the instrumented CI run produced ZERO edge
