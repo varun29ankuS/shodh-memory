@@ -897,6 +897,17 @@ pub enum MemoryOrigin {
     /// eval store be told apart from a user's — which `Unknown` would not do,
     /// since here the write path IS known.
     RecallHarness,
+    /// A registered source connector wrote this — the ingestion subsystem
+    /// walked a source it was configured to read and produced this memory
+    /// without anyone asking for it individually.
+    ///
+    /// One variant covers every source kind on purpose. The origin answers
+    /// "the server's ingestion subsystem wrote this"; *which* source did is a
+    /// fact about a registry row that can be renamed, reconfigured or deleted,
+    /// so it lives in `Experience::metadata` under `shodh.source.id` /
+    /// `shodh.source.kind` where it can change without rewriting a stored
+    /// memory's provenance.
+    Connector,
 }
 
 impl MemoryOrigin {
@@ -922,6 +933,7 @@ impl MemoryOrigin {
             Self::ZenohMission => "zenoh_mission",
             Self::PythonApi => "python_api",
             Self::RecallHarness => "recall_harness",
+            Self::Connector => "connector",
         }
     }
 
@@ -944,6 +956,7 @@ impl MemoryOrigin {
         Self::ZenohMission,
         Self::PythonApi,
         Self::RecallHarness,
+        Self::Connector,
     ];
 
     /// Parse a wire name back into an origin, for read-path filtering.
@@ -6159,6 +6172,64 @@ mod tests {
         assert!(
             legacy.completed_at.is_some(),
             "complete() must always leave a stamp behind"
+        );
+    }
+
+    /// `MemoryOrigin::ALL` is the single list the parser, the API's accepted-value
+    /// message and the tests all read from, and it claims to be in *declaration*
+    /// order — which is postcard-discriminant order, which is what is on disk.
+    ///
+    /// A variant appended to the enum but forgotten in `ALL` is invisible: the
+    /// exhaustive `as_str` match forces a wire name, but nothing forces the list.
+    /// The list then stops one short, `parse("connector")` returns `None`, and
+    /// `?origin=` silently rejects a value the store is actively writing. Worse,
+    /// a variant *inserted* rather than appended re-points every stored record.
+    /// Both are caught by pinning each entry's encoded discriminant to its index.
+    #[test]
+    fn memory_origin_all_is_in_wire_discriminant_order() {
+        for (index, origin) in MemoryOrigin::ALL.iter().enumerate() {
+            assert!(
+                index < 128,
+                "the single-byte varint assumption below stops holding at 128 variants"
+            );
+            let encoded = crate::serialization::encode_raw(origin).expect("encode origin");
+            assert_eq!(
+                encoded,
+                vec![index as u8],
+                concat!(
+                    "MemoryOrigin::ALL[{}] ({}) does not encode as that discriminant: ",
+                    "ALL is out of step with the enum's declaration order, which is ",
+                    "the order every stored record was written in"
+                ),
+                index,
+                origin.as_str()
+            );
+            assert_eq!(
+                MemoryOrigin::parse(origin.as_str()),
+                Some(*origin),
+                "wire name {:?} does not parse back to its own variant",
+                origin.as_str()
+            );
+        }
+
+        let mut names: Vec<&str> = MemoryOrigin::ALL.iter().map(|o| o.as_str()).collect();
+        names.sort_unstable();
+        let unique = names.len();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            unique,
+            "two origins share a wire name, so one of them can never be filtered for"
+        );
+
+        assert_eq!(
+            MemoryOrigin::ALL.last().copied(),
+            Some(MemoryOrigin::Connector),
+            concat!(
+                "new origins are APPENDED; if Connector is no longer last, a variant ",
+                "was added ahead of it and every record written as Connector now ",
+                "reads as something else"
+            )
         );
     }
 }
