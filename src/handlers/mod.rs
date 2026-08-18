@@ -45,6 +45,7 @@ pub mod webhooks;
 
 // External integrations
 pub mod integrations;
+pub mod integrity;
 
 // Ingestion source registry (connectors)
 pub mod sources;

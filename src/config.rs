@@ -305,6 +305,27 @@ pub struct ServerConfig {
     /// Whether backups are enabled (default: true in production, false in dev)
     pub backup_enabled: bool,
 
+    /// Interval between scheduled read-only integrity scrubs, in seconds
+    /// (default: 3600 = 1 hour). Set to 0 to disable, which means nothing
+    /// checks whether stored records still decode into what was written until
+    /// somebody calls `POST /api/integrity/scrub` by hand.
+    ///
+    /// Justified against measurement, re-measured after the merge because the
+    /// merge changed the cost. On the four live profiles the full pass takes
+    /// 18.0s + 28ms + 511ms + 473ms = ~19s, of which claude-code is 17.5s. The
+    /// pre-merge figure was 14.2s; the difference is the two legacy-generation
+    /// retries, which now run on nearly every record because every record on
+    /// disk predates the `origin` field.
+    ///
+    /// ~19s per 3600s is a 0.53% duty cycle of `fill_cache(false)` sequential
+    /// reads that evict nothing and take no lock the serving path needs.
+    /// Against a defect class that has twice survived over a month unnoticed,
+    /// buying a thirty-minute mean detection latency for half a percent of one
+    /// core is not a close call. Daily would cost 24x less and buy a
+    /// twelve-hour mean latency, which is not meaningfully better than the
+    /// accident that found the last one.
+    pub integrity_scrub_interval_secs: u64,
+
     /// Maximum entities extracted per memory for graph insertion (default: 10)
     /// Caps the number of NER/tag/regex entities to prevent O(n²) edge explosion
     /// in the knowledge graph. 10 entities → max 45 co-occurrence edges.
@@ -344,6 +365,7 @@ impl Default for ServerConfig {
             backup_interval_secs: 86400,   // 24 hours
             backup_max_count: 7,           // Keep 7 backups (1 week of daily backups)
             backup_enabled: false,         // Disabled by default, auto-enabled in production
+            integrity_scrub_interval_secs: 3600, // 1 hour; ~0.4% duty cycle at the measured 14.2s
             max_entities_per_memory: 10,   // Cap entities per memory (10 → max 45 edges)
             telemetry_enabled: false,
             telemetry_url: "https://shodh-memory.com/api/telemetry".to_string(),
@@ -487,6 +509,30 @@ impl ServerConfig {
             config.backup_enabled = true;
         }
 
+        // Integrity scrub scheduler. Parsed here rather than read at the call
+        // site: an env var with no reader is a knob that lies, and this crate
+        // already ships one (`RAYON_NUM_THREADS` appears in documentation and
+        // is read by nothing). `config_reads_the_integrity_scrub_interval`
+        // pins that this one is actually wired.
+        if let Ok(val) = env::var("SHODH_INTEGRITY_SCRUB_INTERVAL") {
+            match val.parse::<u64>() {
+                Ok(0) => {
+                    tracing::warn!(
+                        "SHODH_INTEGRITY_SCRUB_INTERVAL=0 — scheduled integrity scrubs are \
+                         DISABLED; nothing will notice a store that decodes into fabrications \
+                         until POST /api/integrity/scrub is called by hand"
+                    );
+                    config.integrity_scrub_interval_secs = 0;
+                }
+                Ok(n) => config.integrity_scrub_interval_secs = n,
+                Err(e) => tracing::warn!(
+                    value = %val,
+                    error = %e,
+                    "SHODH_INTEGRITY_SCRUB_INTERVAL is not a number — keeping the default"
+                ),
+            }
+        }
+
         // Entity extraction cap
         if let Ok(val) = env::var("SHODH_MAX_ENTITIES") {
             if let Ok(n) = val.parse::<usize>() {
@@ -565,6 +611,14 @@ impl ServerConfig {
         } else {
             info!("   Backup: disabled");
         }
+        if self.integrity_scrub_interval_secs > 0 {
+            info!(
+                "   Integrity scrub: every {}s (read-only, all profiles on disk)",
+                self.integrity_scrub_interval_secs
+            );
+        } else {
+            info!("   Integrity scrub: DISABLED — nothing checks stored records");
+        }
         if self.telemetry_enabled {
             let interval_hours = self.telemetry_interval_secs / 3600;
             info!(
@@ -627,6 +681,10 @@ pub fn print_env_help() {
     println!("  SHODH_BACKUP_ENABLED   - Enable automatic backups true/false (default: auto in production)");
     println!("  SHODH_BACKUP_INTERVAL  - Backup interval in seconds (default: 86400 = 24 hours)");
     println!("  SHODH_BACKUP_MAX_COUNT - Max backups to keep per user (default: 7)");
+    println!(
+        "  SHODH_INTEGRITY_SCRUB_INTERVAL - Read-only integrity scrub interval in seconds \
+         (default: 3600, 0 = disabled)"
+    );
     println!();
     println!("  RUST_LOG               - Log level (e.g., info, debug, trace)");
     println!();
@@ -655,6 +713,53 @@ mod tests {
 
         env::remove_var("SHODH_PORT");
         env::remove_var("SHODH_MAX_USERS");
+    }
+
+    /// The interval env var is actually read.
+    ///
+    /// Not a formality. `RAYON_NUM_THREADS` appears in this crate's docs and
+    /// is read by nothing, so "an env var with this name exists" is not
+    /// evidence that setting it does anything. A knob that lies is worse than
+    /// no knob: it produces confident operators running the default.
+    ///
+    /// Holds `crate::auth::ENV_LOCK` because `set_var` is process-global and
+    /// every other env test in this crate serialises on it.
+    #[test]
+    fn config_reads_the_integrity_scrub_interval() {
+        let _guard = crate::auth::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // The default has to be a real value, not zero-by-accident.
+        env::remove_var("SHODH_INTEGRITY_SCRUB_INTERVAL");
+        assert_eq!(
+            ServerConfig::from_env().integrity_scrub_interval_secs,
+            3600,
+            "the default must schedule scrubs, not disable them"
+        );
+
+        env::set_var("SHODH_INTEGRITY_SCRUB_INTERVAL", "900");
+        assert_eq!(
+            ServerConfig::from_env().integrity_scrub_interval_secs,
+            900,
+            "the value set in the environment must reach the config"
+        );
+
+        // 0 is a deliberate off switch, and must survive as 0 rather than
+        // being clamped back to the default.
+        env::set_var("SHODH_INTEGRITY_SCRUB_INTERVAL", "0");
+        assert_eq!(ServerConfig::from_env().integrity_scrub_interval_secs, 0);
+
+        // Garbage keeps the default rather than silently disabling the scrub,
+        // which is the failure mode a bare `parse().unwrap_or(0)` would have.
+        env::set_var("SHODH_INTEGRITY_SCRUB_INTERVAL", "hourly");
+        assert_eq!(
+            ServerConfig::from_env().integrity_scrub_interval_secs,
+            3600,
+            "an unparseable interval must not turn the scheduler off"
+        );
+
+        env::remove_var("SHODH_INTEGRITY_SCRUB_INTERVAL");
     }
 
     #[test]

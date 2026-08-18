@@ -490,6 +490,53 @@ components:
           type: integer
           default: 20
 
+    IntegrityClassCounts:
+      type: object
+      description: Per-record-class tallies for one column family.
+      properties:
+        keys_seen:
+          type: integer
+          description: >-
+            Keys the iterator produced, including ones that are not records of
+            this class (the memory default column family is shared with several
+            prefixed subsystem keyspaces).
+        scanned:
+          type: integer
+        clean:
+          type: integer
+        legacy:
+          type: integer
+          description: Readable only via an older wire generation.
+        implausible:
+          type: integer
+          description: >-
+            Decoded successfully into values the writer could not have
+            produced. These are served as fact, which is why they outrank
+            undecodable records in the verdict.
+        undecodable:
+          type: integer
+        checksum_mismatch:
+          type: integer
+        forgotten:
+          type: integer
+        read_errors:
+          type: integer
+          description: >-
+            Iterator failures. Non-zero means the sweep could not see every
+            record, so it cannot certify health.
+        decode_paths:
+          type: object
+          additionalProperties:
+            type: integer
+        checks_failed:
+          type: object
+          additionalProperties:
+            type: integer
+        embedding_dims:
+          type: object
+          additionalProperties:
+            type: integer
+
     MemoryStats:
       type: object
       properties:
@@ -837,6 +884,208 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MemoryStats'
+
+  /api/integrity/scrub:
+    post:
+      tags: [Admin]
+      summary: Read-only wire-level integrity scrub
+      description: >-
+        Classifies every stored memory and graph node as clean, readable only
+        via a legacy wire generation, undecodable, or decoding successfully
+        into implausible values. The fourth class is the point: a corrupted
+        record here frequently does not fail to decode, so a scrub that only
+        asks whether records decode reports that population as healthy. Full
+        sweep by default; a capped or self-erroring sweep reports
+        complete=false and can never return verdict=healthy.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - user_id
+              properties:
+                user_id:
+                  type: string
+                max_records:
+                  type: integer
+                  description: >-
+                    Stop after this many records. Omit for a full sweep. A
+                    capped run reports complete=false and verdict=indeterminate
+                    rather than health.
+                max_duration_ms:
+                  type: integer
+                  description: Wall-clock ceiling. Defaults to 45000, max 55000 -- both held under the 60s server request timeout so the budget binds before the timeout does.
+      responses:
+        '200':
+          description: Integrity report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user_id:
+                    type: string
+                  started_at:
+                    type: string
+                    format: date-time
+                  duration_ms:
+                    type: integer
+                  complete:
+                    type: boolean
+                    description: >-
+                      False invalidates every zero-defect count below it.
+                  stop_reason:
+                    type: string
+                    nullable: true
+                  skipped:
+                    type: array
+                    items:
+                      type: string
+                    description: Column families the sweep never reached.
+                  memories:
+                    $ref: '#/components/schemas/IntegrityClassCounts'
+                  graph_nodes:
+                    $ref: '#/components/schemas/IntegrityClassCounts'
+                  checks_applied:
+                    type: array
+                    items:
+                      type: string
+                  findings:
+                    type: array
+                    items:
+                      type: object
+                  findings_truncated:
+                    type: boolean
+                  verdict:
+                    type: string
+                    enum: [healthy, aging, degraded, unhealthy, indeterminate]
+                  verdict_rule:
+                    type: string
+                    description: The numeric rule that produced the verdict.
+                  is_healthy:
+                    type: boolean
+        '400':
+          description: Invalid user_id or budget
+        '401':
+          description: Missing or invalid API key
+    get:
+      tags: [Admin]
+      summary: Last known integrity verdict per profile
+      description: >-
+        Reads the last result the scheduler (or a POST to this path) filed, and
+        starts nothing. POST costs ~14s on the largest live profile; this is
+        free to poll. worst_verdict is null when nothing has been scrubbed --
+        that is NOT healthy, and never_scrubbed names the profiles it covers,
+        so an all-healthy results list cannot hide an unchecked store. Results
+        are held in memory only and do not survive a restart; the scrub writes
+        nothing, including its own verdicts.
+      parameters:
+        - in: query
+          name: user_id
+          required: false
+          schema:
+            type: string
+          description: Restrict to one profile. Omit for every profile on disk.
+        - in: query
+          name: findings
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: >-
+            Include per-record evidence. Off by default -- up to 25 records per
+            class per profile, which is evidence for a human reading one
+            profile, not payload for a poller.
+      responses:
+        '200':
+          description: Last known verdicts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scheduler:
+                    type: object
+                    properties:
+                      enabled:
+                        type: boolean
+                      interval_secs:
+                        type: integer
+                        description: SHODH_INTEGRITY_SCRUB_INTERVAL, default 3600, 0 disables.
+                      budget_ms:
+                        type: integer
+                  worst_verdict:
+                    type: string
+                    nullable: true
+                    enum: [healthy, aging, degraded, unhealthy, indeterminate]
+                    description: >-
+                      Null means nothing has been scrubbed. A consumer that
+                      reads null as a pass has reintroduced the assumption this
+                      endpoint exists to remove.
+                  summary:
+                    type: object
+                    properties:
+                      users_with_a_result: { type: integer }
+                      healthy: { type: integer }
+                      aging: { type: integer }
+                      degraded: { type: integer }
+                      unhealthy: { type: integer }
+                      indeterminate: { type: integer }
+                      implausible_records: { type: integer }
+                      checksum_mismatch_records: { type: integer }
+                      undecodable_records: { type: integer }
+                      oldest_result_age_secs: { type: integer }
+                  never_scrubbed:
+                    type: array
+                    items:
+                      type: string
+                    description: Profiles with a store on disk and no result at all.
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        user_id: { type: string }
+                        source:
+                          type: string
+                          enum: [scheduled, on_demand]
+                        recorded_at:
+                          type: string
+                          format: date-time
+                        age_secs: { type: integer }
+                        stale:
+                          type: boolean
+                          description: >-
+                            True when the result is older than two scheduler
+                            intervals, i.e. at least one scheduled run did not
+                            happen. Always true when the scheduler is disabled.
+                        verdict:
+                          type: string
+                          enum: [healthy, aging, degraded, unhealthy, indeterminate]
+                        is_healthy: { type: boolean }
+                        complete: { type: boolean }
+                        stop_reason:
+                          type: string
+                          nullable: true
+                        skipped:
+                          type: array
+                          items: { type: string }
+                        duration_ms: { type: integer }
+                        memories:
+                          $ref: '#/components/schemas/IntegrityClassCounts'
+                        graph_nodes:
+                          $ref: '#/components/schemas/IntegrityClassCounts'
+                        verdict_rule: { type: string }
+                        findings:
+                          type: array
+                          items:
+                            type: object
+        '400':
+          description: Invalid user_id
+        '401':
+          description: Missing or invalid API key
 
   /api/index/verify:
     post:

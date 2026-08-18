@@ -748,6 +748,15 @@ pub struct MultiUserMemoryManager {
     /// in RocksDB, which survives the process; this only stops two requests in
     /// one process from racing.
     pub source_locks: DashMap<SourceId, Arc<tokio::sync::Mutex<()>>>,
+
+    /// Last known integrity-scrub result per user.
+    ///
+    /// A scheduled scrub nobody can query is a write with no reader, which is
+    /// the failure mode this codebase keeps rediscovering. Everything that runs
+    /// a scrub — the scheduler and `POST /api/integrity/scrub` alike — files
+    /// its result here, and `GET /api/integrity/scrub` reads it back without
+    /// starting a sweep.
+    scrub_ledger: Arc<crate::integrity::ScrubLedger>,
 }
 
 impl MultiUserMemoryManager {
@@ -1041,6 +1050,7 @@ impl MultiUserMemoryManager {
             consolidation_locks: DashMap::new(),
             source_store,
             source_locks: DashMap::new(),
+            scrub_ledger: Arc::new(crate::integrity::ScrubLedger::new()),
         };
 
         info!("Running initial audit log rotation...");
@@ -1826,12 +1836,7 @@ impl MultiUserMemoryManager {
         }
 
         // The deque is oldest-first; the page is newest-first.
-        let events: Vec<AuditEvent> = newest
-            .into_iter()
-            .rev()
-            .skip(offset)
-            .take(limit)
-            .collect();
+        let events: Vec<AuditEvent> = newest.into_iter().rev().skip(offset).take(limit).collect();
 
         (events, total)
     }
@@ -2660,6 +2665,170 @@ impl MultiUserMemoryManager {
     /// so we return one reference. BackupEngine handles all CFs automatically.
     pub fn collect_secondary_store_refs(&self) -> Vec<(String, std::sync::Arc<rocksdb::DB>)> {
         vec![("shared".to_string(), std::sync::Arc::clone(&self.shared_db))]
+    }
+
+    // =====================================================================
+    // INTEGRITY SCRUB
+    // =====================================================================
+
+    /// Last known scrub results, readable without starting a sweep.
+    pub fn scrub_ledger(&self) -> &Arc<crate::integrity::ScrubLedger> {
+        &self.scrub_ledger
+    }
+
+    /// Run one user's read-only integrity scrub and file the result.
+    ///
+    /// Blocking: on the largest live profile this takes ~14s, essentially all
+    /// of it iterating the shared default column family. Callers on the async
+    /// runtime must wrap it in `spawn_blocking`.
+    ///
+    /// Both RocksDB handles are cloned out and both guards released BEFORE the
+    /// sweep starts. Holding the graph read guard for the duration would stall
+    /// every graph writer, and parking_lot prefers writers, so every reader
+    /// queued behind them would stall too. RocksDB handles are internally
+    /// synchronised; the guards are needed only to reach them.
+    ///
+    /// Every outcome is filed, including the ones that conclude nothing: a user
+    /// whose store cannot be opened gets an `Indeterminate` entry rather than
+    /// keeping whatever the last successful run said.
+    pub fn scrub_user_and_record(
+        &self,
+        user_id: &str,
+        budget: crate::integrity::ScrubBudget,
+        source: crate::integrity::ScrubSource,
+    ) -> crate::integrity::IntegrityScrubReport {
+        let started_at = chrono::Utc::now();
+
+        let memory_db = match self.get_user_memory(user_id) {
+            Ok(sys) => {
+                let guard = sys.read();
+                guard.storage().raw_db().clone()
+            }
+            Err(e) => {
+                let report = crate::integrity::IntegrityScrubReport::indeterminate(
+                    user_id,
+                    started_at,
+                    format!("could not open the memory store: {e}"),
+                );
+                tracing::error!(
+                    user_id = %user_id,
+                    error = %e,
+                    "integrity scrub: store could not be opened — no health claim is possible"
+                );
+                self.scrub_ledger.record(source, report.clone());
+                return report;
+            }
+        };
+
+        // A user with no graph yet is not an error: the scrub names the column
+        // family as skipped, which forbids a `healthy` verdict rather than
+        // quietly reporting health for half the data.
+        let graph_db = self.get_user_graph(user_id).ok().map(|g| g.read().db_arc());
+
+        let report = match graph_db.as_ref().and_then(|db| {
+            db.cf_handle(crate::graph_memory::ENTITIES_CF_NAME)
+                .map(|cf| (db, cf))
+        }) {
+            Some((gdb, cf)) => {
+                crate::integrity::scrub_user(user_id, &memory_db, Some((gdb, cf)), budget)
+            }
+            None => crate::integrity::scrub_user(user_id, &memory_db, None, budget),
+        };
+
+        self.scrub_ledger.record(source, report.clone());
+        report
+    }
+
+    /// Every profile with a store on disk, scrubbed or not.
+    ///
+    /// Deliberately the filesystem and not the cache. Cached-users-only would
+    /// mean a profile is only checked if something else happened to open it,
+    /// and the profile measured unhealthiest so far is not the busiest one —
+    /// corruption at rest is exactly the case a cache-scoped sweep misses.
+    /// This mirrors `run_backup_all_users`, which walks the same directories
+    /// for the same reason.
+    pub fn profiles_on_disk(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&self.base_path) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.starts_with('.') || name == "audit_logs" || name == "backups" {
+                continue;
+            }
+            // The RocksDB data lives in a `storage/` subdirectory; a directory
+            // without one is not a profile.
+            if !path.join("storage").exists() {
+                continue;
+            }
+            out.push(name.to_string());
+        }
+        out.sort();
+        out
+    }
+
+    /// Scrub every profile on disk, filing each result as it completes.
+    ///
+    /// Results are filed per user rather than at the end, so a run that dies
+    /// half way has still refreshed the users it reached — and the scheduler
+    /// invalidates the ones it did not, so no stale verdict survives a failed
+    /// run.
+    ///
+    /// Cost note: opening a cold profile puts it in the LRU, so an hourly full
+    /// sweep can evict a warm user. That is a real cost and it is accepted
+    /// deliberately — a corruption check that only looks where someone is
+    /// already looking cannot answer "how would you know".
+    ///
+    /// Returns how many profiles were scrubbed, and the ledger summary as it
+    /// stands afterwards.
+    ///
+    /// The summary rather than a bare defect count, because the caller has to
+    /// be able to grade its alarm. `is_healthy` is false for `Aging` as well as
+    /// for `Unhealthy` — correctly, since aging data is not clean — so a
+    /// scheduler counting `!is_healthy` would log the same alarm for a store
+    /// serving fabrications and a store that merely predates a field. On the
+    /// current corpus that is every profile, every hour, forever: the alarm
+    /// fatigue this module exists to avoid.
+    pub fn run_integrity_scrub_all_users(
+        &self,
+        budget: crate::integrity::ScrubBudget,
+    ) -> (usize, crate::integrity::LedgerSummary) {
+        let mut scrubbed = 0;
+        let profiles = self.profiles_on_disk();
+        // Published before the sweep, not after: if this run dies half way the
+        // gauge already says how many profiles were meant to be covered, and
+        // the ledger says how many actually were.
+        crate::metrics::INTEGRITY_USERS_NEVER_SCRUBBED.set(
+            profiles
+                .iter()
+                .filter(|u| self.scrub_ledger.get(u).is_none())
+                .count() as i64,
+        );
+        for user_id in profiles {
+            let report = self.scrub_user_and_record(
+                &user_id,
+                budget.clone(),
+                crate::integrity::ScrubSource::Scheduled,
+            );
+            let _ = report;
+            scrubbed += 1;
+        }
+        let summary = self.scrub_ledger.summary();
+        crate::metrics::publish_integrity_scrub_metrics(&summary);
+        crate::metrics::INTEGRITY_USERS_NEVER_SCRUBBED.set(
+            self.profiles_on_disk()
+                .iter()
+                .filter(|u| self.scrub_ledger.get(u).is_none())
+                .count() as i64,
+        );
+        (scrubbed, summary)
     }
 
     /// Run backups for all active users

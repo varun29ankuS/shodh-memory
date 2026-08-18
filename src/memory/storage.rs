@@ -771,7 +771,7 @@ const MEMORY_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00, 0x00];
 /// A record recovered through the retry is reported as needing migration, so
 /// [`MemoryStorage::get`] rewrites it in the current format and no later read
 /// has to guess again.
-fn decode_postcard_memory(payload: &[u8]) -> Result<(Memory, bool)> {
+pub(crate) fn decode_postcard_memory(payload: &[u8]) -> Result<(Memory, bool)> {
     let current_err =
         match crate::serialization::decode_raw_compat::<Memory>(payload, MEMORY_DEFAULT_SUFFIX) {
             Ok((memory, defaulted)) => return Ok((memory, defaulted)),
@@ -905,8 +905,35 @@ fn deserialize_memory_checked(key: &[u8], data: &[u8]) -> Result<(Memory, bool)>
 ///
 /// Tries SHO v2 (postcard), SHO v1 (bincode 2.x), then the 17-path legacy
 /// fallback for raw bincode/msgpack data. Returns just the Memory on success.
+///
+/// # This one does NOT check the key
+///
+/// It has no key to check: [`crate::integrity`] calls it precisely because it
+/// wants the raw decode verdict before applying its own `id_key_mismatch`
+/// check, and it must classify a fabrication rather than have the decode
+/// refuse it. Any caller that holds the key and is going to act on the result
+/// wants [`deserialize_memory_for_migration_checked`] instead.
 pub fn deserialize_memory_for_migration(data: &[u8]) -> Result<Memory> {
     deserialize_memory(data).map(|(m, _)| m)
+}
+
+/// The same chain, verified against the key the value was stored under.
+///
+/// # Why the migration path in particular needs this
+///
+/// `MemoryStorage::get_opt` has checked its decodes since the CRC work, so a
+/// fabrication is never *served*. `storage::migrate_legacy` was the hole left
+/// behind: it decodes with the unchecked chain and writes the result back with
+/// `encode_sho`, under the original key. A pseudo-decoded record therefore came
+/// out the other side re-encoded, freshly checksummed, and carrying an id that
+/// is not the key it lives under — the original bytes gone, and the fabrication
+/// now wearing a valid envelope.
+///
+/// That is worse than serving one. Serving a fabrication is a wrong answer to
+/// one request; persisting it destroys the evidence a scrub needs and makes the
+/// lie durable.
+pub fn deserialize_memory_for_migration_checked(key: &[u8], data: &[u8]) -> Result<Memory> {
+    deserialize_memory_checked(key, data).map(|(m, _)| m)
 }
 
 /// Legacy MemoryFlat for bincode 2.x data written BEFORE multimodal Experience fields
@@ -1343,6 +1370,15 @@ pub struct MemoryStorage {
 }
 
 impl MemoryStorage {
+    /// Raw handle to the underlying database, for read-only maintenance passes
+    /// that must classify records at the wire level rather than through
+    /// [`Self::get`] — which lazily *rewrites* anything it decodes via a legacy
+    /// path, and would therefore persist a pseudo-decode over the original
+    /// bytes. Used by [`crate::integrity`].
+    pub(crate) fn raw_db(&self) -> &Arc<DB> {
+        &self.db
+    }
+
     /// CF accessor for the memory_index column family
     fn index_cf(&self) -> &ColumnFamily {
         self.db
@@ -1975,8 +2011,8 @@ impl MemoryStorage {
                 // id disagrees with its key is a fabrication, and the error
                 // returns BEFORE the lazy migration below so a fabrication is
                 // never written anywhere.
-                let (memory, needs_migration) =
-                    deserialize_memory_checked(key, &value).with_context(|| {
+                let (memory, needs_migration) = deserialize_memory_checked(key, &value)
+                    .with_context(|| {
                         format!(
                             "Failed to deserialize memory {} ({} bytes)",
                             id.0,
@@ -4424,6 +4460,67 @@ impl MemoryStorage {
     }
 }
 
+/// Encode a memory in the wire shape used before `NerEntityRecord::fine_label`
+/// existed, for tests only.
+///
+/// Lives at module level rather than inside `mod tests` so that
+/// [`crate::integrity`]'s tests can build the SAME bytes. A second copy of this
+/// derivation would be a second opinion about what a July record looks like,
+/// and the whole point of the fixture is that there is only one.
+#[cfg(test)]
+pub(crate) fn encode_pre_fine_label(memory: &Memory) -> Vec<u8> {
+    assert_eq!(
+        memory.experience.ner_entities.len(),
+        1,
+        "fixture expects exactly one NER record"
+    );
+    assert!(
+        memory.experience.ner_entities[0].fine_label.is_none(),
+        "the pre-fine_label format cannot carry a fine label"
+    );
+
+    let with_record = crate::serialization::encode_raw(memory).expect("encode with record");
+
+    let mut without = memory.clone();
+    without.experience.ner_entities.clear();
+    let without_record = crate::serialization::encode_raw(&without).expect("encode without");
+
+    // The encodings agree up to the `ner_entities` length varint, where one
+    // says 1 and the other 0. Everything after that varint in the
+    // record-less encoding is the shared tail (cooccurrence_pairs onward),
+    // so its length pins where the record ends in the other encoding.
+    // Deriving the tail by length rather than by scanning backwards for a
+    // common suffix matters: the record's final byte IS 0x00, so a backward
+    // scan runs straight past it into the record.
+    let prefix = with_record
+        .iter()
+        .zip(without_record.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    assert!(
+        prefix < without_record.len(),
+        "the two encodings must differ at the ner_entities length varint"
+    );
+    assert_eq!(
+        without_record[prefix], 0x00,
+        "empty ner_entities is length 0"
+    );
+    assert_eq!(with_record[prefix], 0x01, "one NER record is length 1");
+
+    let tail_len = without_record.len() - prefix - 1;
+    let record_end = with_record.len() - tail_len;
+    assert_eq!(
+        with_record[record_end - 1],
+        0x00,
+        "the last byte of the NER record must be the fine_label None marker"
+    );
+
+    let mut legacy = Vec::with_capacity(with_record.len() - 1);
+    legacy.extend_from_slice(&with_record[..record_end - 1]);
+    legacy.extend_from_slice(&with_record[record_end..]);
+    crate::serialization::wrap_sho_v2(&legacy)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4680,6 +4777,52 @@ mod tests {
         );
     }
 
+    /// The rewriting paths must refuse a pseudo-decode too.
+    ///
+    /// `get_opt` has checked its decodes since the CRC work, so a fabrication
+    /// is never served. `storage::migrate_legacy` was the hole left behind: it
+    /// decodes with the unchecked chain and writes the result back under the
+    /// original key with a fresh SHO envelope. That is strictly worse than
+    /// serving one — serving a fabrication is a wrong answer to one request,
+    /// persisting it destroys the only copy of the original bytes and gives
+    /// the lie a valid checksum.
+    ///
+    /// Fail-first: with the migration path calling
+    /// `deserialize_memory_for_migration`, the checked assertion below returns
+    /// `Ok` and this test fails on the first `expect_err`.
+    #[test]
+    fn the_rewriting_paths_refuse_a_record_that_disagrees_with_its_key() {
+        let key = uuid::Uuid::parse_str("11112222-3333-4444-8555-666677778888").expect("uuid");
+        let mut garbage = vec![0xAB_u8; 16];
+        garbage.extend_from_slice(b"hello");
+
+        // Premise, asserted rather than assumed: the entry the migration path
+        // used to call accepts this happily.
+        assert!(
+            deserialize_memory_for_migration(&garbage).is_ok(),
+            "premise: the unchecked chain fabricates a Memory from this"
+        );
+
+        // The entry it calls now does not.
+        let err = deserialize_memory_for_migration_checked(key.as_bytes(), &garbage)
+            .expect_err("a rewrite must never be fed a record that disagrees with its key");
+        assert!(
+            format!("{err:#}").contains("does not match its key"),
+            "the refusal must name the disagreement, not just fail"
+        );
+
+        // A record the real writer produced still passes, so the guard does not
+        // block the migration it exists to protect.
+        let good = sample_memory(
+            MemoryId(uuid::Uuid::parse_str("aaaabbbb-cccc-4ddd-8eee-ffff00001111").unwrap()),
+            "a record written by the writer",
+        );
+        let bytes = crate::serialization::encode_sho(&good).expect("encode");
+        let decoded = deserialize_memory_for_migration_checked(good.id.0.as_bytes(), &bytes)
+            .expect("a healthy record must migrate");
+        assert_eq!(decoded.id, good.id);
+    }
+
     #[test]
     fn a_scan_skips_the_record_whose_id_disagrees_with_its_key() {
         // The same check on the paths that SERVE results in bulk. A fabrication
@@ -4727,59 +4870,6 @@ mod tests {
     /// span ends with the `0x00` that encodes `fine_label: None` — the byte the
     /// old format did not have — so removing it yields the pre-fine_label
     /// payload without duplicating a single field declaration.
-    fn encode_pre_fine_label(memory: &Memory) -> Vec<u8> {
-        assert_eq!(
-            memory.experience.ner_entities.len(),
-            1,
-            "fixture expects exactly one NER record"
-        );
-        assert!(
-            memory.experience.ner_entities[0].fine_label.is_none(),
-            "the pre-fine_label format cannot carry a fine label"
-        );
-
-        let with_record = crate::serialization::encode_raw(memory).expect("encode with record");
-
-        let mut without = memory.clone();
-        without.experience.ner_entities.clear();
-        let without_record = crate::serialization::encode_raw(&without).expect("encode without");
-
-        // The encodings agree up to the `ner_entities` length varint, where one
-        // says 1 and the other 0. Everything after that varint in the
-        // record-less encoding is the shared tail (cooccurrence_pairs onward),
-        // so its length pins where the record ends in the other encoding.
-        // Deriving the tail by length rather than by scanning backwards for a
-        // common suffix matters: the record's final byte IS 0x00, so a backward
-        // scan runs straight past it into the record.
-        let prefix = with_record
-            .iter()
-            .zip(without_record.iter())
-            .take_while(|(a, b)| a == b)
-            .count();
-        assert!(
-            prefix < without_record.len(),
-            "the two encodings must differ at the ner_entities length varint"
-        );
-        assert_eq!(
-            without_record[prefix], 0x00,
-            "empty ner_entities is length 0"
-        );
-        assert_eq!(with_record[prefix], 0x01, "one NER record is length 1");
-
-        let tail_len = without_record.len() - prefix - 1;
-        let record_end = with_record.len() - tail_len;
-        assert_eq!(
-            with_record[record_end - 1],
-            0x00,
-            "the last byte of the NER record must be the fine_label None marker"
-        );
-
-        let mut legacy = Vec::with_capacity(with_record.len() - 1);
-        legacy.extend_from_slice(&with_record[..record_end - 1]);
-        legacy.extend_from_slice(&with_record[record_end..]);
-        crate::serialization::wrap_sho_v2(&legacy)
-    }
-
     #[test]
     fn memory_written_before_ner_fine_label_still_decodes() {
         // `NerEntityRecord::fine_label` was appended on 2026-07-12. The record
@@ -4931,9 +5021,11 @@ mod tests {
         // leaves exactly the shape the live `declared_entities`-era build wrote
         // — the records that already exist on disk.
         let without_origin = &full[..full.len() - 1];
-        let (decoded, defaulted) =
-            crate::serialization::decode_raw_compat::<Memory>(without_origin, MEMORY_DEFAULT_SUFFIX)
-                .expect("a record written before origin must decode");
+        let (decoded, defaulted) = crate::serialization::decode_raw_compat::<Memory>(
+            without_origin,
+            MEMORY_DEFAULT_SUFFIX,
+        )
+        .expect("a record written before origin must decode");
         assert!(
             defaulted,
             "the missing tail field must be reported as defaulted"
@@ -5343,7 +5435,10 @@ mod tests {
 
         let id = MemoryId(uuid::Uuid::new_v4());
         storage
-            .store(&sample_memory(id.clone(), "a memory two writers will touch"))
+            .store(&sample_memory(
+                id.clone(),
+                "a memory two writers will touch",
+            ))
             .expect("store");
 
         let parent = MemoryId(uuid::Uuid::new_v4());
@@ -5368,7 +5463,9 @@ mod tests {
                 storage
                     .modify(&id, |m| {
                         std::thread::sleep(std::time::Duration::from_millis(50));
-                        m.experience.tags.push("tagged-by-the-other-writer".to_string());
+                        m.experience
+                            .tags
+                            .push("tagged-by-the-other-writer".to_string());
                     })
                     .expect("modify tags")
             })
@@ -5404,8 +5501,14 @@ mod tests {
         let result = storage
             .modify(&missing, |_| ran = true)
             .expect("modify a missing memory is not an error");
-        assert!(result.is_none(), "modify reported a memory that never existed");
-        assert!(!ran, "the mutation ran against a memory that does not exist");
+        assert!(
+            result.is_none(),
+            "modify reported a memory that never existed"
+        );
+        assert!(
+            !ran,
+            "the mutation ran against a memory that does not exist"
+        );
         assert!(storage.get_opt(&missing).expect("get_opt").is_none());
     }
 

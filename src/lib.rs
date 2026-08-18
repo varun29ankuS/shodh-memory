@@ -36,6 +36,7 @@ pub mod graph_memory;
 pub mod handlers;
 pub mod ingest;
 pub mod integrations;
+pub mod integrity;
 pub mod kb;
 pub mod local_ipc;
 pub mod memory;
