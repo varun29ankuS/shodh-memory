@@ -490,6 +490,53 @@ components:
           type: integer
           default: 20
 
+    IntegrityClassCounts:
+      type: object
+      description: Per-record-class tallies for one column family.
+      properties:
+        keys_seen:
+          type: integer
+          description: >-
+            Keys the iterator produced, including ones that are not records of
+            this class (the memory default column family is shared with several
+            prefixed subsystem keyspaces).
+        scanned:
+          type: integer
+        clean:
+          type: integer
+        legacy:
+          type: integer
+          description: Readable only via an older wire generation.
+        implausible:
+          type: integer
+          description: >-
+            Decoded successfully into values the writer could not have
+            produced. These are served as fact, which is why they outrank
+            undecodable records in the verdict.
+        undecodable:
+          type: integer
+        checksum_mismatch:
+          type: integer
+        forgotten:
+          type: integer
+        read_errors:
+          type: integer
+          description: >-
+            Iterator failures. Non-zero means the sweep could not see every
+            record, so it cannot certify health.
+        decode_paths:
+          type: object
+          additionalProperties:
+            type: integer
+        checks_failed:
+          type: object
+          additionalProperties:
+            type: integer
+        embedding_dims:
+          type: object
+          additionalProperties:
+            type: integer
+
     MemoryStats:
       type: object
       properties:
@@ -837,6 +884,92 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MemoryStats'
+
+  /api/integrity/scrub:
+    post:
+      tags: [Admin]
+      summary: Read-only wire-level integrity scrub
+      description: >-
+        Classifies every stored memory and graph node as clean, readable only
+        via a legacy wire generation, undecodable, or decoding successfully
+        into implausible values. The fourth class is the point: a corrupted
+        record here frequently does not fail to decode, so a scrub that only
+        asks whether records decode reports that population as healthy. Full
+        sweep by default; a capped or self-erroring sweep reports
+        complete=false and can never return verdict=healthy.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - user_id
+              properties:
+                user_id:
+                  type: string
+                max_records:
+                  type: integer
+                  description: >-
+                    Stop after this many records. Omit for a full sweep. A
+                    capped run reports complete=false and verdict=indeterminate
+                    rather than health.
+                max_duration_ms:
+                  type: integer
+                  description: Wall-clock ceiling. Defaults to 45000, max 55000 -- both held under the 60s server request timeout so the budget binds before the timeout does.
+      responses:
+        '200':
+          description: Integrity report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user_id:
+                    type: string
+                  started_at:
+                    type: string
+                    format: date-time
+                  duration_ms:
+                    type: integer
+                  complete:
+                    type: boolean
+                    description: >-
+                      False invalidates every zero-defect count below it.
+                  stop_reason:
+                    type: string
+                    nullable: true
+                  skipped:
+                    type: array
+                    items:
+                      type: string
+                    description: Column families the sweep never reached.
+                  memories:
+                    $ref: '#/components/schemas/IntegrityClassCounts'
+                  graph_nodes:
+                    $ref: '#/components/schemas/IntegrityClassCounts'
+                  checks_applied:
+                    type: array
+                    items:
+                      type: string
+                  findings:
+                    type: array
+                    items:
+                      type: object
+                  findings_truncated:
+                    type: boolean
+                  verdict:
+                    type: string
+                    enum: [healthy, aging, degraded, unhealthy, indeterminate]
+                  verdict_rule:
+                    type: string
+                    description: The numeric rule that produced the verdict.
+                  is_healthy:
+                    type: boolean
+        '400':
+          description: Invalid user_id or budget
+        '401':
+          description: Missing or invalid API key
 
   /api/index/verify:
     post:

@@ -771,7 +771,7 @@ const MEMORY_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00, 0x00];
 /// A record recovered through the retry is reported as needing migration, so
 /// [`MemoryStorage::get`] rewrites it in the current format and no later read
 /// has to guess again.
-fn decode_postcard_memory(payload: &[u8]) -> Result<(Memory, bool)> {
+pub(crate) fn decode_postcard_memory(payload: &[u8]) -> Result<(Memory, bool)> {
     let current_err =
         match crate::serialization::decode_raw_compat::<Memory>(payload, MEMORY_DEFAULT_SUFFIX) {
             Ok((memory, defaulted)) => return Ok((memory, defaulted)),
@@ -1343,6 +1343,15 @@ pub struct MemoryStorage {
 }
 
 impl MemoryStorage {
+    /// Raw handle to the underlying database, for read-only maintenance passes
+    /// that must classify records at the wire level rather than through
+    /// [`Self::get`] — which lazily *rewrites* anything it decodes via a legacy
+    /// path, and would therefore persist a pseudo-decode over the original
+    /// bytes. Used by [`crate::integrity`].
+    pub(crate) fn raw_db(&self) -> &Arc<DB> {
+        &self.db
+    }
+
     /// CF accessor for the memory_index column family
     fn index_cf(&self) -> &ColumnFamily {
         self.db
@@ -1975,8 +1984,8 @@ impl MemoryStorage {
                 // id disagrees with its key is a fabrication, and the error
                 // returns BEFORE the lazy migration below so a fabrication is
                 // never written anywhere.
-                let (memory, needs_migration) =
-                    deserialize_memory_checked(key, &value).with_context(|| {
+                let (memory, needs_migration) = deserialize_memory_checked(key, &value)
+                    .with_context(|| {
                         format!(
                             "Failed to deserialize memory {} ({} bytes)",
                             id.0,
@@ -4931,9 +4940,11 @@ mod tests {
         // leaves exactly the shape the live `declared_entities`-era build wrote
         // — the records that already exist on disk.
         let without_origin = &full[..full.len() - 1];
-        let (decoded, defaulted) =
-            crate::serialization::decode_raw_compat::<Memory>(without_origin, MEMORY_DEFAULT_SUFFIX)
-                .expect("a record written before origin must decode");
+        let (decoded, defaulted) = crate::serialization::decode_raw_compat::<Memory>(
+            without_origin,
+            MEMORY_DEFAULT_SUFFIX,
+        )
+        .expect("a record written before origin must decode");
         assert!(
             defaulted,
             "the missing tail field must be reported as defaulted"
@@ -5343,7 +5354,10 @@ mod tests {
 
         let id = MemoryId(uuid::Uuid::new_v4());
         storage
-            .store(&sample_memory(id.clone(), "a memory two writers will touch"))
+            .store(&sample_memory(
+                id.clone(),
+                "a memory two writers will touch",
+            ))
             .expect("store");
 
         let parent = MemoryId(uuid::Uuid::new_v4());
@@ -5368,7 +5382,9 @@ mod tests {
                 storage
                     .modify(&id, |m| {
                         std::thread::sleep(std::time::Duration::from_millis(50));
-                        m.experience.tags.push("tagged-by-the-other-writer".to_string());
+                        m.experience
+                            .tags
+                            .push("tagged-by-the-other-writer".to_string());
                     })
                     .expect("modify tags")
             })
@@ -5404,8 +5420,14 @@ mod tests {
         let result = storage
             .modify(&missing, |_| ran = true)
             .expect("modify a missing memory is not an error");
-        assert!(result.is_none(), "modify reported a memory that never existed");
-        assert!(!ran, "the mutation ran against a memory that does not exist");
+        assert!(
+            result.is_none(),
+            "modify reported a memory that never existed"
+        );
+        assert!(
+            !ran,
+            "the mutation ran against a memory that does not exist"
+        );
         assert!(storage.get_opt(&missing).expect("get_opt").is_none());
     }
 

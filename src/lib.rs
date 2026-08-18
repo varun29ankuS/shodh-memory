@@ -35,6 +35,7 @@ pub mod gazetteer;
 pub mod graph_memory;
 pub mod handlers;
 pub mod integrations;
+pub mod integrity;
 pub mod kb;
 pub mod local_ipc;
 pub mod memory;

@@ -1480,6 +1480,18 @@ fn decode_entity_node(data: &[u8]) -> Result<(EntityNode, bool)> {
     }
 }
 
+/// [`decode_entity_node`] exposed to the read-only integrity scrub.
+///
+/// The scrub must classify graph nodes through the *same* decoder that serves
+/// reads — a second copy would drift, and then the scrub would be measuring a
+/// decoder nobody uses. Returns `(node, needs_migration)`.
+pub(crate) fn decode_entity_node_for_scrub(data: &[u8]) -> Result<(EntityNode, bool)> {
+    decode_entity_node(data)
+}
+
+/// Name of the column family holding entity nodes, for the read-only scrub.
+pub(crate) const ENTITIES_CF_NAME: &str = CF_ENTITIES;
+
 fn default_last_activated() -> DateTime<Utc> {
     Utc::now()
 }
@@ -2882,6 +2894,19 @@ impl GraphMemory {
     /// Get a reference to the underlying RocksDB instance (for backup/checkpoint).
     pub fn get_db(&self) -> &DB {
         &self.db
+    }
+
+    /// An owned handle to the graph database, so a long read-only pass can run
+    /// without holding the `RwLock` that guards this `GraphMemory`.
+    ///
+    /// [`Self::get_db`] returns a borrow, which keeps the guard alive for the
+    /// duration of the pass. Graph writers take `.write()` on that lock, and
+    /// parking_lot prefers writers, so one multi-second scrub holding a read
+    /// guard would stall every subsequent reader behind the blocked writer.
+    /// RocksDB handles are internally synchronised; the lock is not what makes
+    /// this database safe to read. Used by [`crate::integrity`].
+    pub(crate) fn db_arc(&self) -> Arc<DB> {
+        Arc::clone(&self.db)
     }
 
     // Column family accessors — cheap HashMap lookups on DB internals

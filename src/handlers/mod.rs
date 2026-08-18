@@ -45,6 +45,7 @@ pub mod webhooks;
 
 // External integrations
 pub mod integrations;
+pub mod integrity;
 
 // Session and user management
 pub mod sessions;
