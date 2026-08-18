@@ -460,8 +460,16 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
                 }
             }
 
-            // Try to deserialize with the full legacy fallback chain
-            match crate::memory::storage::deserialize_memory_for_migration(&value) {
+            // The full legacy fallback chain, CHECKED against the key.
+            //
+            // This branch rewrites what it decodes. The chain's last shapes
+            // derive the record's id from the VALUE, so a pseudo-decode
+            // produces a `Memory` whose id is not the key it was found under —
+            // and rewriting it here would encode that fabrication in the
+            // current format, with a valid CRC, over the only copy of the
+            // original bytes. A record that cannot be trusted is left exactly
+            // as it is, and reported, so the scrub can still see it.
+            match crate::memory::storage::deserialize_memory_for_migration_checked(&key, &value) {
                 Ok(memory) => {
                     if !dry_run {
                         let new_value = serialization::encode_sho(&memory)?;

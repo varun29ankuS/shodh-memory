@@ -710,6 +710,53 @@ mod tests {
         env::remove_var("SHODH_MAX_USERS");
     }
 
+    /// The interval env var is actually read.
+    ///
+    /// Not a formality. `RAYON_NUM_THREADS` appears in this crate's docs and
+    /// is read by nothing, so "an env var with this name exists" is not
+    /// evidence that setting it does anything. A knob that lies is worse than
+    /// no knob: it produces confident operators running the default.
+    ///
+    /// Holds `crate::auth::ENV_LOCK` because `set_var` is process-global and
+    /// every other env test in this crate serialises on it.
+    #[test]
+    fn config_reads_the_integrity_scrub_interval() {
+        let _guard = crate::auth::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // The default has to be a real value, not zero-by-accident.
+        env::remove_var("SHODH_INTEGRITY_SCRUB_INTERVAL");
+        assert_eq!(
+            ServerConfig::from_env().integrity_scrub_interval_secs,
+            3600,
+            "the default must schedule scrubs, not disable them"
+        );
+
+        env::set_var("SHODH_INTEGRITY_SCRUB_INTERVAL", "900");
+        assert_eq!(
+            ServerConfig::from_env().integrity_scrub_interval_secs,
+            900,
+            "the value set in the environment must reach the config"
+        );
+
+        // 0 is a deliberate off switch, and must survive as 0 rather than
+        // being clamped back to the default.
+        env::set_var("SHODH_INTEGRITY_SCRUB_INTERVAL", "0");
+        assert_eq!(ServerConfig::from_env().integrity_scrub_interval_secs, 0);
+
+        // Garbage keeps the default rather than silently disabling the scrub,
+        // which is the failure mode a bare `parse().unwrap_or(0)` would have.
+        env::set_var("SHODH_INTEGRITY_SCRUB_INTERVAL", "hourly");
+        assert_eq!(
+            ServerConfig::from_env().integrity_scrub_interval_secs,
+            3600,
+            "an unparseable interval must not turn the scheduler off"
+        );
+
+        env::remove_var("SHODH_INTEGRITY_SCRUB_INTERVAL");
+    }
+
     #[test]
     fn test_cors_default_is_permissive() {
         let cors = CorsConfig::default();

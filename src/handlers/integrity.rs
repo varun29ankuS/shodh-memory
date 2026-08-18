@@ -265,7 +265,9 @@ pub async fn last_scrub(
 
 #[cfg(test)]
 mod tests {
-    use crate::handlers::test_helpers::{post_json, send, send_typed, TestHarness, TEST_API_KEY};
+    use crate::handlers::test_helpers::{
+        get, post_json, send, send_typed, TestHarness, TEST_API_KEY,
+    };
     use crate::integrity::{IntegrityScrubReport, Verdict};
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
@@ -366,5 +368,142 @@ mod tests {
             assert_ne!(report.verdict, Verdict::Healthy);
             assert!(!report.is_healthy);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // THE READER
+    //
+    // A scheduled scrub nobody can query is the same write-then-never-read
+    // failure that runs through this codebase. These pin that it is readable,
+    // that reading it starts nothing, and that absence is visible.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_scrub_files_its_result_where_the_reader_can_find_it() {
+        let harness = TestHarness::new();
+
+        let (status, _): (StatusCode, IntegrityScrubReport) = send_typed(
+            harness.router(),
+            post_json("/api/integrity/scrub", &json!({ "user_id": "scrub-test" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = send(harness.router(), get("/api/integrity/scrub")).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let results = body["results"].as_array().expect("results array");
+        let mine = results
+            .iter()
+            .find(|r| r["user_id"] == "scrub-test")
+            .expect("the run that just happened must be readable afterwards");
+        assert_eq!(
+            mine["source"], "on_demand",
+            "the reader must say who asked, so a scheduled verdict is \
+             distinguishable from one a human triggered"
+        );
+        assert!(mine["verdict"].is_string());
+        assert!(
+            mine["recorded_at"].is_string(),
+            "a verdict with no timestamp cannot be told apart from a stale one"
+        );
+        assert!(mine["age_secs"].is_number());
+        assert!(
+            body["worst_verdict"].is_string(),
+            "with a result on file the worst verdict is a verdict"
+        );
+    }
+
+    /// Reading must not start a sweep.
+    ///
+    /// The whole point of a separate GET is that polling it is free. If it ran
+    /// a scrub it would be a ~14s request on the largest live profile, and a
+    /// dashboard refreshing every 30s would keep one blocking thread busy
+    /// forever.
+    #[tokio::test]
+    async fn reading_the_last_scrub_starts_nothing() {
+        let harness = TestHarness::new();
+
+        let (status, body) = send(harness.router(), get("/api/integrity/scrub")).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["results"].as_array().map(|a| a.len()),
+            Some(0),
+            "a GET before any scrub must report that none has run, not run one"
+        );
+        assert!(
+            body["worst_verdict"].is_null(),
+            "nothing scrubbed is NOT healthy; the reader must return null so a \
+             consumer cannot mistake absence for a pass"
+        );
+        assert_eq!(body["summary"]["users_with_a_result"], 0);
+    }
+
+    /// The scheduler's configuration travels with the results.
+    ///
+    /// Without it, "everything healthy, one result, filed four days ago" reads
+    /// as a healthy system instead of as a scheduler that stopped.
+    #[tokio::test]
+    async fn the_reader_states_whether_anything_is_scheduled() {
+        let harness = TestHarness::new();
+        let (status, body) = send(harness.router(), get("/api/integrity/scrub")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["scheduler"]["enabled"].is_boolean());
+        assert!(body["scheduler"]["interval_secs"].is_number());
+        assert_eq!(
+            body["scheduler"]["budget_ms"],
+            crate::integrity::SCHEDULED_MAX_DURATION_MS
+        );
+    }
+
+    #[tokio::test]
+    async fn reading_the_last_scrub_requires_authentication() {
+        let harness = TestHarness::new();
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/integrity/scrub")
+            .body(Body::empty())
+            .unwrap();
+        let (status, _) = send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(!TEST_API_KEY.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reading_rejects_an_invalid_user_id() {
+        let harness = TestHarness::new();
+        let (status, body) = send(
+            harness.router(),
+            get("/api/integrity/scrub?user_id=../../etc"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_INPUT");
+    }
+
+    /// Findings are opt-in.
+    ///
+    /// On an unhealthy store they are up to `FINDINGS_PER_CLASS` records per
+    /// class per profile — evidence for a human reading one profile, not
+    /// payload for a poller.
+    #[tokio::test]
+    async fn findings_are_off_by_default_and_available_on_request() {
+        let harness = TestHarness::new();
+        let (status, _): (StatusCode, IntegrityScrubReport) = send_typed(
+            harness.router(),
+            post_json("/api/integrity/scrub", &json!({ "user_id": "scrub-test" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, plain) = send(harness.router(), get("/api/integrity/scrub")).await;
+        assert!(plain["results"][0]["findings"].is_null());
+
+        let (_, detailed) = send(harness.router(), get("/api/integrity/scrub?findings=true")).await;
+        assert!(
+            detailed["results"][0]["findings"].is_array(),
+            "the evidence must be reachable, or the verdict is unfalsifiable"
+        );
     }
 }

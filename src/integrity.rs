@@ -2185,4 +2185,293 @@ mod tests {
         let counts = scrub_memories(storage.raw_db(), &mut sweep);
         assert_eq!(counts.clean, 2);
     }
+
+    // -----------------------------------------------------------------------
+    // MERGE RECONCILIATION
+    //
+    // The scrub forked before the CRC/envelope work landed. These pin the two
+    // places where the two lines of work classify the same records.
+    // -----------------------------------------------------------------------
+
+    /// A memory written before `NerEntityRecord::fine_label` existed is
+    /// `Legacy`, not `Undecodable`.
+    ///
+    /// The scrub used to call `decode_raw_compat` directly, which is the
+    /// decoder as it stood *before* the July retry was added. The running
+    /// server reads this record without difficulty; a scrub reporting it broken
+    /// would be measuring a decoder nobody runs, and on a store full of
+    /// pre-July NER records that is the difference between an alarm and a
+    /// maintenance note.
+    ///
+    /// Fixture: `storage::encode_pre_fine_label`, the same bytes
+    /// `memory_written_before_ner_fine_label_still_decodes` asserts against.
+    /// One derivation of what a July record looks like, not two.
+    #[test]
+    fn a_pre_fine_label_record_is_legacy_not_undecodable() {
+        use crate::memory::types::NerEntityRecord;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = memory_db(dir.path());
+
+        let mut memory = memory_with("the Dali struck the Key Bridge");
+        memory.experience.ner_entities = vec![NerEntityRecord {
+            text: "Key Bridge".to_string(),
+            entity_type: "LOC".to_string(),
+            confidence: 0.87,
+            start_char: Some(19),
+            end_char: Some(29),
+            fine_label: None,
+        }];
+        memory.experience.cooccurrence_pairs = vec![("Dali".to_string(), "Key Bridge".to_string())];
+        let bytes = crate::memory::storage::encode_pre_fine_label(&memory);
+        db.put(memory.id.0.as_bytes(), &bytes).unwrap();
+
+        let mut sweep = Sweep::new(budget());
+        let counts = scrub_memories(&db, &mut sweep);
+
+        assert_eq!(counts.scanned, 1);
+        assert_eq!(
+            counts.undecodable, 0,
+            "the production decoder reads this record; reporting it broken \
+             would be measuring a decoder nobody runs. decode_paths: {:?}",
+            counts.decode_paths
+        );
+        assert_eq!(counts.implausible, 0, "checks: {:?}", counts.checks_failed);
+        assert_eq!(counts.legacy, 1, "it decoded, but only via the July retry");
+        assert_eq!(counts.decode_paths.get("sho_v2_postcard_compat"), Some(&1));
+        assert_eq!(
+            decide(&counts, &ClassCounts::default(), true),
+            Verdict::Aging,
+            "a readable old-generation record is a countdown, not an outage"
+        );
+    }
+
+    /// `ShoEnvelope::Truncated` maps onto `RecordClass::ChecksumMismatch`, and
+    /// must NOT be laundered through the legacy chain.
+    ///
+    /// SHO magic with no room for a payload is damaged data. Mapped to `Absent`
+    /// it would reach `try_raw_memory_parse`, which fabricates a `Memory` from
+    /// any sixteen-plus bytes handed to it -- the precise laundering the
+    /// envelope split exists to stop.
+    #[test]
+    fn a_truncated_envelope_is_damaged_not_pseudo_decoded() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = memory_db(dir.path());
+
+        let key = Uuid::new_v4();
+        // Magic + version, and nothing else: no payload, no CRC trailer.
+        let mut short = crate::memory::storage::STORAGE_MAGIC.to_vec();
+        short.push(crate::serialization::SHO_VERSION_POSTCARD);
+        assert!(
+            short.len() < 8,
+            "the fixture must sit below the envelope floor"
+        );
+        db.put(key.as_bytes(), &short).unwrap();
+
+        let mut sweep = Sweep::new(budget());
+        let counts = scrub_memories(&db, &mut sweep);
+
+        assert_eq!(counts.scanned, 1);
+        assert_eq!(
+            counts.checksum_mismatch, 1,
+            "paths: {:?}",
+            counts.decode_paths
+        );
+        assert_eq!(counts.clean, 0);
+        assert_eq!(
+            counts.legacy, 0,
+            "a damaged envelope must never reach the fabricating fallback chain"
+        );
+        assert_eq!(counts.decode_paths.get("sho_truncated"), Some(&1));
+        assert_eq!(
+            decide(&counts, &ClassCounts::default(), true),
+            Verdict::Unhealthy
+        );
+    }
+
+    /// The two corrupt envelope states share one `RecordClass` because no
+    /// verdict rule separates them, but they keep separate decode paths so a
+    /// bit flip is still distinguishable from a short write.
+    #[test]
+    fn a_crc_mismatch_and_a_truncation_share_a_class_but_not_a_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = memory_db(dir.path());
+
+        let m = memory_with("a record that gets corrupted after it is written");
+        let mut bytes = crate::serialization::encode_sho(&m).unwrap();
+        // Flip a payload bit; the trailer still carries the original CRC.
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xFF;
+        db.put(m.id.0.as_bytes(), &bytes).unwrap();
+
+        let short_key = Uuid::new_v4();
+        let mut short = crate::memory::storage::STORAGE_MAGIC.to_vec();
+        short.push(crate::serialization::SHO_VERSION_POSTCARD);
+        db.put(short_key.as_bytes(), &short).unwrap();
+
+        let mut sweep = Sweep::new(budget());
+        let counts = scrub_memories(&db, &mut sweep);
+
+        assert_eq!(counts.checksum_mismatch, 2);
+        assert_eq!(counts.decode_paths.get("sho_crc_mismatch"), Some(&1));
+        assert_eq!(counts.decode_paths.get("sho_truncated"), Some(&1));
+    }
+
+    // -----------------------------------------------------------------------
+    // THE LEDGER
+    //
+    // A scheduled run that dies must not leave a stale "healthy" standing as
+    // the last known state.
+    // -----------------------------------------------------------------------
+
+    fn report_with(user_id: &str, verdict: Verdict) -> IntegrityScrubReport {
+        IntegrityScrubReport {
+            user_id: user_id.to_string(),
+            started_at: Utc::now(),
+            duration_ms: 1,
+            complete: verdict != Verdict::Indeterminate,
+            stop_reason: None,
+            skipped: Vec::new(),
+            memories: ClassCounts::default(),
+            graph_nodes: ClassCounts::default(),
+            checks_applied: Vec::new(),
+            findings: Vec::new(),
+            findings_truncated: false,
+            verdict,
+            verdict_rule: verdict_rule_text(),
+            is_healthy: verdict == Verdict::Healthy,
+        }
+    }
+
+    #[test]
+    fn a_dead_run_invalidates_every_result_it_should_have_refreshed() {
+        let ledger = ScrubLedger::new();
+        ledger.record(
+            ScrubSource::Scheduled,
+            report_with("alice", Verdict::Healthy),
+        );
+
+        // The next scheduled run starts, and dies before reaching alice.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let run_started_at = Utc::now();
+        let invalidated =
+            ledger.fail_runs_started_before(run_started_at, "the run panicked in RocksDB");
+
+        assert_eq!(invalidated, 1);
+        let after = ledger.get("alice").expect("the entry must still exist");
+        assert_eq!(
+            after.report.verdict,
+            Verdict::Indeterminate,
+            "a healthy verdict the dead run should have refreshed is no longer \
+             a claim anyone can stand behind"
+        );
+        assert!(!after.report.is_healthy);
+        assert!(!after.report.complete);
+        assert!(after
+            .report
+            .stop_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("panicked")));
+    }
+
+    #[test]
+    fn a_result_filed_during_a_run_survives_that_run_dying() {
+        let ledger = ScrubLedger::new();
+        let run_started_at = Utc::now();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        // alice was reached before the panic, so her result IS fresh.
+        ledger.record(
+            ScrubSource::Scheduled,
+            report_with("alice", Verdict::Healthy),
+        );
+
+        let invalidated = ledger.fail_runs_started_before(run_started_at, "panic");
+
+        assert_eq!(
+            invalidated, 0,
+            "invalidating a result the dead run actually produced would replace \
+             evidence with an apology"
+        );
+        assert_eq!(
+            ledger.get("alice").unwrap().report.verdict,
+            Verdict::Healthy
+        );
+    }
+
+    #[test]
+    fn nothing_scrubbed_is_not_healthy() {
+        let ledger = ScrubLedger::new();
+        assert_eq!(
+            ledger.worst_verdict(),
+            None,
+            "an empty ledger must not answer Healthy; the caller has to be able \
+             to see that nothing has looked"
+        );
+        assert_eq!(ledger.summary().users_with_a_result, 0);
+    }
+
+    #[test]
+    fn indeterminate_outranks_aging_in_the_worst_verdict() {
+        let ledger = ScrubLedger::new();
+        ledger.record(ScrubSource::Scheduled, report_with("a", Verdict::Aging));
+        ledger.record(
+            ScrubSource::Scheduled,
+            report_with("b", Verdict::Indeterminate),
+        );
+        assert_eq!(
+            ledger.worst_verdict(),
+            Some(Verdict::Indeterminate),
+            "could-not-check is worse news than some-records-are-old"
+        );
+
+        ledger.record(ScrubSource::Scheduled, report_with("c", Verdict::Unhealthy));
+        assert_eq!(ledger.worst_verdict(), Some(Verdict::Unhealthy));
+    }
+
+    #[test]
+    fn the_summary_counts_defects_across_every_profile() {
+        let ledger = ScrubLedger::new();
+        let mut r = report_with("a", Verdict::Unhealthy);
+        r.memories.implausible = 21;
+        r.graph_nodes.undecodable = 160;
+        ledger.record(ScrubSource::Scheduled, r);
+        ledger.record(ScrubSource::OnDemand, report_with("b", Verdict::Healthy));
+
+        let s = ledger.summary();
+        assert_eq!(s.users_with_a_result, 2);
+        assert_eq!(s.unhealthy, 1);
+        assert_eq!(s.healthy, 1);
+        assert_eq!(s.implausible_records, 21);
+        assert_eq!(s.undecodable_records, 160);
+    }
+
+    #[test]
+    fn an_indeterminate_report_never_claims_health() {
+        let started = Utc::now();
+        let r = IntegrityScrubReport::indeterminate("alice", started, "store locked".to_string());
+        assert_eq!(r.verdict, Verdict::Indeterminate);
+        assert!(!r.is_healthy);
+        assert!(!r.complete);
+        assert_eq!(r.stop_reason.as_deref(), Some("store locked"));
+        assert!(
+            !r.skipped.is_empty(),
+            "a report that scanned nothing must name what it did not scan"
+        );
+    }
+
+    /// The scheduled budget must not silently inherit the request-shaped one.
+    #[test]
+    fn the_scheduled_budget_is_sized_for_the_scheduler_not_the_request_timeout() {
+        assert!(
+            SCHEDULED_MAX_DURATION_MS > DEFAULT_MAX_DURATION_MS,
+            "the 45s endpoint ceiling exists to fit inside the HTTP request \
+             timeout, which a scheduled run is not subject to"
+        );
+        // 14.2s is the measured worst case on the largest live profile.
+        assert!(
+            SCHEDULED_MAX_DURATION_MS >= 142_000,
+            "the budget must leave an order of magnitude of growth over the \
+             measured sweep before a profile starts reporting indeterminate"
+        );
+    }
 }
