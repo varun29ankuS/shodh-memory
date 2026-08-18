@@ -1205,6 +1205,228 @@ pub fn scrub_user(
 }
 
 // ---------------------------------------------------------------------------
+// Last known result
+// ---------------------------------------------------------------------------
+
+/// Wall-clock ceiling for a scrub the scheduler starts, in milliseconds.
+///
+/// Deliberately not [`DEFAULT_MAX_DURATION_MS`]. That 45s ceiling is shaped by
+/// the server's `TimeoutLayer`: a request-driven scrub must finish inside the
+/// request budget or be killed and return nothing. A scheduled scrub is not on
+/// a request, so the only thing the ceiling has to beat is the interval — a
+/// sweep still running when the next tick fires would stack. 300s is ~20x the
+/// measured 14.2s worst case and 1/12th of the default hourly interval, which
+/// leaves a store an order of magnitude larger than today's still finishing
+/// inside one tick.
+///
+/// The budget is not a sampling knob. A sweep that spends it reports
+/// `complete: false` with a `stop_reason`, and [`decide`] refuses to certify
+/// health on it.
+pub const SCHEDULED_MAX_DURATION_MS: u64 = 300_000;
+
+/// Who asked for a scrub.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrubSource {
+    /// The background scheduler.
+    Scheduled,
+    /// A `POST /api/integrity/scrub` call.
+    OnDemand,
+}
+
+/// The last thing a scrub of one user is known to have concluded.
+///
+/// Held in memory only. Persisting a verdict would mean writing into a store
+/// whose integrity is the thing under question, and this module's entire
+/// contract is that it does not write. The cost is that a restart erases
+/// history, which is why the reader renders "never scrubbed" as a visible
+/// state rather than as an empty list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LastScrub {
+    pub source: ScrubSource,
+    /// When the result was filed, which is when the run FINISHED.
+    /// `report.started_at` is when it began; both are needed to tell a slow
+    /// sweep from a stale one.
+    pub recorded_at: DateTime<Utc>,
+    pub report: IntegrityScrubReport,
+}
+
+impl IntegrityScrubReport {
+    /// The report a run that could not produce one leaves behind.
+    ///
+    /// A scheduled scrub that panics, or whose store cannot be opened, must not
+    /// leave the previous `healthy` standing as the last known state — that is
+    /// the same lie as a sampled sweep reporting zero defects. There is no
+    /// verdict to give, so the verdict is [`Verdict::Indeterminate`] and the
+    /// reason travels with it.
+    pub fn indeterminate(user_id: &str, started_at: DateTime<Utc>, reason: String) -> Self {
+        Self {
+            user_id: user_id.to_string(),
+            started_at,
+            duration_ms: (Utc::now() - started_at).num_milliseconds().max(0) as u64,
+            complete: false,
+            stop_reason: Some(reason),
+            skipped: vec!["memories".to_string(), "graph:entities".to_string()],
+            memories: ClassCounts::default(),
+            graph_nodes: ClassCounts::default(),
+            checks_applied: Vec::new(),
+            findings: Vec::new(),
+            findings_truncated: false,
+            verdict: Verdict::Indeterminate,
+            verdict_rule: verdict_rule_text(),
+            is_healthy: false,
+        }
+    }
+}
+
+/// Every user's last known scrub result, and the machinery that keeps it
+/// honest.
+///
+/// The failure this guards against is specific: a scheduled sweep that dies
+/// leaves the previous result in place, and a stale `healthy` is
+/// indistinguishable from a fresh one unless something says otherwise. Two
+/// mechanisms say otherwise — [`Self::fail_runs_started_before`], which
+/// overwrites every result the dead run should have refreshed, and
+/// `recorded_at`, which lets a reader see the age of anything that survived.
+#[derive(Debug, Default)]
+pub struct ScrubLedger {
+    entries: parking_lot::RwLock<BTreeMap<String, LastScrub>>,
+}
+
+impl ScrubLedger {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// File a result. Called for EVERY completed attempt, including the ones
+    /// that concluded nothing.
+    pub fn record(&self, source: ScrubSource, report: IntegrityScrubReport) {
+        let entry = LastScrub {
+            source,
+            recorded_at: Utc::now(),
+            report,
+        };
+        self.entries
+            .write()
+            .insert(entry.report.user_id.clone(), entry);
+    }
+
+    /// Replace every result a run should have refreshed but did not.
+    ///
+    /// Called when a scheduled run dies part-way: the users it already reached
+    /// have results newer than `run_started_at` and keep them, and every user it
+    /// never reached is stamped indeterminate with the reason. Without this a
+    /// scheduler that panics on its first user would leave a month-old
+    /// `healthy` as the standing answer to "is the store intact", which is
+    /// precisely the write-then-never-check failure the scrub exists to end.
+    ///
+    /// Returns how many entries were invalidated.
+    pub fn fail_runs_started_before(&self, run_started_at: DateTime<Utc>, reason: &str) -> usize {
+        let mut guard = self.entries.write();
+        let stale: Vec<String> = guard
+            .iter()
+            .filter(|(_, e)| e.recorded_at < run_started_at)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for user_id in &stale {
+            guard.insert(
+                user_id.clone(),
+                LastScrub {
+                    source: ScrubSource::Scheduled,
+                    recorded_at: Utc::now(),
+                    report: IntegrityScrubReport::indeterminate(
+                        user_id,
+                        run_started_at,
+                        reason.to_string(),
+                    ),
+                },
+            );
+        }
+        stale.len()
+    }
+
+    /// One user's last known result, without running anything.
+    pub fn get(&self, user_id: &str) -> Option<LastScrub> {
+        self.entries.read().get(user_id).cloned()
+    }
+
+    /// Every last known result, user id order.
+    pub fn all(&self) -> Vec<LastScrub> {
+        self.entries.read().values().cloned().collect()
+    }
+
+    /// The worst verdict currently on file, or `None` when nothing has been
+    /// scrubbed. `None` is NOT healthy and the reader must not render it as
+    /// such.
+    pub fn worst_verdict(&self) -> Option<Verdict> {
+        self.entries
+            .read()
+            .values()
+            .map(|e| e.report.verdict)
+            .max_by_key(severity)
+    }
+
+    /// Aggregate counts for metrics and for the health surface.
+    pub fn summary(&self) -> LedgerSummary {
+        let guard = self.entries.read();
+        let mut s = LedgerSummary::default();
+        for e in guard.values() {
+            s.users_with_a_result += 1;
+            match e.report.verdict {
+                Verdict::Healthy => s.healthy += 1,
+                Verdict::Aging => s.aging += 1,
+                Verdict::Degraded => s.degraded += 1,
+                Verdict::Unhealthy => s.unhealthy += 1,
+                Verdict::Indeterminate => s.indeterminate += 1,
+            }
+            s.implausible_records +=
+                e.report.memories.implausible + e.report.graph_nodes.implausible;
+            s.checksum_mismatch_records +=
+                e.report.memories.checksum_mismatch + e.report.graph_nodes.checksum_mismatch;
+            s.undecodable_records +=
+                e.report.memories.undecodable + e.report.graph_nodes.undecodable;
+            let age = (Utc::now() - e.recorded_at).num_seconds().max(0) as u64;
+            s.oldest_result_age_secs = s.oldest_result_age_secs.max(age);
+        }
+        s
+    }
+}
+
+/// Severity order for [`ScrubLedger::worst_verdict`].
+///
+/// NOT the declaration order of [`Verdict`], and not `Ord` on the enum either:
+/// `Indeterminate` has to outrank `Aging`, because "we could not check" is a
+/// worse thing to be told than "some records are old". Deriving `Ord` would
+/// bury that decision in variant order, where the next person to add a variant
+/// would silently change it.
+fn severity(v: &Verdict) -> u8 {
+    match v {
+        Verdict::Healthy => 0,
+        Verdict::Aging => 1,
+        Verdict::Degraded => 2,
+        Verdict::Indeterminate => 3,
+        Verdict::Unhealthy => 4,
+    }
+}
+
+/// Aggregates over every filed result.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LedgerSummary {
+    pub users_with_a_result: u64,
+    pub healthy: u64,
+    pub aging: u64,
+    pub degraded: u64,
+    pub unhealthy: u64,
+    pub indeterminate: u64,
+    pub implausible_records: u64,
+    pub checksum_mismatch_records: u64,
+    pub undecodable_records: u64,
+    /// Age of the oldest result on file. A large value means the scheduler is
+    /// not running, whatever the verdicts say.
+    pub oldest_result_age_secs: u64,
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

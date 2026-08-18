@@ -202,7 +202,14 @@ pub fn build_protected_routes(state: AppState) -> Router {
         // Complementary to /api/index/verify, which only compares membership
         // between storage and the vector index and cannot see a record that
         // decodes successfully into the wrong thing.
-        .route("/api/integrity/scrub", post(integrity::scrub))
+        // GET is a read of the last known verdict and starts nothing; POST
+        // runs a fresh sweep. Both file into the same ledger, so a scheduled
+        // run and a manual one are indistinguishable to the reader except by
+        // the `source` field.
+        .route(
+            "/api/integrity/scrub",
+            post(integrity::scrub).get(integrity::last_scrub),
+        )
         // =================================================================
         // CONSOLIDATION & BACKUPS
         // =================================================================

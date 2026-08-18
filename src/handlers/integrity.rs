@@ -12,13 +12,17 @@
 //!   wrote", which no audit trail can tell you: the July breakage changed no
 //!   record at all, it changed the schema that reads them.
 
-use axum::extract::State;
+use std::collections::BTreeSet;
+
+use axum::extract::{Query, State};
 use axum::response::Json;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::errors::{AppError, ValidationErrorExt};
 use crate::handlers::state::MultiUserMemoryManager;
-use crate::integrity::{self, IntegrityScrubReport, ScrubBudget};
+use crate::integrity::{
+    self, IntegrityScrubReport, LastScrub, LedgerSummary, ScrubBudget, ScrubSource, Verdict,
+};
 use crate::validation;
 
 pub type AppState = std::sync::Arc<MultiUserMemoryManager>;
@@ -77,47 +81,186 @@ pub async fn scrub(
         )),
     };
 
-    let memory_sys = state
-        .get_user_memory(&req.user_id)
-        .map_err(AppError::Internal)?;
-    // A user with no graph yet is not an error: the scrub reports the graph
-    // column family as skipped, which forbids a `healthy` verdict rather than
-    // quietly reporting health for half the data.
-    let graph = state.get_user_graph(&req.user_id).ok();
-
     let user_id = req.user_id.clone();
     // Measured at ~13s on the largest live profile, dominated by iterating the
     // 660k non-memory keys sharing the memory default column family.
     // `crud::list_memories` is the precedent: full scans go on the blocking
     // pool, never on a runtime worker.
+    //
+    // The sweep itself lives on the manager rather than here so that the
+    // scheduler and this handler run the SAME code and file into the SAME
+    // ledger. A second copy of the handle-extraction dance would drift, and the
+    // GET below would then be reporting on a scrub that is not quite the one
+    // the scheduler runs.
+    let manager = std::sync::Arc::clone(&state);
     let report = tokio::task::spawn_blocking(move || {
-        // Take owned RocksDB handles and release both guards BEFORE sweeping.
-        // Holding the graph read guard for thirteen seconds would stall every
-        // graph writer (`handlers::graph` and `handlers::mif` take `.write()`),
-        // and parking_lot prefers writers, so every reader queued behind them
-        // would stall too. RocksDB handles are internally synchronised; the
-        // guards are needed only to reach them.
-        let memory_db = {
-            let memory_guard = memory_sys.read();
-            memory_guard.storage().raw_db().clone()
-        };
-        let graph_db = graph.map(|g| {
-            let graph_guard = g.read();
-            graph_guard.db_arc()
-        });
-
-        match graph_db.as_ref().and_then(|db| {
-            db.cf_handle(crate::graph_memory::ENTITIES_CF_NAME)
-                .map(|cf| (db, cf))
-        }) {
-            Some((gdb, cf)) => integrity::scrub_user(&user_id, &memory_db, Some((gdb, cf)), budget),
-            None => integrity::scrub_user(&user_id, &memory_db, None, budget),
-        }
+        manager.scrub_user_and_record(&user_id, budget, ScrubSource::OnDemand)
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("integrity scrub task panicked: {e}")))?;
 
     Ok(Json(report))
+}
+
+/// Query for [`last_scrub`].
+#[derive(Debug, Deserialize)]
+pub struct LastScrubQuery {
+    /// Restrict the answer to one profile. Omit for every profile on disk.
+    pub user_id: Option<String>,
+    /// Include the per-record findings. Off by default: on an unhealthy store
+    /// this is up to `FINDINGS_PER_CLASS` records per class per profile, which
+    /// is evidence for a human reading one profile, not payload for a poller.
+    #[serde(default)]
+    pub findings: bool,
+}
+
+/// One profile's last known result, flattened for reading.
+#[derive(Debug, Serialize)]
+pub struct LastScrubEntry {
+    pub user_id: String,
+    pub source: ScrubSource,
+    pub recorded_at: chrono::DateTime<chrono::Utc>,
+    /// How long ago the result was filed. The number that says whether the
+    /// scheduler is alive; a verdict without it is unfalsifiable.
+    pub age_secs: i64,
+    /// `true` when the result is older than two scheduler intervals, i.e. at
+    /// least one scheduled run did not happen. Always `true` when the scheduler
+    /// is disabled and the only results are on-demand ones.
+    pub stale: bool,
+    pub verdict: Verdict,
+    pub is_healthy: bool,
+    pub complete: bool,
+    pub stop_reason: Option<String>,
+    pub skipped: Vec<String>,
+    pub duration_ms: u64,
+    pub memories: crate::integrity::ClassCounts,
+    pub graph_nodes: crate::integrity::ClassCounts,
+    pub verdict_rule: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub findings: Option<Vec<crate::integrity::Finding>>,
+}
+
+impl LastScrubEntry {
+    fn from(entry: LastScrub, stale_after_secs: i64, with_findings: bool) -> Self {
+        let age_secs = (chrono::Utc::now() - entry.recorded_at)
+            .num_seconds()
+            .max(0);
+        let r = entry.report;
+        Self {
+            user_id: r.user_id,
+            source: entry.source,
+            recorded_at: entry.recorded_at,
+            age_secs,
+            stale: age_secs > stale_after_secs,
+            verdict: r.verdict,
+            is_healthy: r.is_healthy,
+            complete: r.complete,
+            stop_reason: r.stop_reason,
+            skipped: r.skipped,
+            duration_ms: r.duration_ms,
+            memories: r.memories,
+            graph_nodes: r.graph_nodes,
+            verdict_rule: r.verdict_rule,
+            findings: with_findings.then_some(r.findings),
+        }
+    }
+}
+
+/// What the scheduler is configured to do, returned alongside the results so a
+/// reader can tell "clean" from "nothing has run".
+#[derive(Debug, Serialize)]
+pub struct SchedulerStatus {
+    pub enabled: bool,
+    pub interval_secs: u64,
+    pub budget_ms: u64,
+}
+
+/// The answer to "what does the system currently believe about its own
+/// storage", with no sweep started.
+#[derive(Debug, Serialize)]
+pub struct LastScrubResponse {
+    pub scheduler: SchedulerStatus,
+    /// The worst verdict on file. `None` means nothing has been scrubbed —
+    /// which is NOT healthy, and is why this is an `Option` rather than
+    /// defaulting to `Healthy`.
+    pub worst_verdict: Option<Verdict>,
+    pub summary: LedgerSummary,
+    /// Profiles with a store on disk and no result at all. Absence rendered
+    /// explicitly: an all-healthy `results` list next to a non-empty
+    /// `never_scrubbed` is not a healthy system, and a reader that only looks
+    /// at `results` would never learn that.
+    pub never_scrubbed: Vec<String>,
+    pub results: Vec<LastScrubEntry>,
+}
+
+/// GET /api/integrity/scrub - the last known verdict per profile, without
+/// running anything.
+///
+/// # Why a separate verb rather than a cached POST
+///
+/// A scrub costs ~14s on the largest live profile. Folding "tell me the last
+/// answer" into the endpoint that produces one would mean either paying that
+/// on every poll or inventing a cache invalidation rule; a GET that is
+/// explicitly a *read of the ledger* has neither problem, and makes the
+/// distinction between "the system checked" and "somebody asked" visible in
+/// the URL.
+///
+/// This endpoint is the reason the scheduler is not another write with no
+/// reader. The learning ledger wrote for days with nothing rendering it;
+/// `CF_AUDIT` had twenty-three call sites and a dead reader; context reminders
+/// still have no consumer. A scheduled scrub nobody can query would have been
+/// the next one.
+#[tracing::instrument(skip(state))]
+pub async fn last_scrub(
+    State(state): State<AppState>,
+    Query(q): Query<LastScrubQuery>,
+) -> Result<Json<LastScrubResponse>, AppError> {
+    if let Some(user_id) = &q.user_id {
+        validation::validate_user_id(user_id).map_validation_err("user_id")?;
+    }
+
+    let interval = state.server_config().integrity_scrub_interval_secs;
+    // Two intervals: one missed tick is a slow sweep or a restart, two is a
+    // scheduler that is not running. With the scheduler off there is no tick to
+    // miss, so every result is stale by definition and says so.
+    let stale_after = if interval == 0 {
+        -1
+    } else {
+        (interval as i64).saturating_mul(2)
+    };
+
+    let ledger = state.scrub_ledger();
+    let mut results: Vec<LastScrubEntry> = ledger
+        .all()
+        .into_iter()
+        .filter(|e| q.user_id.as_ref().is_none_or(|u| *u == e.report.user_id))
+        .map(|e| LastScrubEntry::from(e, stale_after, q.findings))
+        .collect();
+    results.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+
+    let have: BTreeSet<String> = results.iter().map(|e| e.user_id.clone()).collect();
+    let never_scrubbed: Vec<String> = state
+        .profiles_on_disk()
+        .into_iter()
+        .filter(|u| !have.contains(u))
+        .filter(|u| q.user_id.as_ref().is_none_or(|q| q == u))
+        .collect();
+
+    let summary = ledger.summary();
+    crate::metrics::publish_integrity_scrub_metrics(&summary);
+    crate::metrics::INTEGRITY_USERS_NEVER_SCRUBBED.set(never_scrubbed.len() as i64);
+
+    Ok(Json(LastScrubResponse {
+        scheduler: SchedulerStatus {
+            enabled: interval > 0,
+            interval_secs: interval,
+            budget_ms: integrity::SCHEDULED_MAX_DURATION_MS,
+        },
+        worst_verdict: ledger.worst_verdict(),
+        summary,
+        never_scrubbed,
+        results,
+    }))
 }
 
 #[cfg(test)]
