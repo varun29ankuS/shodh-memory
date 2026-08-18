@@ -237,15 +237,3 @@ export function readableFormats(adapters: readonly MifAdapter[]): MifAdapter[] {
     .filter((adapter) => adapter.name.trim().length > 0)
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
-
-/**
- * A count with thousands separators.
- *
- * The figures here reach five digits — 10,758 memories across the recorded
- * sessions of one profile — and an unseparated `10758` is read as a token
- * rather than as a quantity, which is the one thing this screen needs its
- * numbers to be.
- */
-export function formatCount(value: number): string {
-  return value.toLocaleString();
-}

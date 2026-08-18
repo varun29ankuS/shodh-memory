@@ -16,9 +16,9 @@ import {
   fetchSessionHistory,
   type SessionHistoryEntry,
 } from "./api";
+import { formatCount } from "@/lib/format";
 import {
   classifySession,
-  formatCount,
   formatRecorded,
   formatSessionLength,
   readSessions,

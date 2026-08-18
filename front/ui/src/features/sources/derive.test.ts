@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { MifAdapter, SessionHistoryEntry } from "./api";
 import {
   classifySession,
-  formatCount,
   formatRecorded,
   formatSessionLength,
   readSessions,
@@ -281,22 +280,5 @@ describe("readableFormats", () => {
     ];
     expect(readableFormats(unsorted)).not.toBe(unsorted);
     expect(unsorted.map((a) => a.format)).toEqual(["mem0", "generic"]);
-  });
-});
-
-describe("formatCount", () => {
-  it("leaves a three-digit count bare", () => {
-    expect(formatCount(230)).toBe("230");
-  });
-
-  it("groups a large count so it reads as a quantity", () => {
-    // Asserted as "contains a non-digit" rather than as "10,758": the separator
-    // is the reader's own locale, and pinning it to a comma would make this test
-    // a statement about the machine running it. A plain `String(value)` fails
-    // this, which is the mutation it is here to catch.
-    const grouped = formatCount(10_758);
-    expect(grouped).not.toBe("10758");
-    expect(grouped).toMatch(/\D/);
-    expect(grouped.replace(/\D/g, "")).toBe("10758");
   });
 });
