@@ -2753,13 +2753,21 @@ impl MultiUserMemoryManager {
     /// deliberately — a corruption check that only looks where someone is
     /// already looking cannot answer "how would you know".
     ///
-    /// Returns `(scrubbed, unhealthy)`.
+    /// Returns how many profiles were scrubbed, and the ledger summary as it
+    /// stands afterwards.
+    ///
+    /// The summary rather than a bare defect count, because the caller has to
+    /// be able to grade its alarm. `is_healthy` is false for `Aging` as well as
+    /// for `Unhealthy` — correctly, since aging data is not clean — so a
+    /// scheduler counting `!is_healthy` would log the same alarm for a store
+    /// serving fabrications and a store that merely predates a field. On the
+    /// current corpus that is every profile, every hour, forever: the alarm
+    /// fatigue this module exists to avoid.
     pub fn run_integrity_scrub_all_users(
         &self,
         budget: crate::integrity::ScrubBudget,
-    ) -> (usize, usize) {
+    ) -> (usize, crate::integrity::LedgerSummary) {
         let mut scrubbed = 0;
-        let mut unhealthy = 0;
         let profiles = self.profiles_on_disk();
         // Published before the sweep, not after: if this run dies half way the
         // gauge already says how many profiles were meant to be covered, and
@@ -2776,19 +2784,18 @@ impl MultiUserMemoryManager {
                 budget.clone(),
                 crate::integrity::ScrubSource::Scheduled,
             );
+            let _ = report;
             scrubbed += 1;
-            if !report.is_healthy {
-                unhealthy += 1;
-            }
         }
-        crate::metrics::publish_integrity_scrub_metrics(&self.scrub_ledger.summary());
+        let summary = self.scrub_ledger.summary();
+        crate::metrics::publish_integrity_scrub_metrics(&summary);
         crate::metrics::INTEGRITY_USERS_NEVER_SCRUBBED.set(
             self.profiles_on_disk()
                 .iter()
                 .filter(|u| self.scrub_ledger.get(u).is_none())
                 .count() as i64,
         );
-        (scrubbed, unhealthy)
+        (scrubbed, summary)
     }
 
     /// Run backups for all active users

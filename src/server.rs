@@ -703,20 +703,49 @@ fn start_integrity_scrub_scheduler(manager: AppState, interval_secs: u64) {
             })
             .await
             {
-                Ok((scrubbed, unhealthy)) => {
-                    if unhealthy > 0 {
-                        // Deliberately error!, not warn!: this is the line that
-                        // answers "how would you know". Be honest about where
-                        // it goes — see the note below on reachability.
+                Ok((scrubbed, s)) => {
+                    // Graded, not thresholded on `is_healthy`. Aging sets
+                    // is_healthy=false too, and on the current corpus every
+                    // profile is Aging — an alarm that fires hourly on all of
+                    // them teaches its reader to ignore it, which is a worse
+                    // outcome than not alarming at all.
+                    if s.unhealthy > 0 {
+                        // The line that answers "how would you know". Where it
+                        // actually goes is documented on this function.
                         tracing::error!(
                             profiles_scrubbed = scrubbed,
-                            profiles_not_healthy = unhealthy,
-                            "integrity scrub: {unhealthy} of {scrubbed} profiles could not be \
-                             certified healthy — GET /api/integrity/scrub for the per-record \
-                             evidence"
+                            unhealthy = s.unhealthy,
+                            implausible_records = s.implausible_records,
+                            checksum_mismatch_records = s.checksum_mismatch_records,
+                            "integrity scrub: {} of {scrubbed} profiles are serving records that \
+                             decode into impossible values or fail their checksum — GET \
+                             /api/integrity/scrub?findings=true for the per-record evidence",
+                            s.unhealthy
+                        );
+                    } else if s.indeterminate > 0 {
+                        tracing::warn!(
+                            profiles_scrubbed = scrubbed,
+                            indeterminate = s.indeterminate,
+                            "integrity scrub: {} of {scrubbed} profiles could not be checked; no \
+                             health claim is being made for them",
+                            s.indeterminate
+                        );
+                    } else if s.degraded > 0 {
+                        tracing::warn!(
+                            profiles_scrubbed = scrubbed,
+                            degraded = s.degraded,
+                            undecodable_records = s.undecodable_records,
+                            "integrity scrub: unreadable records exist below the alarm rate — \
+                             they fail loudly rather than lying, but they are not readable"
+                        );
+                    } else if s.aging > 0 {
+                        info!(
+                            "Scheduled integrity scrub: {scrubbed} profiles, {} aging \
+                             (readable only via a legacy wire generation)",
+                            s.aging
                         );
                     } else {
-                        info!("Scheduled integrity scrub: {scrubbed} profiles, all healthy");
+                        info!("Scheduled integrity scrub: {scrubbed} profiles, all clean");
                     }
                 }
                 Err(e) => {
