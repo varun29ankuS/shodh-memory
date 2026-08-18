@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { outageOf, type Reachability } from "@/lib/api";
+import { ApiError, NetworkError, outageOf, type Reachability } from "@/lib/api";
 import { corpusToRecallMemory, useCorpus } from "@/lib/api/corpus";
 import { formatCount, sampleNote } from "@/lib/format";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -24,6 +24,23 @@ import { GeoMap } from "./GeoMap";
  * Both data sources are shared cache entries (useCorpus, useRecall): this view
  * issues no retrieval of its own.
  */
+
+/**
+ * Why the corpus listing failed, in the reader's terms.
+ *
+ * A READ THAT FAILED IS NOT A CORPUS THAT IS EMPTY, and every surface here has
+ * one branch that says "there is none of this" and another that says "we could
+ * not look". Routing a failed fetch into the first is the same defect as
+ * asserting a negative from one page — worse, because it is a negative from
+ * nothing at all. Shared with AnomaliesView, which already drew this line.
+ */
+function readFailure(error: unknown): string {
+  if (error instanceof ApiError) {
+    return error.isAuthFailure ? "The server rejected this key." : `The server answered ${error.status}.`;
+  }
+  if (error instanceof NetworkError) return "The server stopped responding mid-request.";
+  return "Something went wrong loading this profile's memories.";
+}
 
 export function GeoView({ reach }: { reach: Reachability }) {
   const corpus = useCorpus(reach);
@@ -113,6 +130,24 @@ export function GeoView({ reach }: { reach: Reachability }) {
 
   if (corpus.isFetching && !corpus.data) {
     return <EmptyState size="page" title="Loading corpus" body="Placing every located memory." />;
+  }
+
+  // BEFORE the "nothing carries a place" branch, never after it. On a failed
+  // read `corpus.data` is undefined, so `read` and `heldTotal` are both zero,
+  // `sampleNote` reports a complete read, and the empty state below would
+  // state the absolute — "None in this profile does yet" — on the strength of
+  // a request that never returned. That is the one confusion this screen is
+  // not allowed to produce, and it is reachable whenever the API server is
+  // restarting.
+  if (corpus.error) {
+    return (
+      <EmptyState
+        size="page"
+        title="Could not read the corpus"
+        body={readFailure(corpus.error)}
+        more="The map draws from one listing request. Until it returns, this screen knows nothing about which memories carry coordinates — including whether any do."
+      />
+    );
   }
 
   if (located.length === 0) {

@@ -276,6 +276,20 @@ function ResultPane({ reach }: { reach: Reachability }) {
     // instruction. The list IS the invitation — it shows what there is to
     // search, and selecting a row inspects it like any result.
     if (corpus.isFetching && !corpus.data) return <ResultListSkeleton />;
+    // A failed listing is not an empty profile, and the branch below says
+    // "It holds nothing yet" — an assertion about the store made out of a
+    // request that never came back. The error case takes precedence.
+    if (corpus.error) {
+      const detail =
+        corpus.error instanceof ApiError
+          ? corpus.error.isAuthFailure
+            ? "The server rejected this key."
+            : `The server answered ${corpus.error.status}.`
+          : corpus.error instanceof NetworkError
+            ? "The server stopped responding mid-request."
+            : "Something went wrong loading this profile's memories.";
+      return <EmptyState title="Could not read the corpus" body={detail} />;
+    }
     if (recent.length === 0) {
       return (
         <EmptyState
