@@ -53,6 +53,8 @@ pub mod similarity;
 pub mod streaming;
 pub mod system_memory;
 pub mod telemetry;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod token_estimation;
 pub mod tracing_setup;
 pub mod validation;

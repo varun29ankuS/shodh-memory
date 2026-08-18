@@ -646,15 +646,16 @@ mod tests {
 
     #[test]
     fn test_env_override() {
-        env::set_var("SHODH_PORT", "8080");
-        env::set_var("SHODH_MAX_USERS", "500");
+        // Took no lock and put nothing back: `from_env` is also called by the
+        // server bootstrap, and the removals at the end destroyed any value the
+        // surrounding process had chosen.
+        let mut guard = crate::test_support::ScopedEnv::acquire();
+        guard.set("SHODH_PORT", "8080");
+        guard.set("SHODH_MAX_USERS", "500");
 
         let config = ServerConfig::from_env();
         assert_eq!(config.port, 8080);
         assert_eq!(config.max_users_in_memory, 500);
-
-        env::remove_var("SHODH_PORT");
-        env::remove_var("SHODH_MAX_USERS");
     }
 
     #[test]

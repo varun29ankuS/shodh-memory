@@ -358,7 +358,10 @@ mod tests {
     /// so a dev server handed the user id to any client that asked.
     #[test]
     fn server_errors_are_sanitised_outside_production_too() {
-        std::env::remove_var("SHODH_ENV");
+        // Unsynchronised `remove_var` on a variable `auth` and `middleware`
+        // tests both write: this raced them in both directions.
+        let mut guard = crate::test_support::ScopedEnv::acquire();
+        guard.remove("SHODH_ENV");
 
         let leaky = AppError::Internal(anyhow::anyhow!(
             "Failed to initialize memory system for user 'alice@example.com' at /Users/alice/data"
