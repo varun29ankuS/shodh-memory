@@ -247,25 +247,26 @@ pub async fn auth_middleware(request: Request, next: Next) -> Response {
     next.run(request).await
 }
 
-/// Process-global lock for tests that manipulate environment variables.
-/// `env::set_var` / `env::remove_var` are not thread-safe, so every test across the
-/// crate that touches auth env vars must hold this one lock for its duration. It is
-/// `pub(crate)` so the `local_ipc` auth tests serialize against auth.rs's own env
-/// tests rather than racing them.
-#[cfg(test)]
-pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ScopedEnv;
     use axum::body::to_bytes;
 
-    /// Clear all auth-related env vars to isolate tests.
-    /// Caller MUST hold `ENV_LOCK` — this is not enforced at compile time.
-    fn clear_auth_env() {
-        env::remove_var("SHODH_API_KEYS");
-        env::remove_var("SHODH_DEV_API_KEY");
-        env::remove_var("SHODH_ENV");
+    /// Clear all auth-related env vars to isolate a test.
+    ///
+    /// Takes the guard rather than the ambient process, so the values are put
+    /// BACK when the test ends. That is not tidiness: the handler test harness
+    /// sets `SHODH_API_KEYS` once for the whole process because every handler
+    /// test needs an accepted key, and this function used to delete it — after
+    /// which handler tests starting on other threads failed with 401/503 for
+    /// reasons that had nothing to do with them. Holding the lock never fixed
+    /// that, because the damage outlived the lock.
+    fn clear_auth_env(guard: &mut ScopedEnv) {
+        guard.remove("SHODH_API_KEYS");
+        guard.remove("SHODH_DEV_API_KEY");
+        guard.remove("SHODH_ENV");
     }
 
     // ── constant_time_compare ──
@@ -314,122 +315,113 @@ mod tests {
 
     #[test]
     fn production_mode_detection() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
+        let mut guard = ScopedEnv::acquire();
+        clear_auth_env(&mut guard);
 
         assert!(!is_production_mode());
 
-        env::set_var("SHODH_ENV", "production");
+        guard.set("SHODH_ENV", "production");
         assert!(is_production_mode());
 
-        env::set_var("SHODH_ENV", "prod");
+        guard.set("SHODH_ENV", "prod");
         assert!(is_production_mode());
 
-        env::set_var("SHODH_ENV", "PRODUCTION");
+        guard.set("SHODH_ENV", "PRODUCTION");
         assert!(is_production_mode());
 
-        env::set_var("SHODH_ENV", "development");
+        guard.set("SHODH_ENV", "development");
         assert!(!is_production_mode());
 
-        env::set_var("SHODH_ENV", "test");
+        guard.set("SHODH_ENV", "test");
         assert!(!is_production_mode());
 
-        clear_auth_env();
     }
 
     // ── validate_api_key: SHODH_API_KEYS ──
 
     #[test]
     fn validate_with_single_api_key() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        env::set_var("SHODH_API_KEYS", "my-key");
+        let mut guard = ScopedEnv::acquire();
+        clear_auth_env(&mut guard);
+        guard.set("SHODH_API_KEYS", "my-key");
         assert!(validate_api_key("my-key").is_ok());
         assert!(validate_api_key("wrong").is_err());
-        clear_auth_env();
     }
 
     #[test]
     fn validate_with_multiple_api_keys() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        env::set_var("SHODH_API_KEYS", "key1,key2,key3");
+        let mut guard = ScopedEnv::acquire();
+        clear_auth_env(&mut guard);
+        guard.set("SHODH_API_KEYS", "key1,key2,key3");
         assert!(validate_api_key("key1").is_ok());
         assert!(validate_api_key("key2").is_ok());
         assert!(validate_api_key("key3").is_ok());
         assert!(validate_api_key("key4").is_err());
-        clear_auth_env();
     }
 
     #[test]
     fn validate_api_keys_trims_whitespace() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        env::set_var("SHODH_API_KEYS", " key1 , key2 ");
+        let mut guard = ScopedEnv::acquire();
+        clear_auth_env(&mut guard);
+        guard.set("SHODH_API_KEYS", " key1 , key2 ");
         assert!(validate_api_key("key1").is_ok());
         assert!(validate_api_key("key2").is_ok());
-        clear_auth_env();
     }
 
     // ── validate_api_key: dev key ──
 
     #[test]
     fn validate_with_dev_key() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        env::set_var("SHODH_DEV_API_KEY", "dev-key-123");
+        let mut guard = ScopedEnv::acquire();
+        clear_auth_env(&mut guard);
+        guard.set("SHODH_DEV_API_KEY", "dev-key-123");
         assert!(validate_api_key("dev-key-123").is_ok());
         assert!(validate_api_key("wrong").is_err());
-        clear_auth_env();
     }
 
     // ── validate_api_key: production mode ──
 
     #[test]
     fn validate_production_rejects_when_no_keys() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        env::set_var("SHODH_ENV", "production");
+        let mut guard = ScopedEnv::acquire();
+        clear_auth_env(&mut guard);
+        guard.set("SHODH_ENV", "production");
         let result = validate_api_key("any-key");
         assert!(result.is_err());
         match result.unwrap_err() {
             AuthError::NotConfigured => {}
             other => panic!("Expected NotConfigured, got {:?}", other),
         }
-        clear_auth_env();
     }
 
     #[test]
     fn validate_production_works_with_api_keys_set() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        env::set_var("SHODH_ENV", "production");
-        env::set_var("SHODH_API_KEYS", "prod-key");
+        let mut guard = ScopedEnv::acquire();
+        clear_auth_env(&mut guard);
+        guard.set("SHODH_ENV", "production");
+        guard.set("SHODH_API_KEYS", "prod-key");
         assert!(validate_api_key("prod-key").is_ok());
         assert!(validate_api_key("wrong").is_err());
-        clear_auth_env();
     }
 
     // ── validate_api_key: edge cases ──
 
     #[test]
     fn validate_empty_api_keys_falls_through() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        env::set_var("SHODH_API_KEYS", "  ");
+        let mut guard = ScopedEnv::acquire();
+        clear_auth_env(&mut guard);
+        guard.set("SHODH_API_KEYS", "  ");
         assert!(validate_api_key("anything").is_err());
-        clear_auth_env();
     }
 
     #[test]
     fn api_keys_takes_priority_over_dev_key() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        env::set_var("SHODH_API_KEYS", "prod-key");
-        env::set_var("SHODH_DEV_API_KEY", "dev-key");
+        let mut guard = ScopedEnv::acquire();
+        clear_auth_env(&mut guard);
+        guard.set("SHODH_API_KEYS", "prod-key");
+        guard.set("SHODH_DEV_API_KEY", "dev-key");
         assert!(validate_api_key("prod-key").is_ok());
         assert!(validate_api_key("dev-key").is_err()); // dev key ignored
-        clear_auth_env();
     }
 
     // ── AuthError response codes ──
@@ -461,8 +453,8 @@ mod tests {
 
     #[tokio::test]
     async fn auth_error_response_is_valid_json() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
+        let mut guard = ScopedEnv::acquire();
+        clear_auth_env(&mut guard);
         let resp = AuthError::MissingApiKey.into_response();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
@@ -471,13 +463,12 @@ mod tests {
             .expect("Response body should be valid JSON matching ErrorResponse");
         assert_eq!(parsed.code, "MISSING_API_KEY");
         assert!(parsed.message.contains("X-API-Key"));
-        clear_auth_env();
     }
 
     #[tokio::test]
     async fn missing_key_dev_message_includes_help() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
+        let mut guard = ScopedEnv::acquire();
+        clear_auth_env(&mut guard);
         // Not production → should include env var names in message
         let resp = AuthError::MissingApiKey.into_response();
         let body = to_bytes(resp.into_body(), 2048).await.unwrap();
@@ -491,13 +482,12 @@ mod tests {
             "Should mention SHODH_DEV_API_KEY"
         );
 
-        clear_auth_env();
     }
 
     #[tokio::test]
     async fn invalid_key_dev_message_includes_help() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
+        let mut guard = ScopedEnv::acquire();
+        clear_auth_env(&mut guard);
         let resp = AuthError::InvalidApiKey.into_response();
         let body = to_bytes(resp.into_body(), 2048).await.unwrap();
         let parsed: ErrorResponse = serde_json::from_slice(&body).unwrap();
@@ -506,14 +496,13 @@ mod tests {
             "Should mention SHODH_API_KEYS"
         );
 
-        clear_auth_env();
     }
 
     #[tokio::test]
     async fn missing_key_prod_message_is_terse() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        env::set_var("SHODH_ENV", "production");
+        let mut guard = ScopedEnv::acquire();
+        clear_auth_env(&mut guard);
+        guard.set("SHODH_ENV", "production");
         let resp = AuthError::MissingApiKey.into_response();
         let body = to_bytes(resp.into_body(), 2048).await.unwrap();
         let parsed: ErrorResponse = serde_json::from_slice(&body).unwrap();
@@ -522,20 +511,18 @@ mod tests {
             !parsed.message.contains("SHODH_DEV_API_KEY"),
             "Prod must not leak env var names"
         );
-        clear_auth_env();
     }
 
     #[tokio::test]
     async fn invalid_key_prod_message_is_terse() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        env::set_var("SHODH_ENV", "production");
+        let mut guard = ScopedEnv::acquire();
+        clear_auth_env(&mut guard);
+        guard.set("SHODH_ENV", "production");
         let resp = AuthError::InvalidApiKey.into_response();
         let body = to_bytes(resp.into_body(), 2048).await.unwrap();
         let parsed: ErrorResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed.message, "Invalid API key");
 
-        clear_auth_env();
     }
 
     #[tokio::test]
@@ -559,9 +546,9 @@ mod tests {
         use axum::Router;
         use tower::ServiceExt;
 
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        env::set_var("SHODH_API_KEYS", "test-ws-key");
+        let mut guard = ScopedEnv::acquire();
+        clear_auth_env(&mut guard);
+        guard.set("SHODH_API_KEYS", "test-ws-key");
 
         let app = Router::new()
             .route("/api/stream", get(|| async { "ok" }))
@@ -580,7 +567,6 @@ mod tests {
             "Should accept API key from query parameter on WebSocket upgrade"
         );
 
-        clear_auth_env();
     }
 
     #[tokio::test]
@@ -592,9 +578,9 @@ mod tests {
         use axum::Router;
         use tower::ServiceExt;
 
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        env::set_var("SHODH_API_KEYS", "test-sse-key");
+        let mut guard = ScopedEnv::acquire();
+        clear_auth_env(&mut guard);
+        guard.set("SHODH_API_KEYS", "test-sse-key");
 
         let app = Router::new()
             .route("/api/events", get(|| async { "ok" }))
@@ -612,7 +598,6 @@ mod tests {
             "Should accept API key from query parameter on the SSE event stream"
         );
 
-        clear_auth_env();
     }
 
     #[tokio::test]
@@ -624,9 +609,9 @@ mod tests {
         use axum::Router;
         use tower::ServiceExt;
 
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        env::set_var("SHODH_API_KEYS", "test-ws-key");
+        let mut guard = ScopedEnv::acquire();
+        clear_auth_env(&mut guard);
+        guard.set("SHODH_API_KEYS", "test-ws-key");
 
         let app = Router::new()
             .route("/api/remember", get(|| async { "ok" }))
@@ -644,7 +629,6 @@ mod tests {
             "Query param auth should be ignored for non-WebSocket requests"
         );
 
-        clear_auth_env();
     }
 
     #[tokio::test]
@@ -656,9 +640,9 @@ mod tests {
         use axum::Router;
         use tower::ServiceExt;
 
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        env::set_var("SHODH_API_KEYS", "correct-key");
+        let mut guard = ScopedEnv::acquire();
+        clear_auth_env(&mut guard);
+        guard.set("SHODH_API_KEYS", "correct-key");
 
         let app = Router::new()
             .route("/api/stream", get(|| async { "ok" }))
@@ -676,6 +660,5 @@ mod tests {
             "Should reject invalid query parameter API key on WebSocket"
         );
 
-        clear_auth_env();
     }
 }

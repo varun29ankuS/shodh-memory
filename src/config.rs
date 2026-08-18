@@ -704,15 +704,16 @@ mod tests {
 
     #[test]
     fn test_env_override() {
-        env::set_var("SHODH_PORT", "8080");
-        env::set_var("SHODH_MAX_USERS", "500");
+        // Took no lock and put nothing back: `from_env` is also called by the
+        // server bootstrap, and the removals at the end destroyed any value the
+        // surrounding process had chosen.
+        let mut guard = crate::test_support::ScopedEnv::acquire();
+        guard.set("SHODH_PORT", "8080");
+        guard.set("SHODH_MAX_USERS", "500");
 
         let config = ServerConfig::from_env();
         assert_eq!(config.port, 8080);
         assert_eq!(config.max_users_in_memory, 500);
-
-        env::remove_var("SHODH_PORT");
-        env::remove_var("SHODH_MAX_USERS");
     }
 
     /// The interval env var is actually read.
@@ -722,23 +723,23 @@ mod tests {
     /// evidence that setting it does anything. A knob that lies is worse than
     /// no knob: it produces confident operators running the default.
     ///
-    /// Holds `crate::auth::ENV_LOCK` because `set_var` is process-global and
-    /// every other env test in this crate serialises on it.
+    /// Takes a [`crate::test_support::ScopedEnv`] because `set_var` is
+    /// process-global and every other env test in this crate serialises on the
+    /// same lock. The guard also restores the variable on drop, so this test
+    /// cannot leave the interval unset for whatever runs after it.
     #[test]
     fn config_reads_the_integrity_scrub_interval() {
-        let _guard = crate::auth::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut guard = crate::test_support::ScopedEnv::acquire();
 
         // The default has to be a real value, not zero-by-accident.
-        env::remove_var("SHODH_INTEGRITY_SCRUB_INTERVAL");
+        guard.remove("SHODH_INTEGRITY_SCRUB_INTERVAL");
         assert_eq!(
             ServerConfig::from_env().integrity_scrub_interval_secs,
             3600,
             "the default must schedule scrubs, not disable them"
         );
 
-        env::set_var("SHODH_INTEGRITY_SCRUB_INTERVAL", "900");
+        guard.set("SHODH_INTEGRITY_SCRUB_INTERVAL", "900");
         assert_eq!(
             ServerConfig::from_env().integrity_scrub_interval_secs,
             900,
@@ -747,19 +748,20 @@ mod tests {
 
         // 0 is a deliberate off switch, and must survive as 0 rather than
         // being clamped back to the default.
-        env::set_var("SHODH_INTEGRITY_SCRUB_INTERVAL", "0");
+        guard.set("SHODH_INTEGRITY_SCRUB_INTERVAL", "0");
         assert_eq!(ServerConfig::from_env().integrity_scrub_interval_secs, 0);
 
         // Garbage keeps the default rather than silently disabling the scrub,
         // which is the failure mode a bare `parse().unwrap_or(0)` would have.
-        env::set_var("SHODH_INTEGRITY_SCRUB_INTERVAL", "hourly");
+        guard.set("SHODH_INTEGRITY_SCRUB_INTERVAL", "hourly");
         assert_eq!(
             ServerConfig::from_env().integrity_scrub_interval_secs,
             3600,
             "an unparseable interval must not turn the scheduler off"
         );
 
-        env::remove_var("SHODH_INTEGRITY_SCRUB_INTERVAL");
+        // No explicit cleanup: `guard` restores the value this test found,
+        // which is what the bare `remove_var` here could not do.
     }
 
     #[test]

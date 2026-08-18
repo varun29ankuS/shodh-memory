@@ -2990,10 +2990,10 @@ mod tests {
         let embedder = StubEmbedder;
         let episode_to_memory = |_ep: &EpisodicNode| -> Result<Option<SharedMemory>> { Ok(None) };
 
-        let run_recall = || {
+        let run_recall = |q: &Query| {
             spreading_activation_retrieve_with_stats(
                 "widget",
-                &query,
+                q,
                 &graph,
                 &embedder,
                 None,
@@ -3005,7 +3005,7 @@ mod tests {
 
         // Sanity: the graph leg must actually traverse the widget->gadget edge,
         // or the assertions below would hold vacuously (nothing to strengthen).
-        let (_, sanity_stats) = run_recall().expect("sanity recall");
+        let (_, sanity_stats) = run_recall(&query).expect("sanity recall");
         assert!(
             sanity_stats.traversed_edges.contains(&edge_uuid),
             "spreading activation must traverse the seeded edge for this test \
@@ -3013,39 +3013,62 @@ mod tests {
             sanity_stats.traversed_edges
         );
 
-        // --- SHODH_RECALL_READONLY=1: two passes, byte-identical strength ---
-        std::env::set_var("SHODH_RECALL_READONLY", "1");
+        // --- the env pin feeds the gate ---
+        //
+        // Asserted with NO recall inside the window. `SHODH_RECALL_READONLY=1`
+        // is process-wide: every other test thread reads it for as long as it
+        // is set, and a mutex serialises the writers, not those readers. So the
+        // window here is two `recall_is_readonly` calls rather than two full
+        // spreading-activation passes. What the gate then DOES with a `true`
+        // answer is proven below against this same fixture via the per-request
+        // flag — `recall_is_readonly` is the single input the graph leg
+        // consults, so env -> gate and gate -> no-write compose.
+        {
+            let _pin_on = crate::memory::RecallEnvPin::pin("1");
+            assert!(
+                crate::memory::recall_is_readonly(&query),
+                "SHODH_RECALL_READONLY=1 must make the recall read-only even \
+                 though the request did not ask for it"
+            );
+        }
+        assert!(
+            !crate::memory::recall_is_readonly(&query),
+            "the nested pin must restore the explicit 0 this test holds"
+        );
 
+        // --- read-only recall: two passes, byte-identical strength ---
+        let readonly_query = Query {
+            read_only: true,
+            ..query.clone()
+        };
         let strength_ro_0 = strength_of(&graph);
-        run_recall().expect("recall #1 (read-only)");
+        run_recall(&readonly_query).expect("recall #1 (read-only)");
         let strength_ro_1 = strength_of(&graph);
-        run_recall().expect("recall #2 (read-only)");
+        run_recall(&readonly_query).expect("recall #2 (read-only)");
         let strength_ro_2 = strength_of(&graph);
 
         assert_eq!(
             strength_ro_0.to_bits(),
             strength_ro_1.to_bits(),
-            "SHODH_RECALL_READONLY=1 must leave edge strength byte-identical \
+            "a read-only recall must leave edge strength byte-identical \
              after recall #1 (got {strength_ro_0} -> {strength_ro_1}) — this is \
              the graph-leg Hebbian-strengthening leak this test guards against"
         );
         assert_eq!(
             strength_ro_1.to_bits(),
             strength_ro_2.to_bits(),
-            "SHODH_RECALL_READONLY=1 must leave edge strength byte-identical \
+            "a read-only recall must leave edge strength byte-identical \
              after recall #2 (got {strength_ro_1} -> {strength_ro_2})"
         );
 
-        // --- production default (pin off): strengthening still happens ---
-        std::env::set_var("SHODH_RECALL_READONLY", "0");
-
+        // --- production default (gate off): strengthening still happens ---
         let strength_prod_0 = strength_of(&graph);
-        run_recall().expect("recall #3 (production default)");
+        run_recall(&query).expect("recall #3 (production default)");
         let strength_prod_1 = strength_of(&graph);
 
         assert!(
             strength_prod_1 > strength_prod_0,
-            "flag unset (production default) must still strengthen the \
+            "gate off (production default) must still strengthen the \
              traversed edge (Hebbian learning), got {strength_prod_0} -> {strength_prod_1}"
         );
     }
@@ -3069,11 +3092,10 @@ mod tests {
         };
         use chrono::Utc;
 
-        // The pin is explicitly OFF for this whole test: the claim under test is
-        // that the per-request flag ALONE suppresses the write. An explicit "0"
-        // rather than an unset variable, so a harness test that slips past the
-        // lock cannot turn it on — `pin_harness_threads` only sets the variable
-        // when it is unset.
+        // The pin is explicitly OFF for this whole test: the claim under test
+        // is that the per-request flag ALONE suppresses the write. An explicit
+        // "0" rather than an unset variable, so no only-if-unset writer can
+        // turn it on underneath the assertion.
         let _env = crate::memory::RecallEnvPin::pin("0");
 
         struct StubEmbedder;

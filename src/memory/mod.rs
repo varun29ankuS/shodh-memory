@@ -50,23 +50,43 @@ use crate::metrics::{
     EMBEDDING_CACHE_QUERY_SIZE,
 };
 
+/// Parse the `SHODH_EVAL_NOW` override, if present and well-formed.
+fn eval_now_override() -> Option<chrono::DateTime<chrono::Utc>> {
+    std::env::var("SHODH_EVAL_NOW").ok().and_then(|raw| {
+        chrono::DateTime::parse_from_rfc3339(&raw)
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+    })
+}
+
 /// Query-time scoring clock. `SHODH_EVAL_NOW` (RFC3339) freezes it for the
 /// recall harness: repeat passes minutes apart see different `Utc::now() -
 /// created_at` recency components, which is enough to flip near-tie ranks
-/// (smoke-094). The env value is parsed once per process; when unset
-/// (production), every call returns the live clock.
+/// (smoke-094). When unset (production), every call returns the live clock.
+///
+/// PRODUCTION caches the parse in a `OnceLock` — the value cannot change under
+/// a running server and this is on the per-candidate scoring path.
+///
+/// TESTS deliberately do NOT cache. A process-lifetime cache is unrestorable
+/// state: whichever test touched `scoring_now()` first would decide the clock
+/// for the entire `cargo test` process, so a harness test that ran early froze
+/// every later recency assertion at [`recall_harness::runner::HARNESS_CLOCK_ANCHOR`]
+/// — two months in the past — and no amount of env restoring could undo it.
+/// Re-reading per call makes the harness's env pin scoped to the pin's lifetime,
+/// which is what every other determinism variable already does. The extra
+/// `env::var` per call costs nothing at test scale.
+#[cfg(not(test))]
 pub(crate) fn scoring_now() -> chrono::DateTime<chrono::Utc> {
     static PINNED: std::sync::OnceLock<Option<chrono::DateTime<chrono::Utc>>> =
         std::sync::OnceLock::new();
     PINNED
-        .get_or_init(|| {
-            std::env::var("SHODH_EVAL_NOW").ok().and_then(|raw| {
-                chrono::DateTime::parse_from_rfc3339(&raw)
-                    .ok()
-                    .map(|dt| dt.with_timezone(&chrono::Utc))
-            })
-        })
+        .get_or_init(eval_now_override)
         .unwrap_or_else(chrono::Utc::now)
+}
+
+#[cfg(test)]
+pub(crate) fn scoring_now() -> chrono::DateTime<chrono::Utc> {
+    eval_now_override().unwrap_or_else(chrono::Utc::now)
 }
 
 /// `SHODH_COMPANION_MULTIHOP_GATE=1` — enable provenance-driven multi-hop
@@ -83,7 +103,8 @@ fn companion_gate_enabled() -> bool {
 /// persistence, no co-retrieval/coactivation edge creation, no Hebbian edge
 /// strengthening anywhere in the recall path (including the graph leg's
 /// spreading-activation traversal in `graph_retrieval.rs`). Set by the eval
-/// harness (`pin_harness_threads`, `recall_eval` binary startup): eval repeats
+/// harness (`recall_eval` binary startup; the in-process harness now sets
+/// `Query::read_only` instead of writing this variable): eval repeats
 /// measure variance, not learning curves, and FLAT fusion made graph magnitude
 /// load-bearing, so first-repeat usage writes were shifting later repeats'
 /// rankings (L1 smoke non-determinism, PR #325 checks). Production default
@@ -113,9 +134,12 @@ fn recall_readonly_env() -> bool {
 /// "read-only" recall).
 ///
 /// True when EITHER source asks for it:
-/// - `SHODH_RECALL_READONLY=1` — the process-wide pin the eval harness sets
-///   (`pin_harness_threads`, the `recall_eval` binary). Eval repeats measure
-///   variance, not learning curves.
+/// - `SHODH_RECALL_READONLY=1` — the process-wide pin the `recall_eval` binary
+///   sets at startup, where the whole process IS the harness. Eval repeats
+///   measure variance, not learning curves. The in-process harness reads this
+///   variable to decide, but sets `Query::read_only` rather than writing it:
+///   inside `cargo test` a process-wide write is visible to every other thread
+///   for the whole run, and a lock around the writer cannot stop that.
 /// - `Query::read_only` — the per-request flag a caller sets to get a
 ///   reproducible answer without altering the corpus it read from.
 ///
@@ -129,9 +153,13 @@ pub(crate) fn recall_is_readonly(query: &Query) -> bool {
     recall_readonly_env() || query.read_only
 }
 
-/// Process-global lock for tests that manipulate `SHODH_RECALL_READONLY`,
-/// including the harness tests whose `pin_harness_threads` call sets it
-/// process-wide.
+/// Process-global lock for every code path that mutates the harness
+/// determinism env (`SHODH_RECALL_READONLY`, `SHODH_EVAL_NOW`,
+/// `SHODH_ONNX_THREADS`, `RAYON_NUM_THREADS`) — including
+/// `recall_harness::runner::pin_harness_threads`, which sets the last three
+/// process-wide. (`SHODH_RECALL_READONLY` is read there, never written — it
+/// changes what concurrently running code does, and a lock cannot exclude a
+/// reader.)
 ///
 /// `env::set_var`/`remove_var` are not thread-safe against concurrent readers on
 /// other test threads, and `recall_is_readonly` re-reads the env on every call
@@ -139,30 +167,39 @@ pub(crate) fn recall_is_readonly(query: &Query) -> bool {
 /// module-local mutexes in each test file would not exclude each other, so a
 /// test asserting "the pin is unset" could still be raced by a test in a sibling
 /// module setting it.
-#[cfg(test)]
-pub(crate) static RECALL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+///
+/// NOT `#[cfg(test)]`: `pin_harness_threads` takes it in every build so the
+/// harness's env mutation is self-contained rather than relying on each of its
+/// callers to remember a guard. It is uncontended in the `recall_eval` binary
+/// and never taken by the server.
+///
+/// REENTRANT on purpose. A test may legitimately pin the read-only flag and then
+/// call a harness suite entry point, which pins the same set again; a plain
+/// `Mutex` would deadlock that composition, and "don't nest" is exactly the kind
+/// of rule that dies at the next contributor. Restores still unwind LIFO, so the
+/// outer pin's value is the one that survives.
+pub(crate) static RECALL_ENV_LOCK: parking_lot::ReentrantMutex<()> =
+    parking_lot::const_reentrant_mutex(());
 
 /// Holds [`RECALL_ENV_LOCK`] and pins `SHODH_RECALL_READONLY` to an EXPLICIT
 /// value for the duration of a test, restoring the previous value on drop.
 ///
-/// Pinning `"0"` rather than removing the variable is what makes a test immune
-/// to the harness pin. `pin_harness_threads` sets the variable only when it is
-/// unset — "a caller that explicitly chose a different value keeps their
-/// override" — so an explicit `"0"` cannot be clobbered by a harness test that
-/// slips past the lock, while a removed variable can. `recall_readonly_env`
-/// treats unset and `"0"` identically, so this changes nothing about what is
-/// being tested; it only removes a way for the test to be wrong for reasons
-/// that have nothing to do with the code under test.
+/// Pins `"0"` rather than removing the variable. `recall_readonly_env` treats
+/// unset and `"0"` identically, so this changes nothing about what is being
+/// tested; it states the intent, and it is what the surviving writer of this
+/// variable — the `recall_eval` binary's only-if-unset startup pin — cannot
+/// override. The in-process harness no longer writes the variable at all: it
+/// reads it once and threads `Query::read_only`.
 #[cfg(test)]
 pub(crate) struct RecallEnvPin {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: parking_lot::ReentrantMutexGuard<'static, ()>,
     previous: Option<std::ffi::OsString>,
 }
 
 #[cfg(test)]
 impl RecallEnvPin {
     pub(crate) fn pin(value: &str) -> Self {
-        let lock = RECALL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = RECALL_ENV_LOCK.lock();
         let previous = std::env::var_os("SHODH_RECALL_READONLY");
         std::env::set_var("SHODH_RECALL_READONLY", value);
         Self {
@@ -12590,8 +12627,8 @@ mod recall_readonly_write_gate_tests {
 
         // Production default: the counter still moves. Pinned to an explicit
         // "0" rather than removing the variable — `recall_readonly_env` treats
-        // the two identically, but only the explicit value is immune to a
-        // harness test's `pin_harness_threads`, which sets the pin when unset.
+        // the two identically, but the explicit value states the intent and
+        // survives any only-if-unset writer.
         {
             let _pin = RecallEnvPin::pin("0");
             let _ = system

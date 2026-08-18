@@ -5272,7 +5272,8 @@ mod tests {
 
     #[test]
     fn test_write_mode_default_async() {
-        std::env::remove_var("SHODH_WRITE_MODE");
+        let mut guard = crate::test_support::ScopedEnv::acquire();
+        guard.remove("SHODH_WRITE_MODE");
         let mode = WriteMode::default();
         assert_eq!(mode, WriteMode::Async);
     }
