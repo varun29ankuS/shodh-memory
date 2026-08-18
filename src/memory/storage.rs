@@ -922,12 +922,17 @@ pub fn deserialize_memory_for_migration(data: &[u8]) -> Result<Memory> {
 /// # Why the migration path in particular needs this
 ///
 /// `MemoryStorage::get_opt` has checked its decodes since the CRC work, so a
-/// fabrication is never *served*. `storage::migrate_legacy` was the hole left
-/// behind: it decodes with the unchecked chain and writes the result back with
-/// `encode_sho`, under the original key. A pseudo-decoded record therefore came
-/// out the other side re-encoded, freshly checksummed, and carrying an id that
-/// is not the key it lives under — the original bytes gone, and the fabrication
-/// now wearing a valid envelope.
+/// fabrication is never *served*, and `storage::migrate_legacy` calls the
+/// private [`deserialize_memory_checked`] directly. The holes left behind were
+/// the two rewriting/counting paths OUTSIDE this module —
+/// `migration::migrate_memory_db` and `backup.rs`'s memory count — which had no
+/// checked entry point to call because none was public.
+///
+/// `migrate_memory_db` is the one that writes: it decodes with the unchecked
+/// chain and writes the result back with `encode_sho`, under the original key. A
+/// pseudo-decoded record therefore came out the other side re-encoded, freshly
+/// checksummed, and carrying an id that is not the key it lives under — the
+/// original bytes gone, and the fabrication now wearing a valid envelope.
 ///
 /// That is worse than serving one. Serving a fabrication is a wrong answer to
 /// one request; persisting it destroys the evidence a scrub needs and makes the
