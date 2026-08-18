@@ -58,10 +58,26 @@ pub(crate) struct ScopedEnv {
 }
 
 impl ScopedEnv {
-    /// Take the lock without touching anything yet.
+    /// Take the server/auth config lock ([`ENV_LOCK`]) without touching
+    /// anything yet.
     pub(crate) fn acquire() -> Self {
+        Self::with_lock(&ENV_LOCK)
+    }
+
+    /// Take the recall-determinism lock (`crate::memory::RECALL_ENV_LOCK`)
+    /// instead, for the retrieval feature flags the harness and its tests flip:
+    /// `SHODH_FUSION_V2`, `SHODH_TYPED_WALK`, `SHODH_FUSION_FEATURE_EXPORT`.
+    ///
+    /// Same lock the harness pin takes, so a test that flips one of these and
+    /// then runs a suite is serialised against every other recall-env test. The
+    /// lock is reentrant, so the nesting composes.
+    pub(crate) fn acquire_recall() -> Self {
+        Self::with_lock(&crate::memory::RECALL_ENV_LOCK)
+    }
+
+    fn with_lock(lock: &'static parking_lot::ReentrantMutex<()>) -> Self {
         Self {
-            _lock: ENV_LOCK.lock(),
+            _lock: lock.lock(),
             saved: Vec::new(),
         }
     }
@@ -114,11 +130,176 @@ impl Drop for ScopedEnv {
     }
 }
 
+/// Every file in `src/` that mutates a process environment variable, with the
+/// number of live mutation calls it contains and why they are allowed to be
+/// there. `env_mutation_sites_are_accounted_for` fails if reality drifts from
+/// this table.
+///
+/// The point is not the count. The point is that adding a mutation site becomes
+/// a decision someone has to write down, because the alternative — noticing it
+/// later — has already failed once at scale: a single unrestored
+/// `SHODH_RECALL_READONLY=1` in the recall harness silently disabled
+/// reinforcement for every other test in the process, for the entire history of
+/// this suite, and no test failed.
+const ENV_MUTATION_INVENTORY: &[(&str, usize, &str)] = &[
+    (
+        "src/bin/recall_eval.rs",
+        2,
+        "process startup, before any thread or ONNX/rayon pool exists; the          whole process IS the harness, so there is nobody else to affect",
+    ),
+    (
+        "src/embeddings/downloader.rs",
+        1,
+        "ORT_DYLIB_PATH, written once while resolving the ONNX runtime before          a session exists; ort reads it at session construction",
+    ),
+    (
+        "src/embeddings/minilm.rs",
+        3,
+        "ORT_DYLIB_PATH behind a OnceLock, same reason; read-once at model load",
+    ),
+    (
+        "src/memory/mod.rs",
+        3,
+        "RecallEnvPin: one set and its two restore arms, all under          RECALL_ENV_LOCK, test-only",
+    ),
+    (
+        "src/recall_harness/runner.rs",
+        5,
+        "HarnessEnvPin's set and its two restore arms, plus analyze_ablation's          per-arm config which runs only in the recall_eval binary; all under          RECALL_ENV_LOCK",
+    ),
+    (
+        "src/server.rs",
+        8,
+        "server bootstrap, documented as running before the tokio runtime          spawns any thread",
+    ),
+    (
+        "src/test_support.rs",
+        5,
+        "ScopedEnv itself: set, remove, set_for_process, and the two restore          arms",
+    ),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const KEY: &str = "SHODH_TEST_SUPPORT_SCOPED_ENV";
+
+    /// Count live environment-mutation calls in one file's source text.
+    ///
+    /// Lines that are entirely a comment do not count — the codebase discusses
+    /// these functions in prose a lot, and a doc paragraph is not a mutation.
+    /// The needles are assembled from fragments so this file's own source does
+    /// not match the patterns it searches for.
+    fn count_env_mutations(text: &str) -> usize {
+        let needles = [
+            concat!("env::", "set_var("),
+            concat!("env::", "remove_var("),
+        ];
+        text.lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .map(|l| needles.iter().map(|n| l.matches(n).count()).sum::<usize>())
+            .sum()
+    }
+
+    /// The scanner behind `env_mutation_sites_are_accounted_for` must actually
+    /// see a new mutation site, and must not be fooled by prose.
+    ///
+    /// Without this, the inventory test could pass because the scanner returns
+    /// zero for everything and the inventory happened to be empty — the same
+    /// class of failure as a mutation harness reporting survivors because
+    /// nothing ran at all.
+    ///
+    /// The fixtures are assembled from fragments for the same reason the
+    /// needles are: a literal call written here would be counted as a real site
+    /// in this file. That is not hypothetical — the first draft of this test
+    /// spelled them out and the inventory test failed on it, which is the
+    /// clearest evidence available that the inventory notices new sites.
+    #[test]
+    fn the_env_mutation_scanner_counts_calls_and_ignores_comments() {
+        let set = concat!("env::", "set_var(");
+        let remove = concat!("env::", "remove_var(");
+
+        let prose = format!("/// see std::{set}) for why this is unsound
+// std::{remove})
+");
+        assert_eq!(
+            count_env_mutations(&prose),
+            0,
+            "prose about the functions must not count as a call site"
+        );
+
+        let real = format!("fn f() {{
+    std::{set}\"A\", \"1\");
+    std::{remove}\"A\");
+}}
+");
+        assert_eq!(
+            count_env_mutations(&real),
+            2,
+            "both a set and a remove must be counted"
+        );
+
+        assert_eq!(
+            count_env_mutations(&format!("{prose}{real}")),
+            2,
+            "prose plus two calls is two — this is what makes an unaccounted              site fail the inventory"
+        );
+    }
+
+    /// Walk `src/`, counting live mutation calls per file, and compare against
+    /// [`ENV_MUTATION_INVENTORY`].
+    #[test]
+    fn env_mutation_sites_are_accounted_for() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("reading src/") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("reading a source file");
+                let hits = count_env_mutations(&text);
+                if hits > 0 {
+                    let rel = path
+                        .strip_prefix(root.parent().expect("src has a parent"))
+                        .expect("path under the crate root")
+                        .to_string_lossy()
+                        .replace(std::path::MAIN_SEPARATOR, "/");
+                    found.insert(rel, hits);
+                }
+            }
+        }
+
+        let expected: std::collections::BTreeMap<String, usize> = ENV_MUTATION_INVENTORY
+            .iter()
+            .map(|(f, n, _)| ((*f).to_string(), *n))
+            .collect();
+
+        assert_eq!(
+            found,
+            expected,
+            "
+
+The set of process-environment mutation sites in src/ changed.
+
+             Found:    {found:#?}
+             Expected: {expected:#?}
+
+             A new site is not automatically wrong, but it is never free: Rust              runs this crate's tests as threads in ONE process, so a variable              set by one test is read by every other test running at that moment              and by every test that runs afterwards. Before updating              ENV_MUTATION_INVENTORY, answer three questions.
+
+             1. Can the value be injected instead? A field on the request, an              argument, a config struct. An injected value cannot be observed by              an unrelated thread; that is a fix, not a mitigation.
+             2. If it must stay global, is it written under one of the two              crate-wide env locks and restored on drop (ScopedEnv /              RecallEnvPin / HarnessEnvPin)?
+             3. Does the variable change what OTHER code does while it is set?              If yes, a lock does not save you — a mutex serialises writers, and              the party you are racing is a reader that takes nothing. Say so in              the inventory rationale rather than implying the lock covers it.
+"
+        );
+    }
 
     #[test]
     fn scoped_env_restores_a_previously_unset_variable() {

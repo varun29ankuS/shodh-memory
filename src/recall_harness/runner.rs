@@ -2680,10 +2680,11 @@ mod tests {
         let _harness_env = pin_harness_threads();
         let dir = unique_storage_dir("fusion-export");
         let out = dir.join("fusion_features.jsonl");
-        // SAFETY: process-wide env; run as a single explicit --ignored test.
-        unsafe {
-            std::env::set_var("SHODH_FUSION_FEATURE_EXPORT", &out);
-        }
+        let mut env = crate::test_support::ScopedEnv::acquire_recall();
+        env.set(
+            "SHODH_FUSION_FEATURE_EXPORT",
+            out.to_str().expect("export path is valid UTF-8"),
+        );
         let inputs = RunInputs {
             storage_path: dir.join("run"),
             corpus_path: Some(crate::recall_harness::fixtures::manifest_path(
@@ -2699,9 +2700,7 @@ mod tests {
             age_days: 0.0,
         };
         let report = run_smoke_suite_with_ranks(&inputs).expect("export run");
-        unsafe {
-            std::env::remove_var("SHODH_FUSION_FEATURE_EXPORT");
-        }
+        drop(env);
         let stable = std::path::Path::new("target/fusion_training.jsonl");
         std::fs::copy(&out, stable).expect("copy export");
         let lines = std::fs::read_to_string(stable).expect("read export");
@@ -2751,7 +2750,8 @@ mod tests {
         let gold_uuid = id_map.get("tw-gold").copied().expect("gold ingested");
 
         let system = manager.get_user_memory(EVAL_USER).expect("system");
-        std::env::set_var("SHODH_TYPED_WALK", "1");
+        let mut env = crate::test_support::ScopedEnv::acquire_recall();
+        env.set("SHODH_TYPED_WALK", "1");
         let results = system
             .read()
             .recall(&crate::memory::types::Query {
@@ -2761,7 +2761,7 @@ mod tests {
                 ..Default::default()
             })
             .expect("recall");
-        std::env::remove_var("SHODH_TYPED_WALK");
+        drop(env);
 
         let rank = results.iter().position(|m| m.id.0 == gold_uuid);
         assert!(
@@ -3364,11 +3364,12 @@ mod tests {
         };
 
         let q = "What did Alice's collaborator discover?";
-        std::env::remove_var("SHODH_FUSION_V2");
+        let mut env = crate::test_support::ScopedEnv::acquire_recall();
+        env.remove("SHODH_FUSION_V2");
         let off = recall_order(q);
-        std::env::set_var("SHODH_FUSION_V2", "1");
+        env.set("SHODH_FUSION_V2", "1");
         let on = recall_order(q);
-        std::env::remove_var("SHODH_FUSION_V2");
+        drop(env);
         let _ = std::fs::remove_dir_all(&storage);
 
         let rank = |v: &Vec<(String, f32)>, id: &str| v.iter().position(|(i, _)| i == id);
@@ -3438,10 +3439,11 @@ mod tests {
                 .unwrap_or_default()
         };
 
-        std::env::set_var("SHODH_FUSION_V2", "1");
+        let mut env = crate::test_support::ScopedEnv::acquire_recall();
+        env.set("SHODH_FUSION_V2", "1");
         let pf = order(LayerMode::PlusFacts);
         let full = order(LayerMode::Full);
-        std::env::remove_var("SHODH_FUSION_V2");
+        drop(env);
         let _ = std::fs::remove_dir_all(&storage);
 
         let rank = |v: &Vec<String>, id: &str| v.iter().position(|i| i == id);

@@ -14768,8 +14768,12 @@ mod tests {
 
     #[test]
     fn test_provenance_cap_enforced() {
-        // Pin the cap low and deterministically so the test is hermetic.
-        std::env::set_var("SHODH_PROVENANCE_MAX_SOURCES", "3");
+        // Pin the cap low and deterministically so the test is hermetic. The
+        // guard restores the previous value: `provenance_max_sources()` reads
+        // the variable on every attestation, so leaving it at 3 silently capped
+        // every later test in the process.
+        let mut env = crate::test_support::ScopedEnv::acquire();
+        env.set("SHODH_PROVENANCE_MAX_SOURCES", "3");
 
         let temp_dir = tempfile::tempdir().unwrap();
         let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
@@ -14801,8 +14805,6 @@ mod tests {
                 .any(|p| p.source_episode_id == last_episode),
             "the just-added episode must never be dropped by the cap"
         );
-
-        std::env::remove_var("SHODH_PROVENANCE_MAX_SOURCES");
     }
 
     #[test]
@@ -14968,14 +14970,10 @@ mod tests {
         use crate::recall_harness::bridge_harness::generate_bridge_fixtures;
         use crate::recall_harness::runner::{build_manager, ingest_corpus, EVAL_USER};
 
-        // Deterministic single-threaded NER so the ingested topology is reproducible.
-        unsafe {
-            for (k, v) in [("SHODH_ONNX_THREADS", "1"), ("RAYON_NUM_THREADS", "1")] {
-                if std::env::var_os(k).is_none() {
-                    std::env::set_var(k, v);
-                }
-            }
-        }
+        // Deterministic single-threaded NER so the ingested topology is
+        // reproducible. The shared harness pin does exactly this and puts it
+        // back afterwards; a local copy did not.
+        let _harness_env = crate::recall_harness::runner::pin_harness_threads();
 
         let units: usize = std::env::var("SHODH_TOPO_MEASURE_UNITS")
             .ok()
