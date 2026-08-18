@@ -750,11 +750,16 @@ fn check_entity(n: &EntityNode, key: &[u8]) -> (Vec<&'static str>, String, Optio
         ));
     }
 
-    // NOT the check that catches the July `EntityLabel` renumbering — measured,
-    // not assumed. That desync always dies inside postcard, because
-    // `DateTime<Utc>` serialises as a string and every following length varint
-    // lands misaligned; see
-    // `renumbered_entity_label_surfaces_as_undecodable_and_trips_the_alarm`.
+    // NOT the check that catches the July `EntityLabel` renumbering, and the
+    // reason changed with the merge. It used to be that the desync always died
+    // inside postcard — `DateTime<Utc>` serialises as a string, so every
+    // following length varint landed misaligned — and the cohort surfaced as
+    // undecodable. `decode_entity_node` now retries under
+    // `EntityLabelWireGeneration::PreSchemaRollup` and recovers those nodes
+    // correctly, so they arrive here as `Legacy` with sane timestamps; see
+    // `a_pre_rollup_node_recovers_its_values_not_a_fabrication`, which asserts
+    // the recovered values rather than merely that a decode happened.
+    //
     // What this bound earns its place for is the case postcard cannot reject:
     // `try_decode_compat` falls back to raw bincode 2.x for untagged records,
     // and bincode tolerates trailing bytes, so a shifted read there can
@@ -1728,8 +1733,31 @@ mod tests {
         (uuid, crate::serialization::encode(&node).unwrap())
     }
 
+    /// A node written before the `EntityLabel` renumbering is `Legacy` — and
+    /// this is the assertion the merge inverted.
+    ///
+    /// # What changed, and why it is the interesting part of this merge
+    ///
+    /// On the branch this module was written on, the July renumbering was
+    /// unrecoverable: `Other(String)` moved from index 23 to 35, `DateTime<Utc>`
+    /// serialises as a string, and every following length varint landed
+    /// misaligned, so the decode died on end-of-buffer or invalid UTF-8. The
+    /// class was `Undecodable` and the *rate* of undecodables was the alarm.
+    ///
+    /// The integration branch then added
+    /// `EntityLabelWireGeneration::PreSchemaRollup`, the exact counterpart of
+    /// `NerWireGeneration::PreFineLabel` on the memory side: on failure the
+    /// decode is retried under the pre-rollup variant order. Those nodes now
+    /// decode, and they decode CORRECTLY — which is what
+    /// [`a_pre_rollup_node_recovers_its_values_not_a_fabrication`] exists to
+    /// prove, because "it decodes now" is exactly the claim that is worthless
+    /// without checking what it decoded INTO.
+    ///
+    /// So the signal for this cohort moved from a rate to a class: it is aging
+    /// data, correctly readable, one schema change from breaking again. Not
+    /// clean, and still never silently wrong.
     #[test]
-    fn renumbered_entity_label_is_never_reported_clean() {
+    fn a_pre_rollup_entity_label_is_recovered_as_legacy_not_lost() {
         let dir = tempfile::tempdir().unwrap();
         let db = graph_db(dir.path());
         let cf = db.cf_handle(crate::graph_memory::ENTITIES_CF_NAME).unwrap();
@@ -1743,59 +1771,77 @@ mod tests {
         assert_eq!(counts.scanned, 1);
         assert_eq!(
             counts.clean, 0,
-            "a node written before the EntityLabel renumbering is not clean; \
-             decode paths: {:?}, checks: {:?}",
+            "a node needing the pre-rollup generation is not current-format; \
+             paths: {:?}, checks: {:?}",
             counts.decode_paths, counts.checks_failed
         );
-        assert_eq!(counts.legacy, 0, "this is corruption, not aging");
-        assert_eq!(counts.defects(), 1);
-    }
-
-    #[test]
-    fn renumbered_entity_label_surfaces_as_undecodable_and_trips_the_alarm() {
-        // EMPIRICAL CORRECTION, and it matters.
-        //
-        // The obvious expectation is that the renumbering produces a silent
-        // wrong decode: index 23 reads as the unit variant `Norp`, the string
-        // payload lands in `created_at`, the node decodes into a wrong value.
-        // It does not. `DateTime<Utc>` serialises as a STRING, so the desync
-        // makes every subsequent length varint misaligned; the decode dies on
-        // "Hit the end of buffer" or "Tried to parse invalid utf-8" long
-        // before any field can be inspected. Probed across payloads and tail
-        // sizes from 0 to 20,000 bytes, every single shape errored.
-        //
-        // That agrees with the live symptom: graph traverse returned 500, an
-        // error, not wrong answers. So on graph nodes this defect class is
-        // caught as UNDECODABLE, and it is the undecodable RATE that raises
-        // the alarm — 74% of the live graph, three orders of magnitude above
-        // the threshold. The timestamp bound does not catch this one, and the
-        // scrub must not claim it does.
-        let dir = tempfile::tempdir().unwrap();
-        let db = graph_db(dir.path());
-        let cf = db.cf_handle(crate::graph_memory::ENTITIES_CF_NAME).unwrap();
-
-        for payload in ["shipping_line", "1970-01-01T00:00:00Z", "x"] {
-            let (uuid, bytes) = pre_july_node(payload);
-            assert!(
-                crate::graph_memory::decode_entity_node_for_scrub(&bytes).is_err(),
-                "payload {payload:?} decoded; if this ever succeeds the class                  moves from undecodable to implausible and the plausibility                  checks become the load-bearing signal for it"
-            );
-            db.put_cf(cf, uuid.as_bytes(), &bytes).unwrap();
-        }
-
-        let mut sweep = Sweep::new(budget());
-        let counts = scrub_graph_nodes(&db, cf, &mut sweep);
-        assert_eq!(counts.scanned, 3);
-        assert_eq!(counts.undecodable, 3);
-        assert_eq!(counts.clean, 0);
-        assert_eq!(sweep.findings.len(), 3);
-
-        // A whole-cohort breakage is far above the alarm rate, so it reports
-        // unhealthy rather than degraded.
+        assert_eq!(
+            counts.defects(),
+            0,
+            "the retry recovers it, so it is not broken; checks: {:?}",
+            counts.checks_failed
+        );
+        assert_eq!(counts.legacy, 1, "paths: {:?}", counts.decode_paths);
         assert_eq!(
             decide(&ClassCounts::default(), &counts, true),
-            Verdict::Unhealthy
+            Verdict::Aging,
+            "a whole cohort readable only via a legacy generation is a \
+             countdown to the next positional change, not an outage"
         );
+    }
+
+    /// The recovered node carries its real values, not plausible ones.
+    ///
+    /// This is the assertion that makes the previous test worth anything. A
+    /// decoder that "recovers" a cohort by producing well-formed garbage is
+    /// strictly worse than one that fails, because the failure is visible and
+    /// the garbage is not — that is the entire thesis of this module, applied
+    /// to the fix that landed on the other branch.
+    ///
+    /// Also pins that `id_key_mismatch` stays silent here. The check is
+    /// false-positive-free by construction and a pre-rollup node is healthy
+    /// data in an old dialect; if this ever fires, the retry has started
+    /// fabricating and the class moves back to a defect.
+    #[test]
+    fn a_pre_rollup_node_recovers_its_values_not_a_fabrication() {
+        for payload in ["shipping_line", "1970-01-01T00:00:00Z", "x"] {
+            let (uuid, bytes) = pre_july_node(payload);
+
+            let (node, needs_migration) = crate::graph_memory::decode_entity_node_for_scrub(&bytes)
+                .unwrap_or_else(|e| {
+                    panic!("payload {payload:?} must decode via the pre-rollup retry: {e}")
+                });
+
+            assert!(
+                needs_migration,
+                "a record recovered through a legacy generation must be flagged \
+                 for rewrite, or it stays one schema change from breaking"
+            );
+            assert_eq!(node.uuid, uuid, "the id must survive the retry intact");
+            assert_eq!(
+                node.name, "Maersk",
+                "payload {payload:?}: a shifted read would put anything here"
+            );
+            assert_eq!(
+                node.labels,
+                vec![crate::graph_memory::EntityLabel::Other(payload.to_string())],
+                "the label payload is the field the renumbering moved; if the \
+                 retry produced a different one it has invented data"
+            );
+            assert_eq!(
+                node.mention_count, 3,
+                "payload {payload:?}: the fields AFTER the label are what a \
+                 one-byte desync destroys, so this is the real assertion"
+            );
+
+            // The plausibility checks must stay quiet on healthy old data.
+            let (failed, detail, _) = check_entity(&node, uuid.as_bytes());
+            assert!(
+                failed.is_empty(),
+                "payload {payload:?}: a correctly recovered node must not trip \
+                 any check; fired {failed:?} ({detail})"
+            );
+        }
     }
 
     #[test]
