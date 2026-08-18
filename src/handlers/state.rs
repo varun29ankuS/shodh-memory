@@ -2760,7 +2760,17 @@ impl MultiUserMemoryManager {
     ) -> (usize, usize) {
         let mut scrubbed = 0;
         let mut unhealthy = 0;
-        for user_id in self.profiles_on_disk() {
+        let profiles = self.profiles_on_disk();
+        // Published before the sweep, not after: if this run dies half way the
+        // gauge already says how many profiles were meant to be covered, and
+        // the ledger says how many actually were.
+        crate::metrics::INTEGRITY_USERS_NEVER_SCRUBBED.set(
+            profiles
+                .iter()
+                .filter(|u| self.scrub_ledger.get(u).is_none())
+                .count() as i64,
+        );
+        for user_id in profiles {
             let report = self.scrub_user_and_record(
                 &user_id,
                 budget.clone(),
@@ -2772,6 +2782,12 @@ impl MultiUserMemoryManager {
             }
         }
         crate::metrics::publish_integrity_scrub_metrics(&self.scrub_ledger.summary());
+        crate::metrics::INTEGRITY_USERS_NEVER_SCRUBBED.set(
+            self.profiles_on_disk()
+                .iter()
+                .filter(|u| self.scrub_ledger.get(u).is_none())
+                .count() as i64,
+        );
         (scrubbed, unhealthy)
     }
 

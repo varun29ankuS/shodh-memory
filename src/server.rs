@@ -665,19 +665,32 @@ fn start_integrity_scrub_scheduler(manager: AppState, interval_secs: u64) {
     };
 
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-        // Skip the immediate tick: a scrub during startup would contend with
-        // index loading and embedder warm-up for the same disk.
-        interval.tick().await;
-
-        // Offset from the maintenance scheduler, which also defaults to 3600s
-        // and also runs on the blocking pool. Without this the two would fire
-        // together on every tick for the life of the process, since both are
-        // anchored to the same startup instant.
+        // Offset BEFORE the interval is created, which is the whole point.
+        // `tokio::time::interval` anchors its ticks to the moment it is
+        // constructed, so sleeping after construction only delays entry into
+        // the loop — the ticks stay on the original phase and this scheduler
+        // would still land on top of the maintenance one. Both default to
+        // 3600s, both run on the blocking pool, and both are anchored to
+        // startup, so without this they collide on every tick for the life of
+        // the process.
+        //
+        // This also serves as the startup skip: a scrub during boot would
+        // contend with index loading and embedder warm-up for the same disk.
         tokio::time::sleep(std::time::Duration::from_secs(
             (interval_secs / 2).clamp(1, 900),
         ))
         .await;
+
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        // A sweep is bounded but not instant, and on a pathological store it
+        // could outlast its own interval. The default `Burst` behaviour would
+        // then fire every missed tick back to back, so a slow store would be
+        // scrubbed continuously — the one way this can stop being off the
+        // request path. `Skip` drops missed ticks and resumes on phase: at most
+        // one scrub is ever in flight.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // The first tick of an interval completes immediately.
+        interval.tick().await;
 
         loop {
             interval.tick().await;
