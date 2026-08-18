@@ -27,6 +27,7 @@ pub mod replay;
 pub mod retrieval;
 pub mod segmentation;
 pub mod sessions;
+pub mod sources;
 pub mod storage;
 pub mod temporal_facts;
 pub mod todo_formatter;

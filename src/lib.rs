@@ -34,6 +34,7 @@ pub mod fs_matcher;
 pub mod gazetteer;
 pub mod graph_memory;
 pub mod handlers;
+pub mod ingest;
 pub mod integrations;
 pub mod kb;
 pub mod local_ipc;

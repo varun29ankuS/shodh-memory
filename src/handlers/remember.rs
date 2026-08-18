@@ -441,107 +441,10 @@ pub async fn remember(
     trace: Option<axum::Extension<crate::handlers::trace::OpTrace>>,
     Json(req): Json<RememberRequest>,
 ) -> Result<Json<RememberResponse>, AppError> {
-    let op_start = std::time::Instant::now();
-
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
     validation::validate_content(&req.content, false).map_validation_err("content")?;
 
     let experience_type = parse_experience_type(req.memory_type.as_ref())?;
-
-    // PERF: Run NER and YAKE extraction in parallel using spawn_blocking
-    // Both are CPU-bound and independent - parallelization reduces latency by ~40%
-    let ner = state.get_neural_ner();
-    let yake = state.get_keyword_extractor();
-    let content_for_ner = req.content.clone();
-    let content_for_yake = req.content.clone();
-
-    let (ner_result, yake_result) = tokio::join!(
-        // NER extraction (named entities: Person, Org, Location, Misc)
-        // Preserve full entity records for downstream graph insertion with proper labels
-        tokio::task::spawn_blocking(move || {
-            match ner.extract(&content_for_ner) {
-                Ok(entities) => entities
-                    .into_iter()
-                    .map(|e| NerEntityRecord {
-                        text: e.text,
-                        entity_type: e.entity_type.as_str().to_string(),
-                        confidence: e.confidence,
-                        start_char: Some(e.start),
-                        end_char: Some(e.end),
-                        fine_label: e.fine_label,
-                    })
-                    .collect::<Vec<NerEntityRecord>>(),
-                // Reaching here means BOTH the neural typer and the rule-based
-                // fallback failed — the memory is about to be stored with no
-                // typed entities at all, which starves graph labelling and the
-                // toponym gazetteer. That is not a debug-level event.
-                Err(e) => {
-                    tracing::warn!(
-                        "NER extraction failed on remember — storing memory with NO typed \
-                         entities: {e}"
-                    );
-                    Vec::new()
-                }
-            }
-        }),
-        // YAKE extraction (keywords: common nouns, verbs, etc.)
-        // Captures important terms like "sunrise", "painting", "lake"
-        tokio::task::spawn_blocking(move || yake.extract_texts(&content_for_yake))
-    );
-
-    let ner_entities = match ner_result {
-        Ok(entities) => entities,
-        Err(e) => {
-            if e.is_panic() {
-                tracing::error!("NER extraction task panicked: {:?}", e);
-            } else {
-                tracing::debug!("NER extraction task cancelled: {:?}", e);
-            }
-            Vec::new()
-        }
-    };
-    let extracted_keywords = match yake_result {
-        Ok(keywords) => keywords,
-        Err(e) => {
-            if e.is_panic() {
-                tracing::error!("YAKE extraction task panicked: {:?}", e);
-            } else {
-                tracing::debug!("YAKE extraction task cancelled: {:?}", e);
-            }
-            Vec::new()
-        }
-    };
-
-    let mut merged_entities: Vec<String> = req.tags.clone();
-    let mut seen: HashSet<String> = merged_entities.iter().map(|t| t.to_lowercase()).collect();
-    for record in &ner_entities {
-        if seen.insert(record.text.to_lowercase()) {
-            if validation::validate_entity(&record.text).is_ok() {
-                merged_entities.push(record.text.clone());
-            } else {
-                tracing::debug!(entity = %record.text, "Skipping invalid NER entity (too long or invalid chars)");
-            }
-        }
-    }
-    for keyword in extracted_keywords {
-        if seen.insert(keyword.to_lowercase()) {
-            if validation::validate_entity(&keyword).is_ok() {
-                merged_entities.push(keyword);
-            } else {
-                tracing::debug!(entity = %keyword, "Skipping invalid YAKE keyword (too long or invalid chars)");
-            }
-        }
-    }
-    if merged_entities.len() > validation::MAX_ENTITIES_PER_MEMORY {
-        tracing::debug!(
-            count = merged_entities.len(),
-            max = validation::MAX_ENTITIES_PER_MEMORY,
-            "Capping entities to maximum allowed"
-        );
-        merged_entities.truncate(validation::MAX_ENTITIES_PER_MEMORY);
-    }
-
-    let experience_type_str = format!("{:?}", experience_type);
 
     let context = build_rich_context(
         req.emotional_valence,
@@ -675,22 +578,14 @@ pub async fn remember(
         }
     }
 
-    // Resolve place mentions to coordinates. Deliberately NOT written to
-    // geo_location: that field means "recorded here" and feeds the geohash
-    // radius index, while these are places the content merely talks about.
-    let toponyms = crate::gazetteer::resolve_ner_locations(&ner_entities);
-
-    let declared_entities = declared_entities_from(&req.tags);
-
+    // Everything the enrichment core does NOT derive. `entities`, `tags`,
+    // `declared_entities`, `ner_entities` and `toponyms` are left at their
+    // defaults on purpose: `ingest_experience` overwrites all five, and
+    // filling them here would read as if they mattered.
     let experience = Experience {
         content: req.content.clone(),
         experience_type,
-        entities: merged_entities.clone(),
-        tags: merged_entities,
-        declared_entities,
         context,
-        ner_entities,
-        toponyms,
         importance_override: req.importance.map(|v| v.clamp(0.0, 1.0)),
         metadata: req.metadata,
         robot_id: req.robot_id.clone(),
@@ -720,245 +615,40 @@ pub async fn remember(
         ..Default::default()
     };
 
-    let memory = state
-        .get_user_memory(&req.user_id)
-        .map_err(AppError::Internal)?;
+    let outcome = crate::ingest::ingest_experience(
+        &state,
+        crate::ingest::IngestRequest {
+            user_id: req.user_id.clone(),
+            origin: MemoryOrigin::Api,
+            tags: req.tags.clone(),
+            created_at: req.created_at,
+            agent_id: req.agent_id.clone(),
+            run_id: req.run_id.clone(),
+            actor_id: req.actor_id.clone(),
+            parent_id: req.parent_id.clone(),
+            external_id: None,
+            change_reason: None,
+            experience,
+        },
+    )
+    .await?;
 
-    // `_detailed` so a content-hash dedup hit reports whether it MERGED
-    // enrichment into the stored memory. Without that signal the merged entity
-    // set would reach RocksDB and BM25 but never the graph, because the
-    // episode already exists and the graph pass is idempotent.
-    let outcome = {
-        let memory = memory.clone();
-        let exp_clone = experience.clone();
-        let created_at = req.created_at;
-        let agent_id = req.agent_id.clone();
-        let run_id = req.run_id.clone();
-        let actor_id = req.actor_id.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let memory_guard = memory.read();
-            if agent_id.is_some() || run_id.is_some() || actor_id.is_some() {
-                memory_guard.remember_with_agent_detailed(
-                    exp_clone, created_at, agent_id, run_id, actor_id,
-                )
-            } else {
-                memory_guard.remember_detailed(exp_clone, created_at)
-            }
-        })
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
-        .map_err(AppError::Internal)?
-    };
-    let memory_id = outcome.id.clone();
-
-    // A merge that added entities makes the memory's stored experience RICHER
-    // than the one this request carried, so every downstream pass (graph, NER
-    // embeddings, temporal facts) must run on the merged copy, not the request.
-    let needs_graph_rebuild = outcome.needs_graph_rebuild();
-    let experience = outcome.merged_experience.clone().unwrap_or(experience);
-
-    // Record metrics + session + broadcast BEFORE returning response (fast, <1ms)
-    let duration = op_start.elapsed().as_secs_f64();
-    metrics::MEMORY_STORE_DURATION.observe(duration);
-    metrics::MEMORY_STORE_TOTAL
-        .with_label_values(&["success"])
-        .inc();
-
+    // Stays here rather than in the enrichment core: a session is a human or
+    // agent work period, and an ingestion run is not one. See the module doc
+    // on `crate::ingest`.
     let session_id = state.session_store().get_or_create_session(&req.user_id);
     state.session_store().add_event(
         &session_id,
         SessionEvent::MemoryCreated {
             timestamp: chrono::Utc::now(),
-            memory_id: memory_id.0.to_string(),
-            memory_type: experience_type_str.clone(),
+            memory_id: outcome.memory_id.0.to_string(),
+            memory_type: outcome.experience_type_label.clone(),
             content_preview: req.content.chars().take(100).collect(),
             entities: req.tags.clone(),
         },
     );
 
-    state.emit_event(MemoryEvent {
-        event_type: "CREATE".to_string(),
-        timestamp: chrono::Utc::now(),
-        user_id: req.user_id.clone(),
-        memory_id: Some(memory_id.0.to_string()),
-        content_preview: Some(req.content.chars().take(500).collect()),
-        memory_type: Some(experience_type_str),
-        importance: None,
-        count: None,
-        entities: if req.tags.is_empty() {
-            None
-        } else {
-            Some(req.tags.clone())
-        },
-        results: None,
-    });
-
-    // IDEMPOTENCY FIX (issue #109): Return response IMMEDIATELY after persist.
-    // The 4 post-processing tasks below are all non-fatal (log errors and continue)
-    // and their results are never included in the response. Running them synchronously
-    // caused 5-15s handler latency, exceeding the MCP client's 10s timeout and
-    // triggering retries that created duplicate memories (31% duplication rate).
-    // Now fire-and-forget: response returns in <200ms, post-tasks run in background.
-    // Use task_tracker.spawn() so shutdown can await in-flight graph writes.
-    let response_id = memory_id.0.to_string();
-    {
-        let tracker = state.task_tracker.clone();
-        let state = state.clone();
-        let memory = memory.clone();
-        let user_id = req.user_id.clone();
-        let content = req.content.clone();
-        let experience = experience.clone();
-        let parent_id = req.parent_id.clone();
-        let created_at = req.created_at;
-
-        tracker.spawn(async move {
-            // Pre-compute entity name embeddings for Tier 4 concept merge
-            let entity_embeddings = {
-                let mem = memory.clone();
-                let names: Vec<String> = experience
-                    .ner_entities
-                    .iter()
-                    .map(|e| e.text.clone())
-                    .chain(experience.tags.iter().cloned())
-                    .collect();
-                if names.is_empty() {
-                    None
-                } else {
-                    match tokio::task::spawn_blocking(move || {
-                        let guard = mem.read();
-                        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-                        guard.get_embedder().encode_batch(&refs).map(|vecs| {
-                            names
-                                .into_iter()
-                                .zip(vecs)
-                                .collect::<std::collections::HashMap<String, Vec<f32>>>()
-                        })
-                    })
-                    .await
-                    {
-                        Ok(Ok(map)) => Some(map),
-                        Ok(Err(e)) => {
-                            tracing::debug!("Entity name embedding failed (non-fatal): {}", e);
-                            None
-                        }
-                        Err(e) => {
-                            tracing::debug!("Entity name embedding task panicked: {}", e);
-                            None
-                        }
-                    }
-                }
-            };
-
-            // Task 1: Build episodic graph (entities + episode + relationships).
-            // On success the episode's surprise components come back — emit them
-            // on the SSE stream so live consumers (dashboard anomaly feed) see
-            // each episode's statistical shape as it lands. Read-time deviation
-            // scoring stays in /api/anomalies; this event carries the raw facts.
-            let graph_pass = if needs_graph_rebuild {
-                // The episode exists and was built from the pre-merge entity
-                // set, so the idempotency guard would skip it. Demolish and
-                // rebuild from the MERGED experience — see
-                // `AppState::rebuild_experience_graph`.
-                state.rebuild_experience_graph(
-                    &user_id,
-                    &experience,
-                    &memory_id,
-                    entity_embeddings.as_ref(),
-                )
-            } else {
-                state.process_experience_into_graph(
-                    &user_id,
-                    &experience,
-                    &memory_id,
-                    entity_embeddings.as_ref(),
-                )
-            };
-
-            match graph_pass {
-                Ok(Some(surprise)) => {
-                    state.emit_event(MemoryEvent {
-                        event_type: "surprise".to_string(),
-                        timestamp: chrono::Utc::now(),
-                        user_id: user_id.clone(),
-                        memory_id: Some(memory_id.0.to_string()),
-                        content_preview: Some(experience.content.chars().take(100).collect()),
-                        memory_type: None,
-                        importance: None,
-                        count: None,
-                        entities: None,
-                        results: serde_json::to_value(&surprise).ok(),
-                    });
-                }
-                Ok(None) => {}
-                Err(e) => tracing::debug!("Graph processing failed (non-fatal): {}", e),
-            }
-
-            // Task 2: Set parent_id for hierarchical organization
-            if let Some(ref parent_id_str) = parent_id {
-                let resolved_parent = if let Ok(parent_uuid) = uuid::Uuid::parse_str(parent_id_str)
-                {
-                    Some(crate::memory::MemoryId(parent_uuid))
-                } else {
-                    let mem = memory.clone();
-                    let prefix = parent_id_str.clone();
-                    match tokio::task::spawn_blocking(move || {
-                        let guard = mem.read();
-                        guard
-                            .find_memory_by_prefix(&prefix)
-                            .ok()
-                            .flatten()
-                            .map(|m| m.id.clone())
-                    })
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(e) => {
-                            tracing::warn!("Parent resolve panicked (non-fatal): {e}");
-                            None
-                        }
-                    }
-                };
-
-                if let Some(resolved) = resolved_parent {
-                    let mem = memory.clone();
-                    let mid = memory_id.clone();
-                    if let Err(e) = tokio::task::spawn_blocking(move || {
-                        let guard = mem.read();
-                        guard.set_memory_parent(&mid, Some(resolved))
-                    })
-                    .await
-                    {
-                        tracing::warn!("Parent set task panicked (non-fatal): {e}");
-                    }
-                } else {
-                    tracing::warn!("Could not resolve parent_id: {}", parent_id_str);
-                }
-            }
-
-            // Task 3: Extract and store temporal facts
-            {
-                let mem = memory.clone();
-                let uid = user_id.clone();
-                let cnt = content.clone();
-                let ents = experience.entities.clone();
-                let ts = created_at.unwrap_or_else(chrono::Utc::now);
-                let mid = memory_id.clone();
-
-                if let Err(e) = tokio::task::spawn_blocking(move || {
-                    let guard = mem.read();
-                    guard.store_temporal_facts_for_memory(&uid, &mid, &cnt, &ents, ts)
-                })
-                .await
-                {
-                    tracing::warn!("Temporal fact extraction panicked (non-fatal): {e}");
-                }
-            }
-
-            // Task 4: Infer causal lineage (runs after graph processing)
-            spawn_lineage_inference(state, user_id, memory_id);
-        });
-    }
+    let response_id = outcome.memory_id.0.to_string();
 
     // Trace enrichment (witnessed-op capture): the stored memory id is this
     // op's evidence. RememberRequest carries no session_id — the middleware's
@@ -1437,7 +1127,7 @@ pub async fn upsert_memory(
 /// Resolves the memory's entity graph, finds temporal candidates, infers causal
 /// edges, and strengthens corresponding knowledge graph connections. All failures
 /// are logged but never propagate — lineage is best-effort.
-fn spawn_lineage_inference(state: AppState, user_id: String, memory_id: crate::memory::MemoryId) {
+pub(crate) fn spawn_lineage_inference(state: AppState, user_id: String, memory_id: crate::memory::MemoryId) {
     let tracker = state.task_tracker.clone();
     tracker.spawn(async move {
         let graph_arc = match state.get_user_graph(&user_id) {

@@ -439,6 +439,7 @@ use crate::graph_memory::{
     recognised_tag_label, EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode,
     GraphMemory, GraphStats, LtpStatus, RelationshipEdge,
 };
+use crate::memory::sources::{SourceId, SourceStore};
 use crate::memory::{
     Experience, FeedbackStore, FileMemoryStore, MemoryConfig, MemoryId, MemoryStats, MemorySystem,
     ProspectiveStore, SessionStore, TodoStore,
@@ -736,6 +737,17 @@ pub struct MultiUserMemoryManager {
     /// Without this, overlapping consolidation (manual + maintenance timer, or double API call)
     /// causes double decay, duplicate fact extraction, and lost edge boosts.
     consolidation_locks: DashMap<String, std::sync::atomic::AtomicBool>,
+
+    /// The ingestion source registry. Every read answers from RocksDB; this
+    /// handle holds no registry state of its own. See `crate::memory::sources`.
+    pub source_store: Arc<SourceStore>,
+
+    /// One run at a time per source. This is a LOCK, not state: losing it on
+    /// restart is correct, because a restart also means no run is in flight.
+    /// The authoritative "is a run in progress" answer is the `active:` lease
+    /// in RocksDB, which survives the process; this only stops two requests in
+    /// one process from racing.
+    pub source_locks: DashMap<SourceId, Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl MultiUserMemoryManager {
@@ -915,6 +927,7 @@ impl MultiUserMemoryManager {
             cfs.extend(TodoStore::cf_descriptors());
             cfs.extend(ProspectiveStore::column_family_descriptors());
             cfs.extend(FileMemoryStore::cf_descriptors());
+            cfs.extend(SourceStore::cf_descriptors());
             // Feedback CF
             cfs.push(ColumnFamilyDescriptor::new(
                 crate::memory::feedback::CF_FEEDBACK,
@@ -950,6 +963,12 @@ impl MultiUserMemoryManager {
 
         let file_store = Arc::new(FileMemoryStore::new(shared_db.clone(), &base_path)?);
         info!("File memory store initialized");
+
+        // Constructing the registry runs the startup lease sweep: any run whose
+        // process died mid-flight is marked Aborted here, before anything can
+        // observe it as still Running.
+        let source_store = Arc::new(SourceStore::new(shared_db.clone())?);
+        info!("Ingestion source registry initialized");
 
         let feedback_store = Arc::new(parking_lot::RwLock::new(
             FeedbackStore::with_shared_db(shared_db.clone(), &base_path).unwrap_or_else(|e| {
@@ -1020,6 +1039,8 @@ impl MultiUserMemoryManager {
             habituation_tracker,
             task_tracker: tokio_util::task::TaskTracker::new(),
             consolidation_locks: DashMap::new(),
+            source_store,
+            source_locks: DashMap::new(),
         };
 
         info!("Running initial audit log rotation...");
@@ -1498,6 +1519,18 @@ impl MultiUserMemoryManager {
     fn purge_user_from_shared_db(&self, user_id: &str) -> Result<()> {
         let prefix = format!("{user_id}:");
         let prefix_bytes = prefix.as_bytes();
+
+        // The source registry keys definitions, runs, leases and runtime by
+        // `{user_id}:`, but its cursors are keyed by source id alone, so a
+        // prefix delete would leave them orphaned. The store deletes a source
+        // and everything derived from it together.
+        match self.source_store.purge_user(user_id) {
+            Ok(n) if n > 0 => {
+                tracing::debug!("GDPR: purged {n} ingestion sources for {user_id}")
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("GDPR: failed to purge ingestion sources for {user_id}: {e}"),
+        }
 
         // Shared CF names that use `{user_id}:` as key prefix
         let cf_names = ["todos", "projects", "prospective"];
