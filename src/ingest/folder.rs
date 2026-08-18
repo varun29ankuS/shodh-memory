@@ -983,6 +983,15 @@ pub async fn execute_run(
     let cursors = store
         .list_cursors(&def.id)
         .map_err(AppError::Internal)?;
+
+    // "Disappeared" means "enumerated before, not enumerated now". A run that
+    // stopped at a cap never reached the rest of the folder, so those cursors
+    // are stale for a reason already reported as `truncated_by` - and counting
+    // them would put a confident wrong number ("3,000 files vanished") right
+    // next to it. Absence of evidence is not evidence of absence, and this is
+    // the one place in a run where the two are easy to confuse.
+    let detects_disappearance = run.truncated_by.is_none();
+
     let mut tracked = 0u64;
     let mut failed = 0u64;
     let mut quarantined = 0u64;
@@ -997,7 +1006,7 @@ pub async fn execute_run(
         // memories are NOT deleted: a memory store records what was observed,
         // and silently deleting a corpus because a share was unmounted is
         // unrecoverable.
-        if cursor.last_seen_at < run.started_at {
+        if detects_disappearance && cursor.last_seen_at < run.started_at {
             run.items_disappeared += 1;
         }
     }

@@ -1506,6 +1506,70 @@ mod tests {
         }
     }
 
+    /// A run that stopped at a cap must not report the files it never reached
+    /// as having disappeared.
+    ///
+    /// Disappearance is inferred from a cursor the run did not touch, which is
+    /// evidence only when the run walked the whole folder. On a truncated run
+    /// it is the truncation, and reporting it as a vanished corpus - right next
+    /// to `truncated_by`, which already says what happened - is a confident
+    /// wrong number of exactly the kind this wire format refuses elsewhere.
+    #[tokio::test]
+    async fn a_truncated_run_does_not_report_the_files_it_never_reached_as_gone() {
+        let home = TempDir::new().expect("temp home");
+        let corpus = TempDir::new().expect("temp corpus");
+        write_file(corpus.path(), "a.md", "The first note describes the north pier.");
+        write_file(corpus.path(), "b.md", "The second note describes the south pier.");
+
+        let state = build_manager(home.path());
+        let def = register(&state, corpus.path(), "Capped").await;
+
+        // Both files get a cursor while the whole folder still fits.
+        let first = run_now(&state, &def, false).await;
+        assert_eq!(first.items_ingested, 2);
+        assert!(first.truncated_by.is_none());
+        assert_eq!(first.items_disappeared, 0);
+        drain(&state).await;
+
+        // Now the cap bites, and one of those two cursors is beyond it.
+        let _updated = update_source(
+            State(state.clone()),
+            Path((USER.to_string(), def.id.0.to_string())),
+            Json(UpdateSourceRequest {
+                max_files_per_run: Some(1),
+                name: None,
+                enabled: None,
+                include_globs: None,
+                exclude_globs: None,
+                max_depth: None,
+                max_file_bytes: None,
+                max_run_bytes: None,
+                rehash_every_n_runs: None,
+                memory_type: None,
+                tags: None,
+            }),
+        )
+        .await
+        .expect("update");
+        let def = state
+            .source_store
+            .get_source(USER, &def.id)
+            .expect("reload")
+            .expect("source exists");
+
+        let second = run_now(&state, &def, false).await;
+        assert_eq!(
+            second.truncated_by.as_deref(),
+            Some("max_files_per_run"),
+            "hitting a cap is never a silent truncation"
+        );
+        assert_eq!(
+            second.items_disappeared, 0,
+            "the file beyond the cap was never looked for, so nothing is known about \
+             whether it is still there"
+        );
+    }
+
     /// Registration-time refusals. Each is a distinct `InvalidInput` on
     /// `config.root`, so a caller is told which rule it hit.
     #[tokio::test]
