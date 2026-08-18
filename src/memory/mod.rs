@@ -102,7 +102,8 @@ fn companion_gate_enabled() -> bool {
 /// persistence, no co-retrieval/coactivation edge creation, no Hebbian edge
 /// strengthening anywhere in the recall path (including the graph leg's
 /// spreading-activation traversal in `graph_retrieval.rs`). Set by the eval
-/// harness (`pin_harness_threads`, `recall_eval` binary startup): eval repeats
+/// harness (`recall_eval` binary startup; the in-process harness now sets
+/// `Query::read_only` instead of writing this variable): eval repeats
 /// measure variance, not learning curves, and FLAT fusion made graph magnitude
 /// load-bearing, so first-repeat usage writes were shifting later repeats'
 /// rankings (L1 smoke non-determinism, PR #325 checks). Production default
@@ -132,9 +133,12 @@ fn recall_readonly_env() -> bool {
 /// "read-only" recall).
 ///
 /// True when EITHER source asks for it:
-/// - `SHODH_RECALL_READONLY=1` — the process-wide pin the eval harness sets
-///   (`pin_harness_threads`, the `recall_eval` binary). Eval repeats measure
-///   variance, not learning curves.
+/// - `SHODH_RECALL_READONLY=1` — the process-wide pin the `recall_eval` binary
+///   sets at startup, where the whole process IS the harness. Eval repeats
+///   measure variance, not learning curves. The in-process harness reads this
+///   variable to decide, but sets `Query::read_only` rather than writing it:
+///   inside `cargo test` a process-wide write is visible to every other thread
+///   for the whole run, and a lock around the writer cannot stop that.
 /// - `Query::read_only` — the per-request flag a caller sets to get a
 ///   reproducible answer without altering the corpus it read from.
 ///

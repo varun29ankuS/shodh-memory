@@ -307,6 +307,7 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
             &cases,
             &layer_modes,
             inputs.age_days,
+            _harness_env.recall_read_only(),
         )
         .with_context(|| format!("repeat {i} of {repeats}"))?;
         passes.push(pass);
@@ -560,6 +561,7 @@ fn run_one_pass(
     cases: &[SmokeCase],
     layer_modes: &[LayerMode],
     age_days: f64,
+    read_only: bool,
 ) -> Result<OnePassResult> {
     // Ingest through the production manager so the graph/lineage/ontology layer
     // is actually built, then query the per-user `MemorySystem` (which now has a
@@ -703,6 +705,7 @@ fn run_one_pass(
                 query_text: Some(case.query.clone()),
                 max_results: SMOKE_K,
                 layers: *mode,
+                read_only,
                 ..Default::default()
             };
             // SHODH_QUERY_NER A/B lever: neural-NER graph seeding (no-op when unset).
@@ -781,14 +784,15 @@ fn run_one_pass(
             // construction — the deeper vector pool admits new competitors, so
             // a gold item's deep rank can even sit below its production rank;
             // that is inherent to fetching a deeper list, not an
-            // inconsistency. The deep query is side-effect-free because the
-            // harness pins SHODH_RECALL_READONLY=1 (pin_harness_threads), so
-            // it cannot contaminate Hebbian/access state between cases.
+            // inconsistency. The deep query carries the same `read_only` the
+            // pass was started with, so it cannot contaminate Hebbian/access
+            // state between cases.
             let deep_retrieved: Vec<String> = if diag_k > SMOKE_K {
                 let mut deep_query = Query {
                     query_text: Some(case.query.clone()),
                     max_results: diag_k,
                     layers: *mode,
+                    read_only,
                     ..Default::default()
                 };
                 manager.annotate_query_ner(&mut deep_query);
@@ -912,20 +916,22 @@ pub(crate) fn pin_harness_threads() -> HarnessEnvPin {
     HarnessEnvPin::acquire()
 }
 
-/// The four process-wide variables [`pin_harness_threads`] pins, in the order
-/// they are applied. Every entry is `set only if unset`.
-const HARNESS_ENV_PINS: [(&str, &str); 4] = [
+/// The process-wide variables [`pin_harness_threads`] pins, in the order they
+/// are applied. Every entry is `set only if unset`.
+///
+/// `SHODH_RECALL_READONLY` is deliberately NOT in this list any more. It is the
+/// one determinism variable that changes observable behaviour for any code that
+/// happens to be running (recall stops writing usage state), so a process-wide
+/// pin of it is not just a leak on the way out — it is visible to every other
+/// thread for the whole duration of the run. A mutex serialises writers, not
+/// readers, so no lock can contain that. The harness now carries the decision
+/// on the `Query` it issues instead; see [`HarnessEnvPin::recall_read_only`].
+const HARNESS_ENV_PINS: [(&str, &str); 3] = [
     // MiniLM/NER intra-op single-threaded: multi-threaded float reductions
     // accumulate in non-deterministic order.
     ("SHODH_ONNX_THREADS", "1"),
     // Any par_iter() in scoring runs serially, same reason.
     ("RAYON_NUM_THREADS", "1"),
-    // Repeats measure variance, not learning curves: recall must not mutate
-    // usage state mid-eval. FLAT fusion made graph magnitude load-bearing, so
-    // first-repeat co-activation writes were shifting later repeats' rankings
-    // (L1 smoke non-determinism). Learning-curve experiments opt out by setting
-    // SHODH_RECALL_READONLY=0 explicitly before the run.
-    ("SHODH_RECALL_READONLY", "1"),
     // Freeze the scoring clock. Repeat passes execute minutes apart; with a live
     // clock the recency component of every score drifts between repeats, which
     // is enough to flip near-tie adjacent ranks (smoke-094) and trip the
@@ -945,6 +951,7 @@ const HARNESS_ENV_PINS: [(&str, &str); 4] = [
 pub(crate) struct HarnessEnvPin {
     _lock: parking_lot::ReentrantMutexGuard<'static, ()>,
     previous: [(&'static str, Option<std::ffi::OsString>); HARNESS_ENV_PINS.len()],
+    recall_read_only: bool,
 }
 
 impl HarnessEnvPin {
@@ -960,10 +967,29 @@ impl HarnessEnvPin {
             }
             (key, prior)
         });
+        // Same decision the process-wide pin used to encode, read once instead
+        // of written once: unset means read-only (repeats measure variance, not
+        // learning curves), and the documented opt-out for learning-curve
+        // experiments is an explicit `SHODH_RECALL_READONLY` that is not "1".
+        // Reading an env var is safe against concurrent readers; writing one is
+        // what was never safe.
+        let recall_read_only = match std::env::var_os("SHODH_RECALL_READONLY") {
+            None => true,
+            Some(v) => v.to_str() == Some("1"),
+        };
         Self {
             _lock: lock,
             previous,
+            recall_read_only,
         }
+    }
+
+    /// Whether recalls issued during this harness run must perform no usage
+    /// writes. Set on every `Query` the harness builds, so the harness gets a
+    /// reproducible corpus without a process property that unrelated threads
+    /// can observe.
+    pub(crate) fn recall_read_only(&self) -> bool {
+        self.recall_read_only
     }
 }
 
@@ -1297,6 +1323,7 @@ pub fn run_longmemeval(
             query_text: Some(case.question.clone()),
             max_results: k,
             layers: primary_mode,
+            read_only: _harness_env.recall_read_only(),
             ..Default::default()
         };
         manager.annotate_query_ner(&mut query);
@@ -1535,6 +1562,7 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
                 query_text: Some(case.query.clone()),
                 max_results: SMOKE_K,
                 layers: LayerMode::Full,
+                read_only: _harness_env.recall_read_only(),
                 ..Default::default()
             };
             let memories = system.read().recall(&query).unwrap_or_default();
@@ -1910,6 +1938,7 @@ pub fn analyze_funnel(inputs: &RunInputs) -> Result<FunnelReport> {
             query_text: Some(case.query.clone()),
             max_results: diag_k,
             layers: crate::memory::types::LayerMode::Full,
+            read_only: _harness_env.recall_read_only(),
             ..Default::default()
         };
 
@@ -2225,6 +2254,7 @@ fn run_learning_arm(
     cyc: usize,
     outcome: RetrievalOutcome,
     outcome_name: &str,
+    read_only: bool,
 ) -> Result<LearningCurveArm> {
     const TRACK_K: usize = 50;
     const MIN_COLD_RANK: usize = 2;
@@ -2241,6 +2271,7 @@ fn run_learning_arm(
             query_text: Some(q.to_string()),
             max_results: TRACK_K,
             layers: LayerMode::Full,
+            read_only,
             ..Default::default()
         };
         match system.read().recall(&query) {
@@ -2359,7 +2390,15 @@ pub fn analyze_learning_curve(inputs: &RunInputs, cycles: usize) -> Result<Learn
     for (name, outcome) in arms_spec {
         // Fresh storage per arm — reinforcement mutates state; arms must not bleed.
         let arm_storage = inputs.storage_path.join(name.to_lowercase());
-        let arm = run_learning_arm(&arm_storage, &corpus, &cases, cyc, outcome, name)
+        let arm = run_learning_arm(
+            &arm_storage,
+            &corpus,
+            &cases,
+            cyc,
+            outcome,
+            name,
+            _harness_env.recall_read_only(),
+        )
             .with_context(|| format!("learning-curve arm {name}"))?;
         arms.push(arm);
     }
@@ -2975,6 +3014,7 @@ mod tests {
                     query_text: Some(case.query.clone()),
                     max_results: 10,
                     layers: *mode,
+                    read_only: _harness_env.recall_read_only(),
                     ..Default::default()
                 };
                 let _ = system.read().recall(&q);
@@ -2995,6 +3035,7 @@ mod tests {
             query_text: Some("What was the earliest origin behind the Selvic incident?".into()),
             max_results: 10,
             layers: LayerMode::Full,
+            read_only: _harness_env.recall_read_only(),
             ..Default::default()
         };
         let results = system.read().recall(&query).expect("recall");
