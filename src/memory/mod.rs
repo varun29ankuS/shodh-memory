@@ -101,6 +101,246 @@ pub(crate) fn recall_readonly() -> bool {
         .unwrap_or(false)
 }
 
+/// Harmonic rank term for the union: a leg's rank-1 candidate enters at that
+/// leg's full prior, rank-2 at half of it, and so on.
+///
+/// Scale-free, with no `k` to tune — unlike the RRF `weight / (k + rank)` form
+/// it replaced, whose `k` was itself a hand-set constant (30.0) that decided how
+/// hard every leg's head was flattened.
+pub(crate) fn union_rank_score(prior: f32, rank0: usize) -> f32 {
+    prior / (1.0 + rank0 as f32)
+}
+
+/// Resolve which retrieval legs are admitted to the union.
+///
+/// Two diagnostic controls, both default-unset (all three legs admitted):
+/// * `SHODH_UNION_LEGS=graph,bm25` — admit an explicit SUBSET. This replaces the
+///   removed `SHODH_GRAPH_FUSION_WEIGHT=0` graph-off ablation, which turned the
+///   graph leg off by zeroing its fusion weight — a lever that cannot exist now
+///   that legs are unioned rather than weighted and summed.
+/// * `SHODH_LEG=graph` — isolate exactly ONE leg, for standalone-recall runs.
+///
+/// The subset form wins when both are set. An unrecognised `SHODH_LEG` value is
+/// ignored with a warning and admits every leg, so a typo degrades to the
+/// default instead of silently admitting nothing and reporting zero recall as
+/// though it were a measurement.
+///
+/// Returns `(graph, vector, bm25)`.
+/// Admit one candidate to the union, keeping the BEST evidence any leg has for
+/// it rather than accumulating evidence across legs.
+///
+/// This single line is the whole difference between a union and a fusion. RRF,
+/// weighted-Borda and weighted-SUM all did `*slot += score`, which made a
+/// candidate's rank depend on how many OTHER legs happened to also find it — so
+/// a candidate with strong evidence from one leg was diluted by its absence
+/// elsewhere, and the strongest leg was structurally buried. With `max`, a leg
+/// can only ever promote a candidate, never dilute one.
+pub(crate) fn union_admit(
+    fused: &mut std::collections::HashMap<MemoryId, f32>,
+    id: &MemoryId,
+    score: f32,
+) {
+    let slot = fused.entry(id.clone()).or_insert(0.0);
+    if score > *slot {
+        *slot = score;
+    }
+}
+
+pub(crate) fn union_leg_admission(
+    isolate_leg: Option<&str>,
+    union_legs: Option<&str>,
+) -> (bool, bool, bool) {
+    const UNION_LEG_NAMES: [&str; 3] = ["graph", "vector", "bm25"];
+    let isolate = isolate_leg.filter(|v| {
+        let known = UNION_LEG_NAMES.iter().any(|n| v.eq_ignore_ascii_case(n));
+        if !known {
+            tracing::warn!(
+                "SHODH_LEG: unknown leg '{v}' (expected graph|vector|bm25) — ignored, all legs admitted"
+            );
+        }
+        known
+    });
+    let on = |leg: &str| -> bool {
+        if let Some(subset) = union_legs {
+            return subset
+                .split(',')
+                .map(str::trim)
+                .any(|t| t.eq_ignore_ascii_case(leg));
+        }
+        match isolate {
+            Some(only) => only.eq_ignore_ascii_case(leg),
+            None => true,
+        }
+    };
+    (on("graph"), on("vector"), on("bm25"))
+}
+
+#[cfg(test)]
+mod union_rank_tests {
+    use super::{union_admit, union_leg_admission, union_rank_score, MemoryId};
+    use crate::constants::{UNION_LEG_PRIOR_BM25, UNION_LEG_PRIOR_GRAPH, UNION_LEG_PRIOR_VECTOR};
+
+    #[test]
+    fn rank_one_enters_at_the_legs_full_prior() {
+        // The property RRF did NOT have: a leg's best candidate is worth the
+        // leg's full prior, not a `w / (30 + 1)` crumb.
+        assert_eq!(union_rank_score(UNION_LEG_PRIOR_GRAPH, 0), 1.0);
+        assert_eq!(
+            union_rank_score(UNION_LEG_PRIOR_BM25, 0),
+            UNION_LEG_PRIOR_BM25
+        );
+        assert_eq!(
+            union_rank_score(UNION_LEG_PRIOR_VECTOR, 0),
+            UNION_LEG_PRIOR_VECTOR
+        );
+    }
+
+    #[test]
+    fn score_is_strictly_decreasing_in_rank() {
+        let mut prev = f32::INFINITY;
+        for r in 0..200 {
+            let s = union_rank_score(UNION_LEG_PRIOR_GRAPH, r);
+            assert!(s < prev, "rank {r} scored {s}, not below previous {prev}");
+            prev = s;
+        }
+        assert!(prev > 0.0, "score must stay positive across the pool depth");
+    }
+
+    #[test]
+    fn leg_priors_are_ordered_by_measured_standalone_recall() {
+        // graph 0.5692 > bm25 0.4559 > vector 0.4234 on the held-out set (n=1531).
+        // If a re-measurement reorders the legs, these constants must be updated
+        // from the new measurement — never hand-tuned to move a benchmark.
+        assert!(UNION_LEG_PRIOR_GRAPH > UNION_LEG_PRIOR_BM25);
+        assert!(UNION_LEG_PRIOR_BM25 > UNION_LEG_PRIOR_VECTOR);
+        assert_eq!(
+            UNION_LEG_PRIOR_GRAPH, 1.0,
+            "graph is the normalisation base"
+        );
+    }
+
+    #[test]
+    fn a_second_leg_can_only_promote_never_dilute() {
+        // The defect that removing fusion fixed — asserted against the real insert
+        // path, not against `f32::max` restated inside the test.
+        let id = MemoryId(uuid::Uuid::nil());
+        let graph_best = union_rank_score(UNION_LEG_PRIOR_GRAPH, 0);
+        let vector_deep = union_rank_score(UNION_LEG_PRIOR_VECTOR, 90);
+
+        let mut fused = std::collections::HashMap::new();
+        union_admit(&mut fused, &id, graph_best);
+        union_admit(&mut fused, &id, vector_deep);
+        assert_eq!(
+            fused[&id], graph_best,
+            "a weaker leg must not alter a candidate already admitted on stronger evidence"
+        );
+        assert!(
+            fused[&id] < graph_best + vector_deep,
+            "summation would have inflated this candidate above its own best evidence"
+        );
+
+        // Order must not matter. `+=` over a HashMap was iteration-order dependent
+        // and wobbled the last ULPs run to run; max is commutative.
+        let mut reversed = std::collections::HashMap::new();
+        union_admit(&mut reversed, &id, vector_deep);
+        union_admit(&mut reversed, &id, graph_best);
+        assert_eq!(
+            reversed[&id], fused[&id],
+            "admission order changed the score"
+        );
+    }
+
+    #[test]
+    fn union_admit_keeps_candidates_independent() {
+        // A candidate's score must depend only on its own best evidence — never on
+        // what other candidates the same leg happened to return.
+        let a = MemoryId(uuid::Uuid::from_u128(1));
+        let b = MemoryId(uuid::Uuid::from_u128(2));
+        let mut fused = std::collections::HashMap::new();
+        union_admit(&mut fused, &a, union_rank_score(UNION_LEG_PRIOR_GRAPH, 0));
+        union_admit(&mut fused, &b, union_rank_score(UNION_LEG_PRIOR_GRAPH, 1));
+        union_admit(&mut fused, &b, union_rank_score(UNION_LEG_PRIOR_BM25, 0));
+        assert_eq!(fused[&a], 1.0);
+        assert_eq!(
+            fused[&b], UNION_LEG_PRIOR_BM25,
+            "b should take its BM25 rank-1 evidence"
+        );
+        assert_eq!(fused.len(), 2);
+    }
+    #[test]
+    fn all_legs_admitted_when_nothing_is_set() {
+        assert_eq!(union_leg_admission(None, None), (true, true, true));
+    }
+
+    #[test]
+    fn shodh_leg_isolates_exactly_one_leg() {
+        assert_eq!(
+            union_leg_admission(Some("graph"), None),
+            (true, false, false)
+        );
+        assert_eq!(
+            union_leg_admission(Some("vector"), None),
+            (false, true, false)
+        );
+        assert_eq!(
+            union_leg_admission(Some("bm25"), None),
+            (false, false, true)
+        );
+    }
+
+    #[test]
+    fn leg_names_are_case_insensitive() {
+        assert_eq!(
+            union_leg_admission(Some("GRAPH"), None),
+            (true, false, false)
+        );
+        assert_eq!(
+            union_leg_admission(None, Some("Vector,BM25")),
+            (false, true, true)
+        );
+    }
+
+    #[test]
+    fn unknown_shodh_leg_degrades_to_all_legs_not_to_none() {
+        // A typo must not silently admit nothing and report zero recall as if it
+        // were a measurement — the failure mode this guard exists for.
+        assert_eq!(union_leg_admission(Some("grpah"), None), (true, true, true));
+        assert_eq!(union_leg_admission(Some(""), None), (true, true, true));
+    }
+
+    #[test]
+    fn union_legs_selects_a_subset_and_tolerates_whitespace() {
+        // This is the graph-off ablation arm that replaced SHODH_GRAPH_FUSION_WEIGHT=0.
+        assert_eq!(
+            union_leg_admission(None, Some("vector,bm25")),
+            (false, true, true)
+        );
+        assert_eq!(
+            union_leg_admission(None, Some(" vector , bm25 ")),
+            (false, true, true)
+        );
+        assert_eq!(
+            union_leg_admission(None, Some("graph")),
+            (true, false, false)
+        );
+    }
+
+    #[test]
+    fn union_legs_wins_over_shodh_leg_when_both_are_set() {
+        assert_eq!(
+            union_leg_admission(Some("graph"), Some("vector,bm25")),
+            (false, true, true)
+        );
+    }
+
+    #[test]
+    fn empty_union_legs_admits_nothing_and_is_the_callers_explicit_choice() {
+        // Distinct from an unknown SHODH_LEG: an explicitly empty subset is a
+        // deliberate request, not a typo, so it is honoured rather than widened.
+        assert_eq!(union_leg_admission(None, Some("")), (false, false, false));
+    }
+}
+
 use crate::constants::{
     DEFAULT_COMPRESSION_AGE_DAYS, DEFAULT_IMPORTANCE_THRESHOLD, DEFAULT_MAX_HEAP_PER_USER_MB,
     DEFAULT_SESSION_MEMORY_SIZE_MB, DEFAULT_WORKING_MEMORY_SIZE, EDGE_SEMANTIC_WEIGHT_FLOOR,
@@ -3885,51 +4125,19 @@ impl MemorySystem {
             let mut heb: std::collections::HashMap<MemoryId, f32> =
                 std::collections::HashMap::new();
 
-            // Leg admission — two diagnostic controls, default unset = all three legs:
-            //   SHODH_LEG=graph|vector|bm25      isolate exactly ONE leg
-            //   SHODH_UNION_LEGS=graph,bm25,...  admit an explicit SUBSET
-            // SHODH_UNION_LEGS wins when both are set. The subset form replaces the
-            // removed `SHODH_GRAPH_FUSION_WEIGHT=0` graph-off ablation, which worked by
-            // zeroing the graph leg's fusion weight — a lever that cannot exist now that
-            // legs are unioned rather than weighted and summed.
-            const UNION_LEG_NAMES: [&str; 3] = ["graph", "vector", "bm25"];
-            let union_legs = std::env::var("SHODH_UNION_LEGS").ok();
-            let isolate_leg = std::env::var("SHODH_LEG").ok().filter(|v| {
-                let known = UNION_LEG_NAMES.iter().any(|n| v.eq_ignore_ascii_case(n));
-                if !known {
-                    tracing::warn!(
-                        "SHODH_LEG: unknown leg '{v}' (expected graph|vector|bm25) — ignored,                          all legs admitted"
-                    );
-                }
-                known
-            });
-            let leg_on = |leg: &str| -> bool {
-                if let Some(ref subset) = union_legs {
-                    return subset
-                        .split(',')
-                        .map(str::trim)
-                        .any(|t| t.eq_ignore_ascii_case(leg));
-                }
-                match isolate_leg.as_deref() {
-                    Some(only) => only.eq_ignore_ascii_case(leg),
-                    None => true,
-                }
-            };
-            let graph_leg_on = leg_on("graph");
-            let vector_leg_on = leg_on("vector");
-            let bm25_leg_on = leg_on("bm25");
+            // Leg admission (see `union_leg_admission`): SHODH_UNION_LEGS=<subset>
+            // admits an explicit set of legs, SHODH_LEG=<one> isolates a single leg
+            // for standalone-recall runs, and unset admits all three.
+            let union_legs_env = std::env::var("SHODH_UNION_LEGS").ok();
+            let isolate_leg_env = std::env::var("SHODH_LEG").ok();
+            let (graph_leg_on, vector_leg_on, bm25_leg_on) =
+                union_leg_admission(isolate_leg_env.as_deref(), union_legs_env.as_deref());
 
             // Diagnostics: the union's leg priors stand in for the old density weights.
             if let Some(ref mut s) = stats {
                 s.graph_weight = UNION_LEG_PRIOR_GRAPH;
                 s.semantic_weight = UNION_LEG_PRIOR_VECTOR;
                 s.linguistic_weight = UNION_LEG_PRIOR_BM25;
-            }
-
-            // Harmonic rank term: scale-free, and with no k there is nothing to tune.
-            // A leg's rank-1 candidate enters at that leg's full prior.
-            fn union_rank_score(prior: f32, rank0: usize) -> f32 {
-                prior / (1.0 + rank0 as f32)
             }
 
             let fresh_attr = |id: &MemoryId| ScoreAttribution {
@@ -3951,10 +4159,7 @@ impl MemorySystem {
             if graph_leg_on {
                 for (r, (id, _activation, h)) in graph_results.iter().enumerate() {
                     let s = union_rank_score(UNION_LEG_PRIOR_GRAPH, r);
-                    let slot = fused.entry(id.clone()).or_insert(0.0);
-                    if s > *slot {
-                        *slot = s;
-                    }
+                    union_admit(&mut fused, id, s);
                     heb.insert(id.clone(), *h);
                     if let Some(ref mut attr_map) = attributions {
                         let attr = attr_map.entry(id.clone()).or_insert_with(|| fresh_attr(id));
@@ -3992,10 +4197,7 @@ impl MemorySystem {
             >| {
                 for (r, (id, _)) in ranked.iter().enumerate() {
                     let s = union_rank_score(prior, r);
-                    let slot = fused.entry((*id).clone()).or_insert(0.0);
-                    if s > *slot {
-                        *slot = s;
-                    }
+                    union_admit(fused, id, s);
                     if let Some(ref mut attr_map) = attributions {
                         let attr = attr_map
                             .entry((*id).clone())
