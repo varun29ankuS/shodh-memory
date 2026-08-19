@@ -3242,6 +3242,10 @@ impl GraphMemory {
         // embedding evidence let it merge abbreviations / paraphrases
         // ("Key Bridge" ≡ "Francis Scott Key Bridge") that surface strings miss.
         let mut records: Vec<MatchRecord> = Vec::new();
+        // Mentions skipped because their relation evidence could not be read.
+        // Counted rather than absorbed: a pass that silently scored on partial
+        // evidence looks identical to one that had nothing to find.
+        let mut evidence_unreadable = 0usize;
         // (uuid, is_proper, mentions, name, kb_id)
         let mut meta: Vec<(Uuid, bool, usize, String, Option<String>)> = Vec::new();
         for e in &entities {
@@ -3262,9 +3266,26 @@ impl GraphMemory {
             // Generic co-occurrence (CoOccurs/RelatedTo/CoRetrieved) is excluded —
             // it is undiscriminative (everything co-occurs) and would wash out the
             // signal. Two mentions of one real entity share these typed relations.
-            let agent_roles: HashSet<String> = self
-                .get_entity_relationships(&e.uuid)
-                .unwrap_or_default()
+            //
+            // A read failure here is not neutral. `unwrap_or_default` yields an
+            // EMPTY role set, which the matcher cannot distinguish from "this
+            // entity genuinely participates in no typed relations" — so a
+            // transient read error silently deletes the Galárraga attribute
+            // signal for that mention and makes it look less like its
+            // duplicates. The mention is skipped instead: leaving it
+            // unclustered costs one deferred merge that the next pass will
+            // make, whereas scoring it on evidence known to be incomplete
+            // risks a wrong merge, which is permanent.
+            let Ok(mention_edges) = self.get_entity_relationships(&e.uuid) else {
+                evidence_unreadable += 1;
+                tracing::warn!(
+                    entity = %e.name,
+                    "canonicalize: could not read relations for a mention — skipping it \
+                     this pass rather than scoring it on incomplete evidence"
+                );
+                continue;
+            };
+            let agent_roles: HashSet<String> = mention_edges
                 .iter()
                 .filter(|edge| {
                     !matches!(
@@ -3350,6 +3371,11 @@ impl GraphMemory {
         let mut repointed = 0usize;
         // Merges refused because the two nodes carry different KB identities.
         let mut kb_vetoed = 0usize;
+        // Inherited QIDs that could not be persisted onto the canonical node.
+        // Each one is a real-world identity destroyed with the member that held
+        // it, so this counter being nonzero means the graph forgot something it
+        // had already resolved.
+        let mut kb_inherit_failed = 0usize;
         // Edges whose migration failed in a way that kept them on the member
         // (add of the canonical copy failed, or a self-loop delete failed). Each
         // one also blocks its member's deletion — see `members_kept`.
@@ -3526,29 +3552,90 @@ impl GraphMemory {
                 }
             }
             // Persist an identity acquired from a merged member.
+            //
+            // Every failure here is reported rather than swallowed. The node
+            // holding the QID has already been deleted by this point, so a lost
+            // write does not merely fail to save an improvement — it destroys
+            // the only remaining copy of that entity's real-world identity, and
+            // the graph silently reverts to unlinked with no record that it ever
+            // knew better. That is the failure entity linking exists to prevent,
+            // arriving through the back door.
             if canon_kb_id != meta[canon_idx].4 {
-                if let Ok(Some(mut node)) = self.get_entity(&canonical) {
-                    node.kb_id.clone_from(&canon_kb_id);
-                    if let Ok(encoded) = crate::serialization::encode(&node) {
-                        let _ = self
-                            .db
-                            .put_cf(self.entities_cf(), canonical.as_bytes(), encoded);
+                match self.get_entity(&canonical) {
+                    Ok(Some(mut node)) => {
+                        node.kb_id.clone_from(&canon_kb_id);
+                        match crate::serialization::encode(&node) {
+                            Ok(encoded) => {
+                                if let Err(e) = self.db.put_cf(
+                                    self.entities_cf(),
+                                    canonical.as_bytes(),
+                                    encoded,
+                                ) {
+                                    kb_inherit_failed += 1;
+                                    tracing::warn!(
+                                        canonical = %meta[canon_idx].3,
+                                        kb_id = canon_kb_id.as_deref().unwrap_or(""),
+                                        error = %e,
+                                        "canonicalize: inherited KB identity could not be persisted — \
+                                         the node that held it is already deleted, so this identity is lost"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                kb_inherit_failed += 1;
+                                tracing::warn!(
+                                    canonical = %meta[canon_idx].3,
+                                    error = %e,
+                                    "canonicalize: could not encode canonical node to persist inherited KB identity"
+                                );
+                            }
+                        }
+                    }
+                    other => {
+                        kb_inherit_failed += 1;
+                        tracing::warn!(
+                            canonical = %meta[canon_idx].3,
+                            found = other.is_ok(),
+                            "canonicalize: canonical node unreadable while persisting inherited KB identity"
+                        );
                     }
                 }
             }
         }
         // Close the ingest loop: seed the merged surfaces as aliases of their
         // canonical node so re-ingesting them never re-creates the duplicate.
+        //
+        // A failed batch write here does not lose data — the merges themselves
+        // are already durable — but it silently breaks the loop this exists to
+        // close. Without the aliases, the very next ingest of a merged surface
+        // re-creates the duplicate node that was just deleted, and canonicalize
+        // has to do the same work again. Reported so a graph that keeps
+        // re-growing the same duplicates has an explanation in the log rather
+        // than looking like the matcher is failing.
         let aliases_seeded = if alias_pairs.is_empty() {
             0
         } else {
-            self.seed_aliases(alias_pairs).unwrap_or(0)
+            let attempted = alias_pairs.len();
+            match self.seed_aliases(alias_pairs) {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!(
+                        attempted,
+                        error = %e,
+                        "canonicalize: alias seeding failed — merged surfaces will be \
+                         re-created as duplicates on the next ingest of those names"
+                    );
+                    0
+                }
+            }
         };
         tracing::info!(
             merged = merged_nodes,
             repointed,
             aliases_seeded,
             kb_vetoed,
+            kb_inherit_failed,
+            evidence_unreadable,
             edges_unmigrated,
             members_kept,
             "canonicalize (Splink): merged duplicate mention nodes into canonical entities"
