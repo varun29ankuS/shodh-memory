@@ -3215,7 +3215,10 @@ impl GraphMemory {
     /// folds `Dali` / `the Dali` / `container ship` into one node and prunes the
     /// mention-duplication that makes the graph read as a hairball. The resolver
     /// uses the dependency parser for head detection; no-op returning `(0, 0)` when
-    /// the parser is unavailable. Returns `(nodes_merged, edges_repointed)`.
+    /// the parser is unavailable. Returns `(nodes_merged, edges_repointed)`:
+    /// nodes actually DELETED and edges whose canonical copy was written. A member
+    /// whose migration failed partway survives untouched-or-duplicated (never
+    /// holed) and is retried by the next pass — failure never loses an edge.
     pub fn canonicalize_entities(&self) -> Result<(usize, usize)> {
         use crate::entity_resolution::parse_mention_tokens;
         use crate::fs_matcher::{cluster, MatchRecord};
@@ -3341,9 +3344,22 @@ impl GraphMemory {
         }
 
         let mut merged_nodes = 0usize;
+        // Edges whose canonical copy was written (member original deleted, or at
+        // worst left as a recoverable duplicate — see `edges_unmigrated` for the
+        // edges that never got a canonical copy at all).
         let mut repointed = 0usize;
         // Merges refused because the two nodes carry different KB identities.
         let mut kb_vetoed = 0usize;
+        // Edges whose migration failed in a way that kept them on the member
+        // (add of the canonical copy failed, or a self-loop delete failed). Each
+        // one also blocks its member's deletion — see `members_kept`.
+        let mut edges_unmigrated = 0usize;
+        // Members that survived their merge: either an edge could not be
+        // migrated (the node must stay so the edge keeps a real endpoint) or
+        // `delete_entity` itself failed. Not counted in `merged_nodes` — the
+        // return value reports nodes actually removed, and the next
+        // canonicalize pass re-forms the cluster and retries.
+        let mut members_kept = 0usize;
         // Alias pairs to seed after merging: every merged surface → its canonical
         // UUID. `resolve_alias` is checked at ingest (Tier 0), so once seeded, a
         // future mention of that surface redirects to the canonical node instead of
@@ -3355,6 +3371,16 @@ impl GraphMemory {
                 continue;
             }
             // Canonical = the most-proper / most-mentioned member.
+            //
+            // SURVIVAL COUPLING: `meta[i].1` is the stored `is_proper_noun` flag,
+            // and as the PRIMARY sort key it decides which node SURVIVES a merge
+            // and which is deleted — it is not a mere salience input here.
+            // Changing how that flag is derived at construction is therefore a
+            // change to entity resolution, not just to scoring. And because
+            // stored nodes keep the flag they were written with (postcard is
+            // positional, and the add_entity OR-merge only ever promotes), a
+            // live graph holds a MIXED population across derivation eras, so
+            // which member wins can depend on when each node was written.
             let canon_idx = *cluster_idxs
                 .iter()
                 .max_by_key(|&&i| (meta[i].1, meta[i].2))
@@ -3386,14 +3412,21 @@ impl GraphMemory {
                     kb_vetoed += 1;
                     continue;
                 }
-                // Remember this surface → canonical mapping (raw name + parsed clean
-                // form) so future ingests of the merged surface resolve directly.
-                alias_pairs.push((meta[i].3.clone(), canonical));
-                if records[i].name != meta[i].3.trim().to_lowercase() {
-                    alias_pairs.push((records[i].name.clone(), canonical));
-                }
                 // Re-point every edge touching the member onto the canonical node.
+                //
+                // ORDER IS LOAD-BEARING: the canonical copy is written BEFORE the
+                // member's original edge is deleted. `add_relationship` can fail,
+                // and deleting first turned that failure into silent, permanent
+                // edge loss mid-merge (the edge was gone from the member and never
+                // reached the canonical). Failing in this order instead leaves at
+                // worst a DUPLICATE — and add_relationship dedups by
+                // (from,to,type), so the duplicate collapses on retry anyway. A
+                // duplicate is recoverable; a hole is not.
                 let member_edges = self.get_entity_relationships(&member)?;
+                // Set when an edge could not be fully migrated off the member.
+                // The member must then SURVIVE this pass: deleting it would leave
+                // the un-migrated edge dangling from a nonexistent node.
+                let mut member_dirty = false;
                 for edge in member_edges {
                     let mut ne = edge.clone();
                     ne.uuid = Uuid::new_v4();
@@ -3403,15 +3436,89 @@ impl GraphMemory {
                     if ne.to_entity == member {
                         ne.to_entity = canonical;
                     }
-                    let _ = self.delete_relationship(&edge.uuid);
-                    // Drop self-loops; add_relationship dedups by (from,to,type) so
-                    // duplicate edges between the same entities merge, not multiply.
-                    if ne.from_entity != ne.to_entity && self.add_relationship(ne).is_ok() {
-                        repointed += 1;
+                    if ne.from_entity == ne.to_entity {
+                        // Merge-created self-loop (member↔canonical, or an existing
+                        // member↔member loop): two mentions of one entity relating
+                        // to each other is not a relation — drop it. There is no
+                        // canonical copy to add first, so here the DELETE is the
+                        // migration and is the step whose failure must keep the
+                        // member alive.
+                        if let Err(e) = self.delete_relationship(&edge.uuid) {
+                            tracing::warn!(
+                                edge = %edge.uuid,
+                                member = %meta[i].3,
+                                error = %e,
+                                "canonicalize: failed to drop merge self-loop; keeping member"
+                            );
+                            edges_unmigrated += 1;
+                            member_dirty = true;
+                        }
+                        continue;
+                    }
+                    match self.add_relationship(ne) {
+                        Ok(_) => {
+                            // The canonical copy exists; the member's original may
+                            // now go. If THIS delete fails the edge is duplicated,
+                            // never lost — but the member still cannot be deleted
+                            // under a live edge.
+                            match self.delete_relationship(&edge.uuid) {
+                                Ok(_) => repointed += 1,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        edge = %edge.uuid,
+                                        member = %meta[i].3,
+                                        error = %e,
+                                        "canonicalize: canonical copy written but member edge delete failed; keeping member"
+                                    );
+                                    // The canonical side is complete, so this still
+                                    // counts as re-pointed; the survivor is a dup.
+                                    repointed += 1;
+                                    member_dirty = true;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                edge = %edge.uuid,
+                                member = %meta[i].3,
+                                error = %e,
+                                "canonicalize: failed to re-point edge onto canonical; keeping original edge and member"
+                            );
+                            edges_unmigrated += 1;
+                            member_dirty = true;
+                        }
                     }
                 }
-                let _ = self.delete_entity(&member);
+                if member_dirty {
+                    // Partial migration: leave the member (and its surviving
+                    // edges) in place, seed no alias, inherit no identity. The
+                    // next canonicalize pass re-clusters this pair and retries;
+                    // already-migrated edges dedup into the canonical copies.
+                    members_kept += 1;
+                    continue;
+                }
+                if let Err(e) = self.delete_entity(&member) {
+                    // Edges are fully migrated (the member is edgeless), but the
+                    // node itself would not die. It is NOT a completed merge —
+                    // the return value reports nodes actually removed — so leave
+                    // alias/identity alone and let the next pass retry.
+                    tracing::warn!(
+                        member = %meta[i].3,
+                        error = %e,
+                        "canonicalize: edges re-pointed but member node delete failed; merge not counted"
+                    );
+                    members_kept += 1;
+                    continue;
+                }
                 merged_nodes += 1;
+                // Remember this surface → canonical mapping (raw name + parsed clean
+                // form) so future ingests of the merged surface resolve directly.
+                // Only for COMPLETED merges: an alias for a still-live member would
+                // shadow its node at ingest while it keeps accreting nothing.
+                alias_pairs.push((meta[i].3.clone(), canonical));
+                if records[i].name != meta[i].3.trim().to_lowercase() {
+                    alias_pairs.push((records[i].name.clone(), canonical));
+                }
                 // Inherit an identity rather than deleting it with the node that
                 // held it.
                 if canon_kb_id.is_none() {
@@ -3442,6 +3549,8 @@ impl GraphMemory {
             repointed,
             aliases_seeded,
             kb_vetoed,
+            edges_unmigrated,
+            members_kept,
             "canonicalize (Splink): merged duplicate mention nodes into canonical entities"
         );
         Ok((merged_nodes, repointed))
@@ -14424,6 +14533,226 @@ mod tests {
         assert!(
             graph.get_relationship(&bridge_uuid).unwrap().is_none(),
             "with the feature off the bridge is pruned like any other edge"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // canonicalize_entities — first tests for the merge/delete path. This
+    // function deletes nodes and edges; until now it had zero coverage.
+    // ------------------------------------------------------------------
+
+    /// An entity as the canonicalizer meets one. `name_embedding` is
+    /// deliberately `None`: with an embedding, add_entity's Tier-4 concept
+    /// merge (cosine ≥ 0.85) would fold the duplicates at INSERT time and the
+    /// FS-matcher merge path — the path under test — would never run.
+    fn canon_entity(
+        name: &str,
+        label: EntityLabel,
+        proper: bool,
+        mentions: usize,
+        kb_id: Option<&str>,
+    ) -> EntityNode {
+        EntityNode {
+            uuid: Uuid::new_v4(),
+            name: name.to_string(),
+            labels: vec![label],
+            created_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            mention_count: mentions,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: proper,
+            selectivity: None,
+            fine_type: None,
+            kb_id: kb_id.map(str::to_string),
+        }
+    }
+
+    /// The Baltimore-bridge micro-corpus: "Dali" and "the Dali" are one ship
+    /// (determiner-stripped clean form and head coincide), the rest are
+    /// distractors that give the unsupervised FS fit enough non-match pairs to
+    /// estimate u from. `kb` optionally pins distinct QIDs on the two Dali
+    /// nodes to exercise the merge veto.
+    #[allow(clippy::type_complexity)]
+    fn canonicalize_fixture(
+        kb: Option<(&str, &str)>,
+    ) -> (GraphMemory, tempfile::TempDir, Uuid, Uuid, Uuid, Uuid) {
+        // Guard against vacuous passes: canonicalize_entities early-returns
+        // (0, 0) without the dependency parser, which would turn every
+        // assertion below into dead code. The embedded en_core_web_sm bundle
+        // makes the parser unconditionally available; if this fires, the
+        // bundle regressed and these tests are not testing anything.
+        assert!(
+            crate::dep_parser::is_available(),
+            "dependency parser unavailable — canonicalize_entities tests would pass vacuously"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(dir.path(), None).unwrap();
+
+        let (dali_kb, the_dali_kb) = match kb {
+            Some((a, b)) => (Some(a), Some(b)),
+            None => (None, None),
+        };
+        let dali = graph
+            .add_entity(canon_entity("Dali", EntityLabel::Vehicle, true, 5, dali_kb))
+            .unwrap();
+        let the_dali = graph
+            .add_entity(canon_entity(
+                "the Dali",
+                EntityLabel::Vehicle,
+                true,
+                2,
+                the_dali_kb,
+            ))
+            .unwrap();
+        let baltimore = graph
+            .add_entity(canon_entity(
+                "Baltimore",
+                EntityLabel::Location,
+                true,
+                3,
+                None,
+            ))
+            .unwrap();
+        let ntsb = graph
+            .add_entity(canon_entity(
+                "NTSB",
+                EntityLabel::Organization,
+                true,
+                2,
+                None,
+            ))
+            .unwrap();
+        graph
+            .add_entity(canon_entity(
+                "Patapsco River",
+                EntityLabel::Location,
+                true,
+                1,
+                None,
+            ))
+            .unwrap();
+        assert_ne!(dali, the_dali, "fixture must start with two Dali nodes");
+
+        // Canonical already holds Dali→Baltimore LocatedIn, so the member's
+        // copy of the same triple must DEDUP into it, not duplicate it.
+        graph
+            .add_relationship(universe_edge(dali, baltimore, RelationType::LocatedIn, 0.8))
+            .unwrap();
+        graph
+            .add_relationship(universe_edge(
+                the_dali,
+                baltimore,
+                RelationType::LocatedIn,
+                0.8,
+            ))
+            .unwrap();
+        // An edge whose OTHER endpoint moves: NTSB→member must become NTSB→canonical.
+        graph
+            .add_relationship(universe_edge(ntsb, the_dali, RelationType::Manages, 0.8))
+            .unwrap();
+        // Member↔canonical edge: re-pointing would make it canonical↔canonical,
+        // so the merge must DROP it (from the member too), never re-point it.
+        graph
+            .add_relationship(universe_edge(the_dali, dali, RelationType::CoOccurs, 0.8))
+            .unwrap();
+
+        (graph, dir, dali, the_dali, baltimore, ntsb)
+    }
+
+    #[test]
+    fn canonicalize_merges_duplicate_mention_and_repoints_edges() {
+        let (graph, _dir, dali, the_dali, baltimore, ntsb) = canonicalize_fixture(None);
+
+        let (merged, repointed) = graph.canonicalize_entities().unwrap();
+        assert_eq!(merged, 1, "exactly the Dali pair must merge");
+        // LocatedIn (dedup into the canonical's copy) + Manages; the self-loop
+        // CoOccurs edge is dropped, not re-pointed.
+        assert_eq!(repointed, 2, "both non-loop member edges must re-point");
+
+        // Survival: the proper, most-mentioned node wins; the member is gone.
+        // This pins canonical selection to (is_proper_noun, mention_count) — if
+        // the is_proper_noun derivation changes upstream, this fails loudly,
+        // because that IS a change to which node survives entity resolution.
+        let survivor = graph.get_entity(&dali).unwrap();
+        assert!(survivor.is_some(), "canonical node must survive the merge");
+        assert_eq!(survivor.unwrap().name, "Dali");
+        assert!(
+            graph.get_entity(&the_dali).unwrap().is_none(),
+            "merged member node must be deleted"
+        );
+
+        // NO EDGE LOST (bug-1 regression): every pre-merge triple, with the
+        // member mapped onto the canonical, exists after — LocatedIn deduped,
+        // Manages re-pointed — and nothing dangles from the deleted member.
+        let edges = graph.get_entity_relationships(&dali).unwrap();
+        assert!(
+            edges.iter().any(|e| e.from_entity == dali
+                && e.to_entity == baltimore
+                && e.relation_type == RelationType::LocatedIn),
+            "Dali→Baltimore LocatedIn must survive the merge"
+        );
+        assert!(
+            edges.iter().any(|e| e.from_entity == ntsb
+                && e.to_entity == dali
+                && e.relation_type == RelationType::Manages),
+            "NTSB→member edge must be re-pointed to NTSB→canonical"
+        );
+        assert!(
+            edges.iter().all(|e| e.from_entity != e.to_entity),
+            "merge-created self-loops must be dropped, not re-pointed"
+        );
+        assert!(
+            edges
+                .iter()
+                .all(|e| e.from_entity != the_dali && e.to_entity != the_dali),
+            "no surviving edge may reference the deleted member"
+        );
+        assert_eq!(
+            edges.len(),
+            2,
+            "canonical must hold exactly the deduped LocatedIn + the re-pointed Manages"
+        );
+        assert!(
+            graph
+                .get_entity_relationships(&the_dali)
+                .unwrap()
+                .is_empty(),
+            "the deleted member must hold no edges"
+        );
+
+        // The merged surface is seeded as an alias of the canonical (raw and
+        // determiner-stripped forms), closing the ingest loop.
+        assert_eq!(graph.resolve_alias("the Dali"), Some(dali));
+        assert_eq!(graph.resolve_alias("dali"), Some(dali));
+    }
+
+    #[test]
+    fn canonicalize_refuses_merge_across_distinct_kb_identities() {
+        // Same surfaces, same scores — but the KB says these are two different
+        // real-world things. The veto must hold regardless of match strength.
+        let (graph, _dir, dali, the_dali, _baltimore, _ntsb) =
+            canonicalize_fixture(Some(("Q107647811", "Q4655133")));
+
+        let (merged, _repointed) = graph.canonicalize_entities().unwrap();
+        assert_eq!(merged, 0, "distinct QIDs must veto the merge");
+        assert!(
+            graph.get_entity(&dali).unwrap().is_some()
+                && graph.get_entity(&the_dali).unwrap().is_some(),
+            "both KB-distinct nodes must survive"
+        );
+        // The member keeps its full edge set — nothing was re-pointed or dropped.
+        assert_eq!(
+            graph.get_entity_relationships(&the_dali).unwrap().len(),
+            3,
+            "a vetoed member's edges must be untouched"
+        );
+        assert_eq!(
+            graph.resolve_alias("the Dali"),
+            None,
+            "no alias may be seeded for a vetoed merge"
         );
     }
 }
