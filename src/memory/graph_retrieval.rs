@@ -1951,17 +1951,35 @@ pub fn spreading_activation_retrieve_with_stats(
         });
     }
 
-    // Step 7: Apply limit. Default = query.max_results, which makes the graph leg a
-    // ~10-candidate leg fused against ~100-candidate vector/BM25 legs — reachable gold
-    // ranked 11+ by the leg's internal scoring never reaches fusion at all (funnel:
-    // graph leg emits ~51% of 98%-reachable gold). SHODH_GRAPH_LEG_K widens the leg's
-    // exit gate without changing scoring (unlike reach_inject, which flooded the leg
-    // with threshold-free reachability and measured harmful). Default unset → unchanged.
+    // Step 7: Apply the leg's exit gate.
+    //
+    // This used to default to `query.max_results`, which made the graph a
+    // ~10-candidate leg fused against ~100-candidate vector and BM25 legs. The
+    // asymmetry is not a weighting choice that fusion can compensate for — it
+    // happens BEFORE fusion, so gold the graph found and ranked 11th by its own
+    // scoring was discarded without fusion ever seeing it. Fusion cannot choose
+    // among candidates it was never shown.
+    //
+    // The cost was measured and written down: the funnel diagnostic records the
+    // graph leg emitting ~51% of gold it reaches 98% of. Nearly half of what the
+    // graph retrieves was being thrown away at the door.
+    //
+    // It also explains a null result that looked like a verdict on graphs. On the
+    // held-out suite, `SHODH_GRAPH_EDGE_DIR=1` and
+    // `SHODH_GRAPH_EDGE_DIR=1 + SHODH_GRAPH_PREDICATE_WEIGHTS=1` produced
+    // IDENTICAL headline numbers to four decimal places (ndcg@10 0.4233,
+    // recall@10 0.5291) — two mechanisms touching different parts of the
+    // traversal cannot genuinely agree that precisely. They were both reordering
+    // a list that was then cut to 10, so the top of it barely moved. Improving
+    // what the graph finds is unobservable while most of it is truncated away.
+    //
+    // Parity with the other legs is the default now. `SHODH_GRAPH_LEG_K` still
+    // overrides, including back down to the old behaviour for an A/B control.
     let graph_leg_k = std::env::var("SHODH_GRAPH_LEG_K")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&k| k > 0)
-        .unwrap_or(query.max_results);
+        .unwrap_or(crate::constants::GRAPH_LEG_CANDIDATE_K);
     scored_memories.truncate(graph_leg_k);
 
     stats.retrieval_time_us = start_time.elapsed().as_micros() as u64;
