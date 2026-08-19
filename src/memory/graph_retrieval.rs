@@ -1957,6 +1957,30 @@ pub fn spreading_activation_retrieve_with_stats(
     // graph leg emits ~51% of 98%-reachable gold). SHODH_GRAPH_LEG_K widens the leg's
     // exit gate without changing scoring (unlike reach_inject, which flooded the leg
     // with threshold-free reachability and measured harmful). Default unset → unchanged.
+    //
+    // MEASURED 2026-08-19 — the narrow default is load-bearing, not an oversight.
+    // Held-out LoCoMo (1,531 questions), `SHODH_GRAPH_EDGE_DIR=1
+    // SHODH_GRAPH_LEG_K=100` against control:
+    //
+    //     ndcg@10   0.4222 -> 0.3627   (-0.0595)
+    //     recall@10 0.5258 -> 0.4641   (-0.0617)
+    //     mrr       0.4156 -> 0.3590   (-0.0566)
+    //     p@1       0.3266 -> 0.2691   (-0.0575)
+    //
+    // All four are outside the 95% interval (±0.025), so this is a real effect and
+    // not noise — a rare thing on this benchmark, where almost every mechanism
+    // measures flat.
+    //
+    // Read the "~51% of 98%-reachable gold" line above carefully: it says the leg
+    // RANKS badly, not that it exits too narrowly. The candidates it holds past its
+    // own rank 10 are worse than the vector and BM25 candidates they displace in
+    // fusion, so widening the gate does not add the missing gold to the result
+    // list — it pushes better candidates out of it. Same lesson `reach_inject`
+    // already paid for.
+    //
+    // The fix for the 49% is to make the graph ORDER its own candidates better, or
+    // to rerank after fusion. It is not to hand fusion more of a list the graph
+    // could not order.
     let graph_leg_k = std::env::var("SHODH_GRAPH_LEG_K")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
