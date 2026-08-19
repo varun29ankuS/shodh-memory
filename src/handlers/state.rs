@@ -3060,14 +3060,21 @@ impl MultiUserMemoryManager {
                         .cloned(),
                     // Use ontological salience as the base, scaled by NER confidence
                     salience: {
-                        let is_pn = !matches!(ner_entity.entity_type, NerEntityType::Misc);
                         let base = crate::graph_memory::EntityExtractor::calculate_base_salience(
-                            &label, is_pn,
+                            &label,
+                            label.denotes_named_individual(),
                         );
                         // NER confidence modulates: high-confidence entities get full base salience
                         base * (0.5 + 0.5 * ner_entity.confidence)
                     },
-                    is_proper_noun: !matches!(ner_entity.entity_type, NerEntityType::Misc),
+                    // Asked of the RESOLVED label, not of the coarse 4-class NER
+                    // view. That view collapses everything outside person / org /
+                    // location into `Misc`, so it answered "no" for every titled
+                    // work, product, project, repository, service, named event and
+                    // law — filing them as common nouns, which cost them the
+                    // salience boost and, worse, put them in the stemmed merge
+                    // index that exists to keep proper nouns apart.
+                    is_proper_noun: label.denotes_named_individual(),
                     selectivity: None,
                     fine_type,
                     kb_id: None,

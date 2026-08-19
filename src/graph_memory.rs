@@ -376,6 +376,92 @@ impl EntityLabel {
         }
     }
 
+    /// Whether instances of this class are referred to by a **proper name**
+    /// rather than described by a common noun.
+    ///
+    /// This is a second, orthogonal axis to [`Self::parent_labels`]. Subsumption
+    /// answers "what kind of thing is this" and puts each label in one place in a
+    /// tree; this answers "does this thing bear a name", which cuts *across* that
+    /// tree. `Work` sits under `Concept` and `Repository` under `Technology`, yet
+    /// "Little Women" and "shodh-memory" are both named individuals — there is no
+    /// position in a subsumption hierarchy that expresses the property they share.
+    ///
+    /// # Why this exists
+    ///
+    /// Proper-noun-ness was previously derived from the coarse 4-class NER view:
+    /// `!matches!(entity_type, NerEntityType::Misc)`. That view predates the
+    /// 141-fine schema and collapses everything outside person/org/location into
+    /// `Misc`, so **every named thing that is not a person, organisation or place
+    /// was filed as a common noun** — titled works, products, projects,
+    /// repositories, services, named events, laws, CVEs. Two consequences, both
+    /// silent: the entity loses the proper-noun salience boost in
+    /// [`EntityExtractor::calculate_base_salience`], and it is written into the
+    /// stemmed merge index — the index this codebase deliberately keeps proper
+    /// nouns out of "to prevent 'Paris' → 'pari' merging with 'Parison'".
+    ///
+    /// # The asymmetry that settles the borderline cases
+    ///
+    /// A wrong `true` costs a missed merge opportunity. A wrong `false` can fuse
+    /// two distinct named things into one node, and every traversal downstream
+    /// inherits that error. Losing a merge is recoverable; asserting that two
+    /// different things are one is not. Borderline classes therefore resolve to
+    /// `true`.
+    ///
+    /// # Compatibility
+    ///
+    /// This is deliberately a **superset** of the old coarse rule: nothing that
+    /// was treated as a proper noun before becomes a common noun now, so the
+    /// change can only stop misfiling named things — it cannot introduce a new
+    /// stem collision. `Environment` and `Role` are the honest wrinkles: neither
+    /// is really a named individual ("production", "tech lead"), but both mapped
+    /// to proper under the coarse rule (via `Location` and `Person`), and
+    /// demoting them would be an unmeasured behaviour change smuggled in beside
+    /// a bug fix. They stay until measured.
+    pub fn denotes_named_individual(&self) -> bool {
+        match self {
+            // People and the collectives they form.
+            Self::Person
+            | Self::Title
+            | Self::Role
+            | Self::Organization
+            | Self::Team
+            | Self::Norp => true,
+            // Places.
+            Self::Location | Self::Gpe | Self::Facility | Self::Environment => true,
+            // Named artefacts and creations. This is the group the coarse rule
+            // lost: "iPhone", "Little Women", "GDPR", "Log4Shell", "Excalibur".
+            Self::Product | Self::Work | Self::Law | Self::Cyber | Self::Vehicle | Self::Weapon => {
+                true
+            }
+            // Named technical entities — "Rust", "PostgreSQL", "shodh-memory",
+            // "auth-service", "serde", "nightly-build".
+            Self::Technology
+            | Self::Project
+            | Self::Repository
+            | Self::Service
+            | Self::Database
+            | Self::Module
+            | Self::Pipeline => true,
+            // Named occurrences — "the Boston Marathon".
+            Self::Event => true,
+            // Genuinely common nouns, structural values, and free text. A date,
+            // a sum of money or a measurement is not an individual with a name;
+            // `Other` carries an unrecognised label and must not be guessed at.
+            Self::Concept
+            | Self::Keyword
+            | Self::Skill
+            | Self::Date
+            | Self::Time
+            | Self::Money
+            | Self::Quantity
+            | Self::Metric
+            | Self::Configuration
+            | Self::Task
+            | Self::Document
+            | Self::Other(_) => false,
+        }
+    }
+
     /// Check if this label matches the expected label, considering type hierarchy.
     ///
     /// Returns true if:
@@ -14426,4 +14512,144 @@ mod tests {
             "with the feature off the bridge is pruned like any other edge"
         );
     }
+
+    /// The coarse 4-class NER view — the rule this replaced — answered "proper
+    /// noun?" by asking whether the type was anything other than `Misc`. These
+    /// are the classes it got wrong: every one of them names an individual, and
+    /// every one of them rolls up to `Misc`.
+    #[test]
+    fn named_artefacts_outside_person_org_location_are_proper_nouns() {
+        for label in [
+            EntityLabel::Work,       // "Little Women"
+            EntityLabel::Product,    // "iPhone"
+            EntityLabel::Project,    // "Apollo"
+            EntityLabel::Repository, // "shodh-memory"
+            EntityLabel::Service,    // "auth-service"
+            EntityLabel::Database,   // "PostgreSQL"
+            EntityLabel::Technology, // "Rust"
+            EntityLabel::Module,     // "serde"
+            EntityLabel::Pipeline,   // "nightly-build"
+            EntityLabel::Event,      // "the Boston Marathon"
+            EntityLabel::Law,        // "GDPR"
+            EntityLabel::Cyber,      // "Log4Shell"
+            EntityLabel::Vehicle,
+            EntityLabel::Weapon,
+        ] {
+            assert!(
+                label.denotes_named_individual(),
+                "{label:?} names an individual but was reported as a common noun;                  it would lose the salience boost and enter the stemmed merge index"
+            );
+        }
+    }
+
+    /// Values and generic nouns must NOT be treated as named individuals — a
+    /// date or a sum of money is not an individual that bears a name, and
+    /// `Other` carries an unrecognised label that must not be guessed at.
+    #[test]
+    fn values_and_generic_nouns_are_not_named_individuals() {
+        for label in [
+            EntityLabel::Concept,
+            EntityLabel::Keyword,
+            EntityLabel::Skill,
+            EntityLabel::Date,
+            EntityLabel::Time,
+            EntityLabel::Money,
+            EntityLabel::Quantity,
+            EntityLabel::Metric,
+            EntityLabel::Configuration,
+            EntityLabel::Task,
+            EntityLabel::Document,
+            EntityLabel::Other("unrecognised".to_string()),
+        ] {
+            assert!(
+                !label.denotes_named_individual(),
+                "{label:?} is not a named individual"
+            );
+        }
+    }
+
+    /// The guarantee that makes this safe to land: the new predicate is a
+    /// SUPERSET of the rule it replaces. Anything the coarse view called a
+    /// proper noun still is one, so the change cannot introduce a stem
+    /// collision — it can only stop misfiling named things. If this fails,
+    /// some class was demoted and an unmeasured behaviour change rode in
+    /// beside a bug fix.
+    #[test]
+    fn predicate_never_demotes_what_the_coarse_rule_called_proper() {
+        use crate::embeddings::ner::NerEntityType;
+        let mut checked = 0;
+        for label in ALL_ENTITY_LABELS_FOR_TEST {
+            let coarse_said_proper =
+                !matches!(NerEntityType::from_coarse(&label), NerEntityType::Misc);
+            if coarse_said_proper {
+                checked += 1;
+                assert!(
+                    label.denotes_named_individual(),
+                    "{label:?} was a proper noun under the coarse rule and is not under the new one - that is a demotion, not a fix"
+                );
+            }
+        }
+        // Without this, the loop passes vacuously the moment `from_coarse` stops
+        // returning a non-`Misc` class for anything — and a test that cannot
+        // fail is invisible to a failing-test sweep, which is exactly how the
+        // inert Hebbian layer stayed hidden behind tautological asserts. Ten
+        // labels map to person/org/location today.
+        assert!(
+            checked >= 10,
+            "expected the coarse rule to call at least 10 labels proper, saw {checked} - the guarantee above is asserting nothing"
+        );
+    }
+
+    /// Orthogonality is the point: this axis must not be derivable from the
+    /// subsumption hierarchy. `Work` and `Concept` share a parent relationship
+    /// (`Work` rolls up to `Concept`) yet differ on named-ness, which is exactly
+    /// the property no position in a type tree can express.
+    #[test]
+    fn named_ness_is_orthogonal_to_the_subsumption_hierarchy() {
+        assert!(EntityLabel::Work
+            .parent_labels()
+            .contains(&EntityLabel::Concept));
+        assert!(EntityLabel::Work.denotes_named_individual());
+        assert!(!EntityLabel::Concept.denotes_named_individual());
+    }
+
+    /// Every label in the ontology, so the tests above cannot silently skip a
+    /// variant added later.
+    const ALL_ENTITY_LABELS_FOR_TEST: [EntityLabel; 35] = [
+        EntityLabel::Person,
+        EntityLabel::Organization,
+        EntityLabel::Location,
+        EntityLabel::Technology,
+        EntityLabel::Concept,
+        EntityLabel::Event,
+        EntityLabel::Date,
+        EntityLabel::Product,
+        EntityLabel::Skill,
+        EntityLabel::Keyword,
+        EntityLabel::Project,
+        EntityLabel::Task,
+        EntityLabel::Document,
+        EntityLabel::Repository,
+        EntityLabel::Service,
+        EntityLabel::Database,
+        EntityLabel::Metric,
+        EntityLabel::Configuration,
+        EntityLabel::Environment,
+        EntityLabel::Pipeline,
+        EntityLabel::Team,
+        EntityLabel::Role,
+        EntityLabel::Module,
+        EntityLabel::Norp,
+        EntityLabel::Gpe,
+        EntityLabel::Facility,
+        EntityLabel::Vehicle,
+        EntityLabel::Weapon,
+        EntityLabel::Work,
+        EntityLabel::Law,
+        EntityLabel::Title,
+        EntityLabel::Cyber,
+        EntityLabel::Money,
+        EntityLabel::Quantity,
+        EntityLabel::Time,
+    ];
 }
