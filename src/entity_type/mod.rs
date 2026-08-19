@@ -79,6 +79,34 @@ pub fn coarse_of(fine: &str) -> Option<&'static str> {
         .map(|f| f.coarse.as_str())
 }
 
+/// Resolve a fine label to the `EntityLabel` the graph stores.
+///
+/// **This is the only sanctioned fine → label resolution.** The rule is three
+/// steps — roll the fine label up to its coarse id, map that id onto a variant,
+/// and fall back to `Other(fine)` when the schema does not recognise the label —
+/// and it was written out by hand in three separate places before this existed
+/// (`handlers/state.rs`, `memory/mod.rs`, `embeddings/gliner.rs`). Three copies
+/// of a rule is three chances for them to disagree, and a span typed differently
+/// on two paths is typed differently in the graph depending on which path
+/// reached it.
+///
+/// `Other(fine)` rather than a guess is deliberate. An unrecognised fine label
+/// means the schema and the model disagree about what classes exist; inventing a
+/// variant would bury that disagreement inside a plausible-looking type, where
+/// `Other` surfaces it. `every_fine_rolls_up_to_a_real_variant` in
+/// `graph_memory.rs` asserts no label GLiNER can actually predict reaches this
+/// fallback, so hitting it in production means the schema and
+/// `label_embeddings.bin` have drifted apart.
+///
+/// Callers holding a `NerEntity` rather than a bare fine label should not call
+/// this directly — they need the no-fine-label fallback too, which belongs with
+/// the entity, not with the schema.
+pub fn label_for_fine(fine: &str) -> crate::graph_memory::EntityLabel {
+    coarse_of(fine)
+        .map(crate::graph_memory::EntityLabel::from_coarse_id)
+        .unwrap_or_else(|| crate::graph_memory::EntityLabel::Other(fine.to_string()))
+}
+
 /// The Wikidata QID anchor for a fine label, when one is known.
 pub fn wikidata_qid(fine: &str) -> Option<&'static str> {
     schema()
@@ -144,5 +172,45 @@ mod tests {
     fn unknown_fine_label_resolves_to_none() {
         assert_eq!(coarse_of("not-a-real-label"), None);
         assert_eq!(wikidata_qid("not-a-real-label"), None);
+    }
+
+    /// The fallback is the whole point of having one resolver: an unrecognised
+    /// fine label must surface as `Other`, never as a plausible-looking guess.
+    #[test]
+    fn an_unrecognised_fine_label_becomes_other_not_a_guess() {
+        match label_for_fine("not-a-real-label") {
+            crate::graph_memory::EntityLabel::Other(s) => assert_eq!(s, "not-a-real-label"),
+            other => panic!("expected Other(_), got {other:?} — a guess buries schema drift"),
+        }
+    }
+
+    /// Every label the shipped schema can produce must resolve to a real variant.
+    /// If this fails, the schema and the model's label set have drifted and the
+    /// graph is being typed with `Other(_)` in production.
+    #[test]
+    fn every_shipped_fine_label_resolves_to_a_real_variant() {
+        for fine in &schema().fine {
+            assert!(
+                !matches!(
+                    label_for_fine(&fine.label),
+                    crate::graph_memory::EntityLabel::Other(_)
+                ),
+                "fine label `{}` dead-ends in Other(_)",
+                fine.label
+            );
+        }
+    }
+
+    /// Guards the reason this function exists. `label_for_fine` must stay
+    /// identical to the three hand-written copies it replaced, or converting a
+    /// call site silently retypes entities on that path.
+    #[test]
+    fn matches_the_hand_written_rule_it_replaced() {
+        for fine in schema().fine.iter().map(|f| f.label.as_str()).take(40) {
+            let hand_written = coarse_of(fine)
+                .map(crate::graph_memory::EntityLabel::from_coarse_id)
+                .unwrap_or_else(|| crate::graph_memory::EntityLabel::Other(fine.to_string()));
+            assert_eq!(label_for_fine(fine), hand_written, "diverged on `{fine}`");
+        }
     }
 }

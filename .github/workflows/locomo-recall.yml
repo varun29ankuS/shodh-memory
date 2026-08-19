@@ -79,8 +79,24 @@ jobs:
           shared-key: recall-eval
 
       - name: Install LLVM (ONNX runtime build dep)
+        # Bounded and retried. Unbounded, this step has hung twice on an
+        # unreachable apt mirror — once for 1h41m before it was killed by hand —
+        # while the same step takes ~50s when the mirror is healthy. With the
+        # job allowing 300 minutes and no step budget, a hung mirror silently
+        # burns five hours of runner time and returns no measurement at all,
+        # which is the worst outcome: slow AND uninformative. Ten minutes is
+        # twelve times the healthy duration, so a timeout here means broken, not
+        # slow.
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if sudo apt-get update; then
+              break
+            fi
+            echo "apt-get update failed (attempt $attempt/3); retrying in 15s"
+            sleep 15
+          done
           sudo apt-get install -y llvm-dev libclang-dev clang
 
       - name: Set up e5-small-v2 embedder
