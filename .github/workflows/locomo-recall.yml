@@ -228,7 +228,6 @@ jobs:
           SHODH_HUB_DEGREE_MAX: ${{ github.event.inputs.hub_max }}
           SHODH_GRAPH_RESERVE_K: ${{ github.event.inputs.graph_reserve_k }}
           SHODH_GRAPH_ACT_ADD: ${{ github.event.inputs.graph_act_add }}
-          SHODH_GRAPH_W_FLOOR: ${{ github.event.inputs.graph_w_floor }}
           SHODH_ACTR_NORM: ${{ github.event.inputs.actr_norm }}
           SHODH_GRAPH_RESERVE_FINAL: ${{ github.event.inputs.graph_reserve_final }}
           SHODH_GRAPH_EXPAND_K: ${{ github.event.inputs.graph_expand_k }}
@@ -302,7 +301,6 @@ jobs:
         if: ${{ github.event.inputs.mode == 'recall' || github.event.inputs.mode == '' }}
         env:
           RECALL_DIAG_K: ${{ github.event.inputs.diag_k }}
-          SHODH_GRAPH_FUSION_WEIGHT: ${{ github.event.inputs.graph_w }}
           SHODH_CONCEPT_ENTITIES: ${{ github.event.inputs.concepts }}
           SHODH_CONCEPT_SEED_DF_MAX: ${{ github.event.inputs.concept_seed_df_max }}
           SHODH_GRAPH_IDF_EDGES: ${{ github.event.inputs.graph_idf }}
@@ -310,7 +308,6 @@ jobs:
           SHODH_MAX_CASES: ${{ github.event.inputs.max_cases }}
           SHODH_GRAPH_RESERVE_K: ${{ github.event.inputs.graph_reserve_k }}
           SHODH_GRAPH_ACT_ADD: ${{ github.event.inputs.graph_act_add }}
-          SHODH_GRAPH_W_FLOOR: ${{ github.event.inputs.graph_w_floor }}
           SHODH_ACTR_NORM: ${{ github.event.inputs.actr_norm }}
           SHODH_GRAPH_RESERVE_FINAL: ${{ github.event.inputs.graph_reserve_final }}
           SHODH_GRAPH_EXPAND_K: ${{ github.event.inputs.graph_expand_k }}

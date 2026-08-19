@@ -86,10 +86,10 @@ jobs:
         run: set -o pipefail; SHODH_TYPED_WALK=1 SHODH_TYPED_WALK_DEBUG=1 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>b.err | tail -3
       - name: C recall — +learned-pairs retest (tightened gates)
         run: set -o pipefail; SHODH_LEARNED_PAIRS=1 RUST_LOG=info ./target/release/recall-eval --suite locomo --repeats 1 --output c.json --storage ./s-c 2>c.err | tail -3
-      - name: Ontology — FLAT_ADAPTIVE=0 arm (the 0.15→0.05 tail attribution)
+      - name: Ontology — defaults (FLAT_ADAPTIVE arm retired with score-blending fusion)
         run: |
           set -o pipefail
-          SHODH_FLAT_ADAPTIVE=0 ./target/release/recall-eval --suite locomo --output o-main.json --ontology ontology-noadaptive.json --storage ./s-o 2>o.err | tail -3
+          ./target/release/recall-eval --suite locomo --output o-main.json --ontology ontology-noadaptive.json --storage ./s-o 2>o.err | tail -3
       - name: Lineage — defaults confirm
         run: |
           set -o pipefail

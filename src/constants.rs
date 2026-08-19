@@ -1186,17 +1186,6 @@ pub const ONTOLOGICAL_RERANK_MAX: f32 = 0.25;
 /// so moderate top-weighting is appropriate.
 pub const RRF_K_HYBRID_FUSION: f32 = 45.0;
 
-/// RRF K for outer graph+hybrid fusion in Layer 4 of semantic_retrieve()
-///
-/// Used in `mod.rs::semantic_retrieve()` to fuse graph spreading activation
-/// results with the already-fused hybrid (BM25+vector) results.
-///
-/// K=30 (more aggressive than inner K=45) because graph results are pre-sorted
-/// by activation strength and the top graph results carry high signal — justified
-/// by ACT-R's spreading activation model where top-activated items have
-/// disproportionately stronger evidence (Anderson & Lebiere, 1998).
-pub const RRF_K_GRAPH_FUSION: f32 = 30.0;
-
 // =============================================================================
 // UNION RETRIEVAL — PER-LEG PRIORS
 // =============================================================================
@@ -1387,23 +1376,18 @@ pub const TEMPORAL_MATCH_BOOST_MONTH: f32 = 0.1;
 /// but gives temporal-range memories a meaningful advantage.
 pub const TEMPORAL_PREFILTER_BOOST: f32 = 0.15;
 
-/// Floor score for geo-prefetched candidates injected into the fused pool.
-/// Injection is additive-only: ids already in the pool keep their semantic score
-/// (entry().or_insert), so this can never displace or re-rank semantic candidates
-/// under the DEFAULT fusion mode (SHODH_FUSION_FLAT, calibrated-max magnitude
-/// scoring — real candidates enter at their full leg weight, e.g. up to
-/// graph_w/semantic_w, comfortably above 0.05).
+/// Floor score for geo-prefetched candidates injected into the union pool.
+/// Injection is additive-only: ids already in the pool keep their retrieval score
+/// (entry().or_insert), so this never displaces or re-ranks a real candidate.
 ///
-/// CAVEAT (review finding): under the legacy `SHODH_FUSION_RRF` escape-hatch
-/// mode, scores are rank-reciprocal — `weight / (RRF_K_GRAPH_FUSION + rank)`
-/// with `RRF_K_GRAPH_FUSION = 30.0` — so even a rank-1 real candidate can score
-/// as low as `~0.6 / 31 ≈ 0.019`, which is BELOW 0.05. In that mode a
-/// floor-injected candidate can outrank a genuine top semantic result, i.e.
-/// "enters at the bottom of the ranking" is only true under the default
-/// (non-RRF) fusion mode, not universally. This is a pre-existing property of
-/// choosing a fixed floor against a mode-dependent score scale, not something
-/// this feature can fully close without reading the active fusion mode at
-/// injection time; documented here so it isn't rediscovered as a bug later.
+/// Scale note: under MAX-union a candidate enters at `leg_prior / (1 + rank)`,
+/// so 0.05 is NOT "the bottom of the ranking" — it is about rank 19 on the graph
+/// leg (1.000/20) and rank 15 on BM25 (0.801/16). A floor-injected candidate
+/// therefore lands mid-list, above genuinely weak tail candidates. That is
+/// intentional: the floor exists only to carry injected ids far enough to reach
+/// the hard geo predicate, which is what actually decides whether they survive.
+/// The score scale is single-mode now, so unlike the old RRF/FLAT/SUM fusion
+/// modes this floor no longer has to be reasoned about per mode.
 ///
 /// The fusion pipeline truncates `res` to `query.max_results` BEFORE the hard
 /// geo predicate runs (predicate lives in the per-candidate hydration loop, via
@@ -3302,7 +3286,6 @@ pub const COMPANION_SCORE_FACTOR: f32 = 0.5;
 // | Constant                      | File                      | Function/Context                    |
 // |-------------------------------|---------------------------|-------------------------------------|
 // | RRF_K_HYBRID_FUSION           | memory/hybrid_search.rs   | search_with_dynamic_weights()       |
-// | RRF_K_GRAPH_FUSION            | memory/mod.rs             | semantic_retrieve() Layer 4         |
 // | ATTRIBUTE_QUERY_BOOST         | memory/mod.rs             | semantic_retrieve() Layer 4.5       |
 // | TEMPORAL_FACT_BOOST           | memory/mod.rs             | semantic_retrieve() Layer 4.55      |
 // | ACTIVATION_BONUS_SCALE        | memory/mod.rs             | semantic_retrieve() Layer 4 graph   |
