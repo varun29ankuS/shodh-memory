@@ -1197,6 +1197,36 @@ pub const RRF_K_HYBRID_FUSION: f32 = 45.0;
 /// disproportionately stronger evidence (Anderson & Lebiere, 1998).
 pub const RRF_K_GRAPH_FUSION: f32 = 30.0;
 
+/// Rank half-life for the V2 fusion's length-invariant leg-rank term
+///
+/// Used in `mod.rs::v2_leg_rank_score()` — the SHODH_FUSION_V2 leg contribution
+/// is `w · K/(K + rank)` (rank 0-indexed), which is exactly `w` at rank 1 and
+/// halves at rank K.
+///
+/// WHY not the leg-length Borda `w·(N-rank)/N` it replaces: N was the leg's OWN
+/// length, so the same candidate at the same rank scored 0.10·w in a 10-deep leg
+/// and 0.91·w in a 100-deep leg — any change to a leg's exit width
+/// (SHODH_GRAPH_LEG_K) silently rescaled every score in that leg (measured:
+/// widening the graph leg 10→100 under the Borda form moved held-out LoCoMo
+/// recall@10 by −0.062, outside the ±0.025 95% interval). Worse, the two legs
+/// decayed on incomparable scales even at DEFAULT sizes: graph (N≈10) lost
+/// 0.10·w per rank while the hybrid candidate pool (N≈100+) lost under 0.01·w
+/// per rank, so "rank 5" meant different things per leg.
+///
+/// WHY not plain RRF `w/(k+rank)`: rank-1 lands at w/31 — the exact "crumb" V2
+/// exists to fix (see the SHODH_FUSION_V2 block comment and the geo-injection
+/// floor caveat below) — and the graph rescue term (a graph_w-scaled magnitude)
+/// would dominate the consensus backbone ~30:1 instead of balancing it.
+///
+/// WHY not Borda over a FIXED denominator `w·(N_fix-rank)/N_fix`: ranks past
+/// N_fix clamp to ties at 0 (or go negative into the summed pool), destroying
+/// within-leg order for exactly the widened legs this constant must serve.
+///
+/// K=5 anchors the harmonic curve to the OLD default shape's midpoint: Borda
+/// over a 10-deep leg scored 0.5·w at rank 5 (0-indexed), and K/(K+rank) with
+/// K=5 gives exactly 0.5 there. Rank-1 is `w` exactly at any leg size.
+pub const V2_FUSION_RANK_HALF_LIFE: f32 = 5.0;
+
 // =============================================================================
 // RETRIEVAL PIPELINE BOOST CONSTANTS
 // All boosts are multiplicative factors applied to the RRF-fused base score.
@@ -3277,6 +3307,7 @@ pub const COMPANION_SCORE_FACTOR: f32 = 0.5;
 // |-------------------------------|---------------------------|-------------------------------------|
 // | RRF_K_HYBRID_FUSION           | memory/hybrid_search.rs   | search_with_dynamic_weights()       |
 // | RRF_K_GRAPH_FUSION            | memory/mod.rs             | semantic_retrieve() Layer 4         |
+// | V2_FUSION_RANK_HALF_LIFE      | memory/mod.rs             | v2_leg_rank_score() Layer 4 V2      |
 // | ATTRIBUTE_QUERY_BOOST         | memory/mod.rs             | semantic_retrieve() Layer 4.5       |
 // | TEMPORAL_FACT_BOOST           | memory/mod.rs             | semantic_retrieve() Layer 4.55      |
 // | ACTIVATION_BONUS_SCALE        | memory/mod.rs             | semantic_retrieve() Layer 4 graph   |

@@ -1955,8 +1955,14 @@ pub fn spreading_activation_retrieve_with_stats(
     // ~10-candidate leg fused against ~100-candidate vector/BM25 legs — reachable gold
     // ranked 11+ by the leg's internal scoring never reaches fusion at all (funnel:
     // graph leg emits ~51% of 98%-reachable gold). SHODH_GRAPH_LEG_K widens the leg's
-    // exit gate without changing scoring (unlike reach_inject, which flooded the leg
-    // with threshold-free reachability and measured harmful). Default unset → unchanged.
+    // exit gate (unlike reach_inject, which flooded the leg with threshold-free
+    // reachability and measured harmful). It is NOT fully scoring-neutral downstream:
+    // the V2 leg-length Borda that once rescaled every graph score with leg width is
+    // fixed (length-invariant v2_leg_rank_score in mod.rs), but the fitted adaptive
+    // gate (SHODH_FLAT_ADAPTIVE, default ON) consumes n_graph as a FEATURE
+    // standardised at mu≈9.9/sd≈0.99 — K=100 puts that feature ~91 sd out of
+    // distribution, saturating the gate toward full vector trust on every query, so
+    // widening this knob shifts DEFAULT-fusion ranking too. Default unset → unchanged.
     let graph_leg_k = std::env::var("SHODH_GRAPH_LEG_K")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())

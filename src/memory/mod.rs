@@ -419,6 +419,222 @@ mod char_truncate_tests {
     }
 }
 
+/// How many standard deviations a fitted-gate feature may travel from its
+/// training mean before the gate stops trusting it.
+///
+/// ±4σ covers 99.994% of a normal, so this is inert on any input resembling the
+/// data the gate was fitted on, and binds only where the model has no evidence
+/// at all.
+const FITTED_GATE_FEATURE_CLAMP: f32 = 4.0;
+
+/// Standardize a fitted-gate feature, bounded to the range the fit saw.
+///
+/// The adaptive gate is a logistic model over eleven standardized features. Two
+/// of them — `n_graph` and `n_hybrid` — are LEG SIZES, and a leg size is exactly
+/// the sort of thing an operator changes while believing they are changing
+/// nothing else.
+///
+/// `n_graph` was fitted at mu 9.90, sd 0.99. Setting `SHODH_GRAPH_LEG_K=100`
+/// moves that feature **91 standard deviations** out of distribution, worth
+/// +27.7 to the logit on its own — against a bias of -0.99 and ten other
+/// features whose contributions are order 1. The sigmoid saturates, and the gate
+/// returns the same trust value for every query regardless of what the query
+/// looks like. Measured on the held-out suite: ndcg@10 0.4222 -> 0.3627.
+///
+/// The existing `s.clamp(-30.0, 30.0)` on the summed logit does not help. It
+/// prevents float overflow; by the time it runs, one feature has already drowned
+/// the other ten. The guard has to be per-feature, before the weighting.
+///
+/// Clamping rather than removing the feature is deliberate: the coefficient was
+/// learned and is presumably carrying real signal in-distribution, and dropping
+/// a term from a fitted model silently rebalances every other coefficient.
+/// Bounding extrapolation keeps the model exactly as fitted where it has
+/// evidence, and merely stops it asserting a conclusion where it has none.
+#[inline]
+fn standardize_clamped(x: f32, mu: f32, sd: f32) -> f32 {
+    if sd.abs() < 1e-9 {
+        return 0.0;
+    }
+    ((x - mu) / sd).clamp(-FITTED_GATE_FEATURE_CLAMP, FITTED_GATE_FEATURE_CLAMP)
+}
+
+/// Length-invariant rank score for a SHODH_FUSION_V2 fusion leg.
+///
+/// `w · K/(K + rank)` with rank 0-indexed and K = V2_FUSION_RANK_HALF_LIFE:
+/// rank-1 scores exactly the leg weight `w` (V2's design intent — not the RRF
+/// crumb w/(k+rank)), each further rank decays harmonically, halving at rank K.
+///
+/// Replaces the leg-length Borda `w·(N-rank)/N`, whose denominator made a
+/// candidate's score a function of how many OTHER candidates its leg returned
+/// (same candidate, same rank: 0.10·w in a 10-deep leg, 0.91·w in a 100-deep
+/// leg) — widening a leg's exit gate (SHODH_GRAPH_LEG_K) rescaled every score
+/// in it, and the graph (N≈10) and hybrid (N≈100+) legs decayed on
+/// incomparable scales even at default sizes. Here the score depends ONLY on
+/// (weight, rank): the signature has no length input — that absence IS the
+/// invariant. Strictly positive and strictly decreasing, so deep-leg
+/// candidates keep their order instead of clamping to ties at 0 (the failure
+/// mode of a fixed-denominator Borda). K's derivation lives on
+/// V2_FUSION_RANK_HALF_LIFE in constants.rs.
+fn v2_leg_rank_score(leg_weight: f32, rank: usize) -> f32 {
+    use crate::constants::V2_FUSION_RANK_HALF_LIFE as K;
+    leg_weight * (K / (K + rank as f32))
+}
+
+#[cfg(test)]
+mod fitted_gate_feature_tests {
+    use super::{standardize_clamped, FITTED_GATE_FEATURE_CLAMP};
+
+    /// The property that makes this safe to land without a measurement: inside
+    /// the range the gate was fitted on, it is arithmetically identical to the
+    /// raw standardization it replaces. If this fails, the change is no longer
+    /// inert on the default path and needs its own measured arm.
+    #[test]
+    fn is_inert_on_in_distribution_features() {
+        // (mu, sd) taken from the shipped FIT table.
+        for &(mu, sd) in &[
+            (9.90148_f32, 0.987682_f32), // n_graph
+            (116.222, 38.3149),          // n_hybrid
+            (0.307389, 0.170755),        // agreement_top10
+            (54.1034, 16.0475),          // query_len
+        ] {
+            for z in [-3.5_f32, -2.0, -0.5, 0.0, 0.5, 2.0, 3.5] {
+                let x = mu + z * sd;
+                let raw = (x - mu) / sd;
+                assert!(
+                    (standardize_clamped(x, mu, sd) - raw).abs() < 1e-5,
+                    "clamping must not alter an in-distribution feature (mu={mu}, sd={sd}, z={z})"
+                );
+            }
+        }
+    }
+
+    /// The bug this exists to stop: `n_graph` at 100 sits ~91 sigma out and, at
+    /// its fitted coefficient, contributes +27.7 to a logit whose bias is -0.99.
+    /// One feature decided the gate for every query.
+    #[test]
+    fn a_leg_size_far_outside_the_fit_cannot_dominate_the_logit() {
+        let (mu, sd, w) = (9.90148_f32, 0.987682_f32, 0.304049_f32);
+        let raw_contribution = w * (100.0 - mu) / sd;
+        assert!(
+            raw_contribution > 27.0,
+            "precondition: the unclamped feature really is catastrophic ({raw_contribution})"
+        );
+        let clamped_contribution = w * standardize_clamped(100.0, mu, sd);
+        assert!(
+            clamped_contribution.abs() <= w * FITTED_GATE_FEATURE_CLAMP + 1e-5,
+            "a single feature must stay within its weight times the clamp"
+        );
+        assert!(
+            clamped_contribution < 1.5,
+            "contribution must be comparable to the other ten features, got {clamped_contribution}"
+        );
+    }
+
+    /// Direction is preserved — clamping bounds magnitude, it does not discard
+    /// the sign of the evidence.
+    #[test]
+    fn clamping_preserves_direction() {
+        let (mu, sd) = (10.0_f32, 1.0_f32);
+        assert!(standardize_clamped(1000.0, mu, sd) > 0.0);
+        assert!(standardize_clamped(-1000.0, mu, sd) < 0.0);
+        assert_eq!(
+            standardize_clamped(1000.0, mu, sd),
+            FITTED_GATE_FEATURE_CLAMP
+        );
+        assert_eq!(
+            standardize_clamped(-1000.0, mu, sd),
+            -FITTED_GATE_FEATURE_CLAMP
+        );
+    }
+
+    /// A degenerate fit entry must not produce NaN or infinity — that would
+    /// poison the whole logit, not just one term.
+    #[test]
+    fn a_zero_variance_feature_contributes_nothing_rather_than_infinity() {
+        let v = standardize_clamped(5.0, 5.0, 0.0);
+        assert!(v.is_finite(), "got {v}");
+        assert_eq!(v, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod v2_leg_rank_score_tests {
+    use super::v2_leg_rank_score;
+
+    /// THE defect this function exists to prevent: under the old leg-length
+    /// Borda (w·(N-rank)/N) the same candidate at the same rank scored 0.10·w
+    /// in a 10-deep leg and 0.91·w in a 100-deep leg — this test fails against
+    /// that formula. Simulate both leg widths and assert every shared rank
+    /// scores bit-identically.
+    #[test]
+    fn same_rank_same_weight_scores_identically_at_any_leg_length() {
+        let w = 0.3;
+        for (n_a, n_b) in [(10usize, 100usize), (1, 250), (10, 11)] {
+            let leg_a: Vec<f32> = (0..n_a).map(|r| v2_leg_rank_score(w, r)).collect();
+            let leg_b: Vec<f32> = (0..n_b).map(|r| v2_leg_rank_score(w, r)).collect();
+            for r in 0..n_a.min(n_b) {
+                assert_eq!(
+                    leg_a[r], leg_b[r],
+                    "rank {r} rescaled by leg length {n_a} vs {n_b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rank_order_within_a_leg_is_strictly_preserved() {
+        let w = 0.7;
+        for r in 0..99 {
+            assert!(
+                v2_leg_rank_score(w, r) > v2_leg_rank_score(w, r + 1),
+                "rank {r} must strictly outscore rank {}",
+                r + 1
+            );
+        }
+    }
+
+    #[test]
+    fn rank_one_lands_exactly_at_leg_weight() {
+        // K/(K+0) == 1.0 exactly in f32, so V2's "rank-1 ≈ full leg weight"
+        // intent holds with no approximation — and therefore legs stay
+        // comparable to each other and to the graph_w-scaled rescue term.
+        for w in [0.1_f32, 0.3, 0.5, 0.9] {
+            assert_eq!(v2_leg_rank_score(w, 0), w);
+        }
+    }
+
+    #[test]
+    fn cross_leg_comparability_holds_at_both_leg_sizes() {
+        // A rank-1 graph hit and a rank-1 hybrid hit must relate exactly as
+        // their weights say — and the same weight ratio must hold at EVERY
+        // shared rank whether a leg returned 10 or 100 candidates. The old
+        // Borda broke exactly this: a graph leg widened 10→100 outscored an
+        // unchanged hybrid leg at equal weight and rank.
+        let (graph_w, hybrid_w) = (0.3_f32, 0.7_f32);
+        assert_eq!(v2_leg_rank_score(graph_w, 0), graph_w);
+        assert_eq!(v2_leg_rank_score(hybrid_w, 0), hybrid_w);
+        for leg_len in [10usize, 100] {
+            for r in 0..leg_len {
+                let g = v2_leg_rank_score(graph_w, r);
+                let h = v2_leg_rank_score(hybrid_w, r);
+                // Same rank ⇒ scores in exact weight ratio (shared decay curve).
+                assert!(
+                    (g * hybrid_w - h * graph_w).abs() < 1e-6,
+                    "weight ratio broken at rank {r}, leg_len {leg_len}"
+                );
+                assert!(h > g, "heavier leg must outscore at rank {r}");
+            }
+        }
+    }
+
+    #[test]
+    fn deep_ranks_stay_strictly_positive() {
+        // Leg scores are summed into the fused pool — a clamped-Borda 0 (rank
+        // ties) or a negative (rank past a fixed denominator) would corrupt it.
+        assert!(v2_leg_rank_score(0.5, 10_000) > 0.0);
+    }
+}
+
 #[cfg(test)]
 mod resolve_entity_label_tests {
     use super::resolve_entity_label;
@@ -3941,8 +4157,11 @@ impl MemorySystem {
                 .fold(0.0_f32, f32::max)
                 .max(1e-6);
             // FUSION_V2 (SHODH_FUSION_V2): weighted-Borda consensus backbone + a
-            // calibrated graph-exclusive rescue. Borda gives a leg's rank-1 ~FULL
-            // leg weight (w·(N-rank)/N) instead of the RRF crumb w/(k+rank); the
+            // calibrated graph-exclusive rescue. The rank term gives a leg's rank-1
+            // the FULL leg weight (w·K/(K+rank), length-invariant — see
+            // v2_leg_rank_score; formerly leg-length Borda w·(N-rank)/N, whose
+            // denominator rescaled every score with the leg's width) instead of
+            // the RRF crumb w/(k+rank); the
             // rescue lets a CONFIDENT graph-only hit (high activation, absent from
             // the hybrid top window) exceed the consensus crowd — the single-witness
             // case RRF structurally buries. Grounded in the dataflow map (the
@@ -3951,10 +4170,6 @@ impl MemorySystem {
             let v2_fusion = std::env::var("SHODH_FUSION_V2")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
-
-            // Leg sizes for Borda normalisation (legs are already rank-sorted here).
-            let n_graph = graph_results.len().max(1) as f32;
-            let n_hybrid = hybrid_ids.len().max(1) as f32;
 
             // Flatten the double-RRF (SHODH_FUSION_FLAT): vector and BM25 enter the fusion as
             // SEPARATE calibrated-magnitude legs, so a vector-strong gold keeps its rank
@@ -4163,7 +4378,7 @@ impl MemorySystem {
                     ];
                     let mut s = FIT_BIAS;
                     for ((mu, sd, w), x) in FIT.iter().zip(feats) {
-                        s += w * (x - mu) / sd;
+                        s += w * standardize_clamped(x, *mu, *sd);
                     }
                     1.0 / (1.0 + (-s.clamp(-30.0, 30.0)).exp())
                 } else if adapt_feature == "agreement" {
@@ -4354,14 +4569,15 @@ impl MemorySystem {
                     // Calibrated weighted-SUM: graph leg enters at fw_graph·(activation/max).
                     fw_graph * (activation / max_activation).clamp(0.0, 1.0)
                 } else if v2_fusion {
-                    // Borda (rank-1 ≈ full graph_w) + CONFIDENCE rescue: every graph
+                    // Rank term (rank-1 = full graph_w, length-invariant — see
+                    // v2_leg_rank_score) + CONFIDENCE rescue: every graph
                     // candidate gets graph_w·(activation/max) added, so a strongly
                     // activated hit reaches up to 2·graph_w and can beat a lexical
                     // distractor even when it is PRESENT-but-buried in the hybrid
                     // pool. (The old `!hybrid_top` gate only rescued answers wholly
                     // absent from hybrid — local observation showed it never fired
                     // for the common burial case.)
-                    let borda = graph_w * ((n_graph - r as f32) / n_graph);
+                    let borda = v2_leg_rank_score(graph_w, r);
                     let rescue = graph_w * (activation / max_activation).clamp(0.0, 1.0);
                     borda + rescue
                 } else if flat_fusion {
@@ -4435,8 +4651,11 @@ impl MemorySystem {
                     let (hi, lo) = if vn >= bn { (vn, bn) } else { (bn, vn) };
                     hybrid_w * (hi + flat_consensus * lo)
                 } else if v2_fusion {
-                    // Borda: rank-1 ≈ full hybrid_w (scale-invariant, no crumb).
-                    hybrid_w * ((n_hybrid - r as f32) / n_hybrid)
+                    // Rank-1 = full hybrid_w, no crumb — and length-invariant now
+                    // (see v2_leg_rank_score: the old (n_hybrid−r)/n_hybrid
+                    // denominator rescaled every score with the pool's width,
+                    // which for hybrid is naturally ~100+ and query-dependent).
+                    v2_leg_rank_score(hybrid_w, r)
                 } else {
                     hybrid_w / (k + (r + 1) as f32)
                 };
