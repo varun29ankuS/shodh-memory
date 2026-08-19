@@ -154,6 +154,28 @@ jobs:
         env:
           SHODH_MODEL_PATH: ${{ github.workspace }}/models/minilm-l6
           SHODH_GLINER_MODEL_PATH: ${{ github.workspace }}/models/gliner-bi-edge
+          # Make the per-case recall@50/@100 fields mean something.
+          #
+          # Unset, `runner.rs` degrades those fields to the production list,
+          # which is SMOKE_K (10) deep — so `recall@100` silently becomes a
+          # restatement of `recall@10`. Measured on run 31959942070:
+          # r@10 == r@100 for 100 of 100 cases. Anyone reading the artifact to
+          # ask "is this gold unreachable, or merely ranked badly?" got an
+          # answer that could only ever say "unreachable", for every case.
+          #
+          # That question is the one worth asking: on the held-out suite at
+          # depth 100, half of all misses turned out to be documents already
+          # retrieved and mis-ordered. The gate could not have shown that.
+          #
+          # Safe for the gated numbers. The diagnostic issues a SEPARATE,
+          # side-effect-free query (`SHODH_RECALL_READONLY=1`) and feeds ONLY
+          # the depth fields; headline metrics, rank lists, latency and the
+          # fusion-feature export all come from the production-depth query.
+          # This is deliberate — an earlier design folded diag_k into the one
+          # production query and moved open_domain recall@10 from 0.275 to
+          # 0.150, because `max_results` sizes the candidate pool rather than
+          # just the view.
+          RECALL_DIAG_K: 100
         run: |
           set +e
           # RH-12 (#272): --repeats 5 → per-case latency is the median

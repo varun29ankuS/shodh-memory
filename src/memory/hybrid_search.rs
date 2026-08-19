@@ -4,15 +4,31 @@
 //! 1. BM25 full-text search (tantivy) - keyword matching
 //! 2. Vector search (Vamana) - semantic similarity
 //! 3. Reciprocal Rank Fusion (RRF) - signal combination
-//! 4. Cross-encoder reranking - accurate top-k scoring
-//! 5. Cognitive signals - Hebbian strength, decay, feedback momentum
+//! 4. Cognitive signals - Hebbian strength, decay, feedback momentum
 //!
 //! Architecture:
 //! ```text
 //! Query → [BM25] ──┐
-//!                  ├─→ [RRF Fusion] → [Cross-Encoder] → [Cognitive Boost] → Results
+//!                  ├─→ [RRF Fusion] → [Cognitive Boost] → Results
 //! Query → [Vector] ┘
 //! ```
+//!
+//! # There is no cross-encoder
+//!
+//! This list used to name "cross-encoder reranking" as stage 4 and the diagram
+//! used to show a `[Cross-Encoder]` box between fusion and the cognitive boost.
+//! Neither has ever existed. `memory/types.rs`, `memory/mod.rs` and
+//! `bin/recall_eval.rs` all state outright that this codebase has no
+//! cross-encoder; only this file claimed otherwise, and it is the file a reader
+//! opens first to learn the retrieval architecture.
+//!
+//! The gap is not cosmetic. Measured on the held-out LoCoMo suite at retrieval
+//! depth 100 (1,531 questions), **half of all misses are documents that were
+//! retrieved and then ordered wrongly** — 313 of 627, and 74 of 132 for
+//! `multi_hop`. `default_candidate_count()` is already 100, so those documents
+//! reach fusion and are discarded by rank. A reranking stage is the single
+//! largest measured lever in this pipeline, which makes advertising a
+//! non-existent one the most expensive sentence in the module.
 
 use std::collections::HashMap;
 use std::path::Path;

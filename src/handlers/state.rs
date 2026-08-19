@@ -3548,7 +3548,7 @@ impl MultiUserMemoryManager {
                         uuid: uuid::Uuid::new_v4(),
                         from_entity: *entity_uuid,
                         to_entity: category_uuid,
-                        relation_type: RelationType::IsA,
+                        relation_type: crate::graph_memory::RelationType::IsA,
                         strength: TAXONOMY_EDGE_STRENGTH,
                         created_at: now,
                         valid_at: now,
