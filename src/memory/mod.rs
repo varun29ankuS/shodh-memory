@@ -3855,617 +3855,188 @@ impl MemorySystem {
             crate::memory::gold_funnel::record("hybrid", hybrid_ids.iter().map(|(id, _)| id));
 
             // ===========================================================================
-            // LAYER 4: RRF FUSION WITH DENSITY-BASED WEIGHTS (PIPE-11)
             // ===========================================================================
-            // Biological model: Memory graphs start dense (noisy L1 edges) and become
-            // sparse over time through pruning (Hebbian "use it or lose it").
+            // LAYER 4: UNION + RANK   (score-blending fusion REMOVED)
+            // ===========================================================================
+            // Legs are retrieved and ranked INDEPENDENTLY, then UNIONED by MemoryId.
+            // A candidate's score is the MAX over the legs that found it — never a sum.
             //
-            // Sparse graphs = mature, curated connections = trust graph more
-            // Dense graphs = fresh, noisy connections = trust semantic/BM25 more
+            // Summation was the defect. RRF / weighted-Borda / weighted-SUM all ADDED
+            // each leg's contribution, so a candidate strong in ONE leg was diluted by
+            // its absence in the others and the strongest leg was structurally buried.
+            // Measured per-leg on the held-out set (n = 1,531): the graph leg ALONE
+            // scores recall@10 0.5692, while the three-leg fusion it fed scored 0.5258
+            // — fusion destroyed 4.3pp. Vector and BM25 were additionally pre-fused
+            // into `hybrid_ids` and then fused AGAIN against graph, a double-RRF that
+            // demoted every graph candidate twice.
             //
-            // The density weights directly control the balance - no extra multipliers.
-            // This follows ACT-R's additive activation model.
-            // K value from constants.rs — see Cormack et al. (2009), Anderson & Lebiere (1998)
-            use crate::constants::RRF_K_GRAPH_FUSION;
-            let k = RRF_K_GRAPH_FUSION;
+            // Under MAX-union a leg can only ever PROMOTE a candidate, never dilute
+            // one, and each leg is ranked on its own scores so no leg's ordering is
+            // contaminated by another's. Removed with the blend: the density weights,
+            // RRF_K, FUSION_V2/Borda, FUSION_SUM, FUSION_FLAT, FLAT_ADAPTIVE and the
+            // fitted logistic gate (the last was fitted on fused-score features such
+            // as `n_graph`, so it cannot outlive fusion).
+            use crate::constants::{
+                UNION_LEG_PRIOR_BM25, UNION_LEG_PRIOR_GRAPH, UNION_LEG_PRIOR_VECTOR,
+            };
+
             let mut fused: std::collections::HashMap<MemoryId, f32> =
                 std::collections::HashMap::new();
             let mut heb: std::collections::HashMap<MemoryId, f32> =
                 std::collections::HashMap::new();
 
-            // Density-based weights (already tuned in calculate_density_weights)
-            // Sparse (≤0.5): graph_w=0.5, semantic_w=0.4, linguistic_w=0.1
-            // Dense (≥2.0):  graph_w=0.1, semantic_w=0.7, linguistic_w=0.2
-            let (mut semantic_w, mut graph_w, linguistic_w) = graph_density
-                .map(calculate_density_weights)
-                .unwrap_or((0.6, 0.3, 0.1));
-
-            // Experiment knob: override the graph leg's fusion weight (eval only).
-            // SHODH_GRAPH_FUSION_WEIGHT=0 → graph-OFF (the graph leg contributes
-            // nothing to fusion AND its multiplicative activation bonus, which is
-            // gated on graph_w, becomes a no-op). Lets us measure whether the
-            // net-negative graph leg should be down-weighted/removed without a
-            // recompile. Unset in production → unchanged density behavior.
-            if let Ok(v) = std::env::var("SHODH_GRAPH_FUSION_WEIGHT") {
-                if let Ok(w) = v.parse::<f32>() {
-                    graph_w = w.clamp(0.0, 1.0);
+            // Leg admission — two diagnostic controls, default unset = all three legs:
+            //   SHODH_LEG=graph|vector|bm25      isolate exactly ONE leg
+            //   SHODH_UNION_LEGS=graph,bm25,...  admit an explicit SUBSET
+            // SHODH_UNION_LEGS wins when both are set. The subset form replaces the
+            // removed `SHODH_GRAPH_FUSION_WEIGHT=0` graph-off ablation, which worked by
+            // zeroing the graph leg's fusion weight — a lever that cannot exist now that
+            // legs are unioned rather than weighted and summed.
+            const UNION_LEG_NAMES: [&str; 3] = ["graph", "vector", "bm25"];
+            let union_legs = std::env::var("SHODH_UNION_LEGS").ok();
+            let isolate_leg = std::env::var("SHODH_LEG").ok().filter(|v| {
+                let known = UNION_LEG_NAMES.iter().any(|n| v.eq_ignore_ascii_case(n));
+                if !known {
+                    tracing::warn!(
+                        "SHODH_LEG: unknown leg '{v}' (expected graph|vector|bm25) — ignored,                          all legs admitted"
+                    );
                 }
+                known
+            });
+            let leg_on = |leg: &str| -> bool {
+                if let Some(ref subset) = union_legs {
+                    return subset
+                        .split(',')
+                        .map(str::trim)
+                        .any(|t| t.eq_ignore_ascii_case(leg));
+                }
+                match isolate_leg.as_deref() {
+                    Some(only) => only.eq_ignore_ascii_case(leg),
+                    None => true,
+                }
+            };
+            let graph_leg_on = leg_on("graph");
+            let vector_leg_on = leg_on("vector");
+            let bm25_leg_on = leg_on("bm25");
+
+            // Diagnostics: the union's leg priors stand in for the old density weights.
+            if let Some(ref mut s) = stats {
+                s.graph_weight = UNION_LEG_PRIOR_GRAPH;
+                s.semantic_weight = UNION_LEG_PRIOR_VECTOR;
+                s.linguistic_weight = UNION_LEG_PRIOR_BM25;
             }
 
-            // E3 fusion-fix C — graph-weight floor (SHODH_GRAPH_W_FLOOR).
-            // The density logic caps graph_w at 0.5 even for the sparsest graph,
-            // which on multi-hop queries leaves the graph's correct (but
-            // deep-ranked) answer too weak to survive BM25's lexical crowd. This
-            // raises graph_w to a floor and renormalises hybrid down, to test
-            // whether simply trusting the graph more recovers multi-hop. Default
-            // unset → unchanged.
-            if let Ok(v) = std::env::var("SHODH_GRAPH_W_FLOOR") {
-                if let Ok(f) = v.parse::<f32>() {
-                    if f > graph_w {
-                        // Cap the floor so renormalisation can never silently zero the
-                        // semantic/BM25 leg: keep at least 0.05 of semantic weight.
-                        let max_floor = (1.0 - linguistic_w - 0.05).max(0.0);
-                        let requested = f.clamp(0.0, 0.95);
-                        graph_w = requested.min(max_floor);
-                        if requested > max_floor {
-                            tracing::warn!(
-                                "SHODH_GRAPH_W_FLOOR={requested} capped to {graph_w:.2} to keep the semantic leg alive"
-                            );
+            // Harmonic rank term: scale-free, and with no k there is nothing to tune.
+            // A leg's rank-1 candidate enters at that leg's full prior.
+            fn union_rank_score(prior: f32, rank0: usize) -> f32 {
+                prior / (1.0 + rank0 as f32)
+            }
+
+            let fresh_attr = |id: &MemoryId| ScoreAttribution {
+                memory_id: id.0.to_string(),
+                attribute_boost: 1.0,
+                temporal_prefilter_boost: 1.0,
+                temporal_fact_boost: 1.0,
+                interference_adjustment: 1.0,
+                prospective_boost: 1.0,
+                fact_source_boost: 1.0,
+                ontological_boost: 1.0,
+                importance_factor: 1.0,
+                feedback_multiplier: 1.0,
+                quality_gate: 1.0,
+                ..Default::default()
+            };
+
+            // ---- graph leg (already ordered by spreading activation, descending) ----
+            if graph_leg_on {
+                for (r, (id, _activation, h)) in graph_results.iter().enumerate() {
+                    let s = union_rank_score(UNION_LEG_PRIOR_GRAPH, r);
+                    let slot = fused.entry(id.clone()).or_insert(0.0);
+                    if s > *slot {
+                        *slot = s;
+                    }
+                    heb.insert(id.clone(), *h);
+                    if let Some(ref mut attr_map) = attributions {
+                        let attr = attr_map.entry(id.clone()).or_insert_with(|| fresh_attr(id));
+                        attr.graph_rrf = s;
+                        attr.hebbian_boost = *h;
+                        if !attr.sources.contains(&"graph".to_string()) {
+                            attr.sources.push("graph".to_string());
                         }
-                        semantic_w = (1.0 - graph_w - linguistic_w).max(0.0);
                     }
                 }
             }
 
-            // Hybrid weight = semantic + linguistic (BM25 + vector combined)
-            let hybrid_w = semantic_w + linguistic_w;
+            // ---- vector and BM25 legs, ranked SEPARATELY from their own components ----
+            // (`hybrid_ids` is deliberately not used here: it is the pre-fused
+            // vector+BM25 ordering, i.e. the inner half of the old double-RRF.)
+            let mut by_vec: Vec<(&MemoryId, f32)> = hybrid_components
+                .iter()
+                .filter(|(_, (_, v))| *v > 0.0)
+                .map(|(id, (_, v))| (id, *v))
+                .collect();
+            let mut by_bm: Vec<(&MemoryId, f32)> = hybrid_components
+                .iter()
+                .filter(|(_, (b, _))| *b > 0.0)
+                .map(|(id, (b, _))| (id, *b))
+                .collect();
+            by_vec.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+            by_bm.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+            let admit = |ranked: &[(&MemoryId, f32)],
+                         prior: f32,
+                         source: &str,
+                         fused: &mut std::collections::HashMap<MemoryId, f32>,
+                         attributions: &mut Option<
+                std::collections::HashMap<MemoryId, ScoreAttribution>,
+            >| {
+                for (r, (id, _)) in ranked.iter().enumerate() {
+                    let s = union_rank_score(prior, r);
+                    let slot = fused.entry((*id).clone()).or_insert(0.0);
+                    if s > *slot {
+                        *slot = s;
+                    }
+                    if let Some(ref mut attr_map) = attributions {
+                        let attr = attr_map
+                            .entry((*id).clone())
+                            .or_insert_with(|| fresh_attr(id));
+                        attr.hybrid_rrf = attr.hybrid_rrf.max(s);
+                        if !attr.sources.contains(&source.to_string()) {
+                            attr.sources.push(source.to_string());
+                        }
+                    }
+                }
+            };
+
+            if vector_leg_on {
+                admit(
+                    &by_vec,
+                    UNION_LEG_PRIOR_VECTOR,
+                    "vector",
+                    &mut fused,
+                    &mut attributions,
+                );
+            }
+            if bm25_leg_on {
+                admit(
+                    &by_bm,
+                    UNION_LEG_PRIOR_BM25,
+                    "bm25",
+                    &mut fused,
+                    &mut attributions,
+                );
+            }
 
             tracing::debug!(
-                "Layer 4 RRF: density={:?}, graph_w={:.2}, hybrid_w={:.2}, query_entities={}",
-                graph_density,
-                graph_w,
-                hybrid_w,
-                query_entity_count
+                "Layer 4 union: graph={} vector={} bm25={} -> union={} (legs g={} v={} b={})",
+                graph_results.len(),
+                by_vec.len(),
+                by_bm.len(),
+                fused.len(),
+                graph_leg_on,
+                vector_leg_on,
+                bm25_leg_on
             );
-
-            // Capture density weights for diagnostics
-            if let Some(ref mut s) = stats {
-                s.graph_weight = graph_w;
-                s.semantic_weight = semantic_w;
-                s.linguistic_weight = linguistic_w;
-            }
-
-            let max_activation = graph_results
-                .iter()
-                .map(|(_, a, _)| *a)
-                .fold(0.0_f32, f32::max)
-                .max(1e-6);
-            // FUSION_V2 (SHODH_FUSION_V2): weighted-Borda consensus backbone + a
-            // calibrated graph-exclusive rescue. Borda gives a leg's rank-1 ~FULL
-            // leg weight (w·(N-rank)/N) instead of the RRF crumb w/(k+rank); the
-            // rescue lets a CONFIDENT graph-only hit (high activation, absent from
-            // the hybrid top window) exceed the consensus crowd — the single-witness
-            // case RRF structurally buries. Grounded in the dataflow map (the
-            // double-RRF crumb burial at this exact fusion) + the RRF scale-
-            // invariance lesson. Default off; RRF unchanged when unset.
-            let v2_fusion = std::env::var("SHODH_FUSION_V2")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-
-            // Leg sizes for Borda normalisation (legs are already rank-sorted here).
-            let n_graph = graph_results.len().max(1) as f32;
-            let n_hybrid = hybrid_ids.len().max(1) as f32;
-
-            // Flatten the double-RRF (SHODH_FUSION_FLAT): vector and BM25 enter the fusion as
-            // SEPARATE calibrated-magnitude legs, so a vector-strong gold keeps its rank
-            // instead of being RRF-buried by BM25's lexical crowd in the hybrid pre-fusion
-            // (funnel-located: the entire multi_hop loss is vector 7.4 → hybrid 28.4). Implies
-            // the calibrated graph leg. hybrid_w is split; vector trusted more by default.
-            let explicit_flat = std::env::var("SHODH_FUSION_FLAT")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            // Consensus weight for the MIN leg in the max-fusion (a candidate present in BOTH
-            // vector and BM25 gets a small bonus over one strong in a single leg). The MAX leg
-            // is what preserves a single-leg-strong gold from crowd dilution.
-            // SHODH_LEG=bm25|vector|graph — isolate ONE retrieval leg to measure its
-            // STANDALONE recall (diagnostic, default unset = all legs). vector keeps
-            // only vector-retrieved candidates ranked by vector score; bm25 likewise;
-            // graph drops the hybrid pool entirely (graph candidates only). The graph
-            // loop below is skipped for bm25/vector.
-            let isolate_leg = std::env::var("SHODH_LEG").ok();
-            match isolate_leg.as_deref() {
-                Some("vector") => {
-                    hybrid_components.retain(|_, (_, v)| *v > 0.0);
-                    hybrid_components.values_mut().for_each(|c| c.0 = 0.0);
-                }
-                Some("bm25") => {
-                    hybrid_components.retain(|_, (b, _)| *b > 0.0);
-                    hybrid_components.values_mut().for_each(|c| c.1 = 0.0);
-                }
-                Some("graph") => hybrid_components.clear(),
-                _ => {}
-            }
-            let graph_leg_on = !matches!(isolate_leg.as_deref(), Some("bm25") | Some("vector"));
-
-            let flat_consensus = std::env::var("SHODH_FLAT_CONSENSUS")
-                .ok()
-                .and_then(|s| s.parse::<f32>().ok())
-                .unwrap_or(0.3)
-                .clamp(0.0, 1.0);
-            // SHODH_FLAT_VEC_TRUST (global vector multiplier) and SHODH_FLAT_VEC_ABS /
-            // SHODH_FLAT_VEC_FLOOR (absolute cosine calibration) were REMOVED: both
-            // measured NEGATIVE (runs 27221406266, 27223054766 — each trades
-            // multi_hop↔single_hop through a global scalar; the structural fix is the
-            // per-query SHODH_FLAT_ADAPTIVE path below). Deleted rather than left
-            // default-off so a stale sweep config can't silently re-enable a known
-            // regression. Recoverable from git history if a per-query variant of
-            // absolute calibration is ever wanted as an adaptive FEATURE.
-            let max_vec = hybrid_components
-                .values()
-                .map(|(_, v)| *v)
-                .fold(0.0_f32, f32::max)
-                .max(1e-6);
-            let max_bm = hybrid_components
-                .values()
-                .map(|(b, _)| *b)
-                .fold(0.0_f32, f32::max)
-                .max(1e-6);
-
-            // SHODH_FUSION_SUM: calibrated weighted-SUM fusion. Each leg's raw score is
-            // min-max normalised to [0,1] then linearly combined with sweepable weights
-            // (SHODH_FW_VEC / _BM25 / _GRAPH). Unlike flat-MAX (which keeps the best single
-            // leg per candidate), vector AND BM25 both contribute additively, and the sweep
-            // finds the mix that ranks the present-but-buried gold (96% present at fusion,
-            // mean-rank 14.3) into top-10. Default off → fusion unchanged.
-            let sum_fusion = std::env::var("SHODH_FUSION_SUM")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            let env_w = |key: &str, default: f32| -> f32 {
-                std::env::var(key)
-                    .ok()
-                    .and_then(|s| s.parse::<f32>().ok())
-                    .unwrap_or(default)
-            };
-            let fw_graph = env_w("SHODH_FW_GRAPH", 0.3);
-            let fw_vec = env_w("SHODH_FW_VEC", 0.6);
-            let fw_bm25 = env_w("SHODH_FW_BM25", 0.4);
-
-            // SHODH_FUSION_FLAT (calibrated-max) is now the DEFAULT fusion: measured
-            // +0.0665 recall@10 ALL (RRF 0.6188 → 0.6853), funnel fusion mean-rank 14.3→8.25,
-            // top10 68.7→76.0 (runs 27216648530 + 27218456694, reproduced identically). The
-            // per-candidate MAX of the calibrated vector/BM25 legs (+ small consensus on the
-            // min) and the calibrated graph leg keep a single-leg-strong gold from being
-            // RRF-buried by the lexical crowd. It is on UNLESS another explicit fusion mode
-            // (V2 / ACT-R / SUM) is requested, or SHODH_FUSION_RRF selects the legacy
-            // rank-reciprocal fusion (escape hatch). Explicit SHODH_FUSION_FLAT still forces it.
-            let rrf_escape = std::env::var("SHODH_FUSION_RRF")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            let flat_fusion = explicit_flat || (!rrf_escape && !v2_fusion && !sum_fusion);
-
-            // SHODH_FLAT_ADAPTIVE: LEARNED per-query leg trust (approach C, stage 1). A GLOBAL
-            // vector-trust trades multi_hop↔single_hop (run 27221406266) — single_hop wants
-            // BM25/lexical, multi_hop wants vector/semantic, and no global scalar serves both.
-            // A PER-QUERY weight conditioned on a query feature breaks it. Feature = BM25
-            // peakedness (max/mean BM25 over the candidate pool): a SHARP peak ⇒ one memory
-            // lexically dominates ⇒ exact-match/single_hop ⇒ trust BM25 (vec_trust→1); a FLAT
-            // BM25 ⇒ no lexical anchor ⇒ semantic/multi_hop ⇒ trust vector (vec_trust→max).
-            // DEFAULT ON since runs 27268510462 + 27269567367 (confirm): the FITTED
-            // SYMMETRIC gate (feature=fitted, symmetric, trust_max 2.0) BROKE the
-            // structural single↔multi tradeoff — recall@10 ALL 0.6976→~0.705
-            // (reproduced), multi_hop 0.4318→0.4896 (exact across runs, the largest
-            // multi_hop gain in project history), single_hop HELD at 0.7730 exactly,
-            // p@1 +2.3pp. CAVEAT: the fitted coefficients were trained on the LoCoMo
-            // eval distribution (70% of its cases, run 27267533447, holdout AUC
-            // 0.756) — stage 3 (online refit from recall feedback, per user) replaces
-            // them; this fit is the cold-start seed. SHODH_FLAT_ADAPTIVE=0 restores
-            // plain FLAT (escape hatch).
-            let flat_adaptive = std::env::var("SHODH_FLAT_ADAPTIVE")
-                .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
-                .unwrap_or(true);
-            let effective_vec_trust = if flat_adaptive {
-                let adapt_trust_max = env_w("SHODH_ADAPT_TRUST_MAX", 2.0);
-                // SHODH_ADAPT_FEATURE selects the per-query discriminating feature:
-                //   peak      — BM25 peakedness (stage 1; run 27244857747: helps
-                //               multi/temporal but craters single_hop — the feature
-                //               doesn't separate the query types cleanly)
-                //   agreement — vector↔BM25 top-K overlap (stage 1b): when the two
-                //               legs AGREE on the top candidates there is a lexical
-                //               anchor (single_hop shape → trust BM25, vec_trust→1);
-                //               when vector's top is invisible to BM25 the answer is
-                //               semantic-only (multi_hop shape → trust vector →max).
-                //               Unlike peakedness this measures the RELATION between
-                //               the legs, not one leg's shape alone.
-                //   fitted    — stage 2b: offline-fitted logistic gate over ELEVEN
-                //               pool features (run 27267533447: holdout AUC 0.756 on
-                //               a 70/30 case split; no single feature exceeded AUC
-                //               0.554 — both stage-1 features were individually among
-                //               the weakest, which is WHY stage 1 kept re-trading).
-                //               t = P(vector ranks this query's gold better than
-                //               BM25). CAVEAT: coefficients fitted on the LoCoMo
-                //               eval distribution (caps 300/1500); an A/B on the
-                //               same suite partially trains-on-eval — the gate is
-                //               single_hop holding, and stage 3 is the online refit
-                //               from feedback.
-                let adapt_feature = std::env::var("SHODH_ADAPT_FEATURE")
-                    .unwrap_or_else(|_| "fitted".to_string())
-                    .to_ascii_lowercase();
-                let t = if adapt_feature == "fitted" {
-                    // (mu, sd, weight) per standardized feature, then bias — from
-                    // the run-27267533447 fit. Order must match `feats` below.
-                    const FIT: [(f32, f32, f32); 11] = [
-                        (2.77242, 1.87083, -0.301375),    // bm_peak
-                        (1.3841, 0.180661, -0.0212517),   // vec_peak
-                        (0.307389, 0.170755, -0.243719),  // agreement_top10
-                        (93.4129, 43.8602, -0.556471),    // max_bm
-                        (0.597371, 0.0823258, 0.236463),  // max_vec
-                        (106.897, 36.4931, 0.597537),     // n_bm_pos
-                        (31.4138, 7.54534, -0.881755),    // n_vec_pos
-                        (116.222, 38.3149, 0.582615),     // n_hybrid
-                        (9.90148, 0.987682, 0.304049),    // n_graph
-                        (0.358194, 0.0710801, 0.0264384), // graph_max_activation
-                        (54.1034, 16.0475, -0.571797),    // query_len
-                    ];
-                    const FIT_BIAS: f32 = -0.985886;
-                    let mut by_vec: Vec<(&MemoryId, f32)> = hybrid_components
-                        .iter()
-                        .filter(|(_, (_, v))| *v > 0.0)
-                        .map(|(id, (_, v))| (id, *v))
-                        .collect();
-                    let mut by_bm: Vec<(&MemoryId, f32)> = hybrid_components
-                        .iter()
-                        .filter(|(_, (b, _))| *b > 0.0)
-                        .map(|(id, (b, _))| (id, *b))
-                        .collect();
-                    by_vec.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-                    by_bm.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-                    let peak = |xs: &[(&MemoryId, f32)]| -> f32 {
-                        if xs.is_empty() {
-                            return 1.0;
-                        }
-                        let max = xs[0].1;
-                        let mean = xs.iter().map(|x| x.1).sum::<f32>() / xs.len() as f32;
-                        if mean > 1e-6 {
-                            max / mean
-                        } else {
-                            1.0
-                        }
-                    };
-                    let agreement = if by_vec.is_empty() || by_bm.is_empty() {
-                        0.0
-                    } else {
-                        let k10 = 10usize.min(by_vec.len()).min(by_bm.len()).max(1);
-                        let top_v: std::collections::HashSet<&MemoryId> =
-                            by_vec.iter().take(k10).map(|(id, _)| *id).collect();
-                        by_bm
-                            .iter()
-                            .take(k10)
-                            .filter(|(id, _)| top_v.contains(id))
-                            .count() as f32
-                            / k10 as f32
-                    };
-                    let graph_max_act = graph_results
-                        .iter()
-                        .map(|(_, a, _)| *a)
-                        .fold(0.0_f32, f32::max);
-                    let feats: [f32; 11] = [
-                        peak(&by_bm),
-                        peak(&by_vec),
-                        agreement,
-                        max_bm,
-                        max_vec,
-                        by_bm.len() as f32,
-                        by_vec.len() as f32,
-                        hybrid_components.len() as f32,
-                        graph_results.len() as f32,
-                        graph_max_act,
-                        query_text.len() as f32,
-                    ];
-                    let mut s = FIT_BIAS;
-                    for ((mu, sd, w), x) in FIT.iter().zip(feats) {
-                        s += w * (x - mu) / sd;
-                    }
-                    1.0 / (1.0 + (-s.clamp(-30.0, 30.0)).exp())
-                } else if adapt_feature == "agreement" {
-                    let agree_k = env_w("SHODH_ADAPT_AGREE_K", 10.0).max(1.0) as usize;
-                    let agree_lo = env_w("SHODH_ADAPT_AGREE_LO", 0.1);
-                    let agree_hi = env_w("SHODH_ADAPT_AGREE_HI", 0.5);
-                    let mut by_vec: Vec<(&MemoryId, f32)> = hybrid_components
-                        .iter()
-                        .filter(|(_, (_, v))| *v > 0.0)
-                        .map(|(id, (_, v))| (id, *v))
-                        .collect();
-                    let mut by_bm: Vec<(&MemoryId, f32)> = hybrid_components
-                        .iter()
-                        .filter(|(_, (b, _))| *b > 0.0)
-                        .map(|(id, (b, _))| (id, *b))
-                        .collect();
-                    if by_bm.is_empty() {
-                        // No lexical signal at all — the strongest "no anchor" case.
-                        1.0
-                    } else if by_vec.is_empty() {
-                        0.0
-                    } else {
-                        // Deterministic top-K per leg (score desc, id tie-break).
-                        by_vec.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-                        by_bm.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-                        let k = agree_k.min(by_vec.len()).min(by_bm.len()).max(1);
-                        let top_v: std::collections::HashSet<&MemoryId> =
-                            by_vec.iter().take(k).map(|(id, _)| *id).collect();
-                        let overlap = by_bm
-                            .iter()
-                            .take(k)
-                            .filter(|(id, _)| top_v.contains(id))
-                            .count() as f32
-                            / k as f32;
-                        // overlap ≥ hi → t=0 (legs agree, trust BM25);
-                        // overlap ≤ lo → t=1 (vector sees what BM25 can't).
-                        let span = (agree_hi - agree_lo).max(1e-6);
-                        ((agree_hi - overlap) / span).clamp(0.0, 1.0)
-                    }
-                } else {
-                    let adapt_peak_lo = env_w("SHODH_ADAPT_PEAK_LO", 2.0);
-                    let adapt_peak_hi = env_w("SHODH_ADAPT_PEAK_HI", 6.0);
-                    let bm_vals: Vec<f32> = hybrid_components
-                        .values()
-                        .map(|(b, _)| *b)
-                        .filter(|b| *b > 0.0)
-                        .collect();
-                    let mean_bm = if bm_vals.is_empty() {
-                        0.0
-                    } else {
-                        bm_vals.iter().sum::<f32>() / bm_vals.len() as f32
-                    };
-                    let bm_peak = if mean_bm > 1e-6 {
-                        max_bm / mean_bm
-                    } else {
-                        1.0
-                    };
-                    // t = 1 when BM25 is flat (peak ≤ lo) → full vector trust; t = 0 when
-                    // sharply peaked (peak ≥ hi) → no extra trust (BM25-strong gold protected).
-                    let span = (adapt_peak_hi - adapt_peak_lo).max(1e-6);
-                    ((adapt_peak_hi - bm_peak) / span).clamp(0.0, 1.0)
-                };
-                // SHODH_ADAPT_SYMMETRIC (default ON): map t through [down-weight,
-                // up-weight] instead of boost-only — with a CALIBRATED probability
-                // (fitted), t < 0.5 is evidence the query is BM25-favored and the
-                // vector leg can justifiably be weakened below 1.0 (floored at 0.2
-                // so vector never vanishes). MEASURED: boost-only FAILS even with
-                // fitted features (0.6879 vs base 0.6976) — the down-weighting is
-                // what protects single_hop while multi_hop gets freed. =0 restores
-                // the stage-1 boost-only form.
-                let symmetric = std::env::var("SHODH_ADAPT_SYMMETRIC")
-                    .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
-                    .unwrap_or(true);
-                if symmetric {
-                    (1.0 + (adapt_trust_max - 1.0) * (2.0 * t - 1.0)).max(0.2)
-                } else {
-                    1.0 + (adapt_trust_max - 1.0) * t
-                }
-            } else {
-                // No global vector-trust knob: 1.0 unless the per-query adaptive
-                // path is enabled (global scalars measured as a category tradeoff).
-                1.0
-            };
-
-            // Approach C stage 2: per-query feature export for the offline trust fit.
-            // Armed by the recall harness (SHODH_FUSION_FEATURE_EXPORT) — a no-op in
-            // production. Computed here because this is the only point that sees all
-            // three calibrated legs plus the raw per-candidate scores, and the armed
-            // gold set lets us record per-leg gold ranks (the supervision label:
-            // which leg WOULD have ranked this query's gold best).
-            if crate::memory::fusion_features::is_armed() {
-                crate::memory::fusion_features::record_with(|gold| {
-                    use crate::memory::fusion_features::FusionFeatures;
-                    let mut by_vec: Vec<(&MemoryId, f32)> = hybrid_components
-                        .iter()
-                        .filter(|(_, (_, v))| *v > 0.0)
-                        .map(|(id, (_, v))| (id, *v))
-                        .collect();
-                    let mut by_bm: Vec<(&MemoryId, f32)> = hybrid_components
-                        .iter()
-                        .filter(|(_, (b, _))| *b > 0.0)
-                        .map(|(id, (b, _))| (id, *b))
-                        .collect();
-                    by_vec.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-                    by_bm.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-                    let peak = |xs: &[(&MemoryId, f32)]| -> f32 {
-                        if xs.is_empty() {
-                            return 1.0;
-                        }
-                        let max = xs[0].1;
-                        let mean = xs.iter().map(|x| x.1).sum::<f32>() / xs.len() as f32;
-                        if mean > 1e-6 {
-                            max / mean
-                        } else {
-                            1.0
-                        }
-                    };
-                    let agreement_top10 = if by_vec.is_empty() || by_bm.is_empty() {
-                        0.0
-                    } else {
-                        let k10 = 10usize.min(by_vec.len()).min(by_bm.len()).max(1);
-                        let top_v: std::collections::HashSet<&MemoryId> =
-                            by_vec.iter().take(k10).map(|(id, _)| *id).collect();
-                        by_bm
-                            .iter()
-                            .take(k10)
-                            .filter(|(id, _)| top_v.contains(id))
-                            .count() as f32
-                            / k10 as f32
-                    };
-                    let rank_of_gold = |xs: &[(&MemoryId, f32)]| -> Option<usize> {
-                        xs.iter().position(|(id, _)| gold.contains(*id))
-                    };
-                    let mut by_graph: Vec<(&MemoryId, f32)> =
-                        graph_results.iter().map(|(id, a, _)| (id, *a)).collect();
-                    by_graph.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-                    // Candidate-level training rows (roadmap ②): the union of
-                    // the three legs' pools with query-relative scores — the
-                    // exact calibrated inputs the FLAT fusion ranks with.
-                    let mut union: std::collections::HashMap<&MemoryId, (f32, f32, f32)> =
-                        std::collections::HashMap::new();
-                    for (id, (b, v)) in hybrid_components.iter() {
-                        let e = union.entry(id).or_insert((0.0, 0.0, 0.0));
-                        e.0 = (*v / max_vec).clamp(0.0, 1.0);
-                        e.1 = (*b / max_bm).clamp(0.0, 1.0);
-                    }
-                    let max_act = by_graph.first().map(|x| x.1).unwrap_or(0.0).max(1e-6);
-                    for (id, a) in by_graph.iter() {
-                        union.entry(id).or_insert((0.0, 0.0, 0.0)).2 =
-                            (*a / max_act).clamp(0.0, 1.0);
-                    }
-                    let candidates: Vec<crate::memory::fusion_features::CandidateRow> = union
-                        .into_iter()
-                        .map(|(id, (vec, bm25, graph))| {
-                            crate::memory::fusion_features::CandidateRow {
-                                vec,
-                                bm25,
-                                graph,
-                                is_gold: gold.contains(id),
-                            }
-                        })
-                        .collect();
-                    FusionFeatures {
-                        n_hybrid: hybrid_components.len(),
-                        n_bm_pos: by_bm.len(),
-                        n_vec_pos: by_vec.len(),
-                        bm_peak: peak(&by_bm),
-                        vec_peak: peak(&by_vec),
-                        agreement_top10,
-                        max_bm,
-                        max_vec,
-                        n_graph: by_graph.len(),
-                        graph_max_activation: by_graph.first().map(|x| x.1).unwrap_or(0.0),
-                        gold_vec_rank: rank_of_gold(&by_vec),
-                        gold_bm_rank: rank_of_gold(&by_bm),
-                        gold_graph_rank: rank_of_gold(&by_graph),
-                        candidates,
-                    }
-                });
-            }
-
-            // Graph leg.
-            for (r, (id, activation, h)) in graph_results.iter().enumerate() {
-                if !graph_leg_on {
-                    break; // SHODH_LEG=bm25|vector isolates the hybrid leg
-                }
-                let rrf_score = if sum_fusion {
-                    // Calibrated weighted-SUM: graph leg enters at fw_graph·(activation/max).
-                    fw_graph * (activation / max_activation).clamp(0.0, 1.0)
-                } else if v2_fusion {
-                    // Borda (rank-1 ≈ full graph_w) + CONFIDENCE rescue: every graph
-                    // candidate gets graph_w·(activation/max) added, so a strongly
-                    // activated hit reaches up to 2·graph_w and can beat a lexical
-                    // distractor even when it is PRESENT-but-buried in the hybrid
-                    // pool. (The old `!hybrid_top` gate only rescued answers wholly
-                    // absent from hybrid — local observation showed it never fired
-                    // for the common burial case.)
-                    let borda = graph_w * ((n_graph - r as f32) / n_graph);
-                    let rescue = graph_w * (activation / max_activation).clamp(0.0, 1.0);
-                    borda + rescue
-                } else if flat_fusion {
-                    // Calibrated magnitude: the graph's best hit enters at graph_w,
-                    // not a graph_w/(k+rank) crumb.
-                    graph_w * (activation / max_activation).clamp(0.0, 1.0)
-                } else {
-                    // Standard RRF: weight / (k + rank), rank is 1-indexed.
-                    graph_w / (k + (r + 1) as f32)
-                };
-                *fused.entry(id.clone()).or_insert(0.0) += rrf_score;
-                heb.insert(id.clone(), *h);
-
-                // Multiplicative activation bonus (RRF-only; no-op under V2 / SUM).
-                let activation_factor = if v2_fusion || sum_fusion {
-                    1.0
-                } else {
-                    1.0 + graph_w
-                        * crate::constants::ACTIVATION_BONUS_SCALE
-                        * activation.clamp(0.0, 1.0)
-                };
-                if let Some(score) = fused.get_mut(id) {
-                    *score *= activation_factor;
-                }
-
-                // Track per-memory graph RRF contribution
-                if let Some(ref mut attr_map) = attributions {
-                    let attr = attr_map
-                        .entry(id.clone())
-                        .or_insert_with(|| ScoreAttribution {
-                            memory_id: id.0.to_string(),
-                            attribute_boost: 1.0,
-                            temporal_prefilter_boost: 1.0,
-                            temporal_fact_boost: 1.0,
-                            interference_adjustment: 1.0,
-                            prospective_boost: 1.0,
-                            fact_source_boost: 1.0,
-                            ontological_boost: 1.0,
-                            importance_factor: 1.0,
-                            feedback_multiplier: 1.0,
-                            quality_gate: 1.0,
-                            ..Default::default()
-                        });
-                    attr.graph_rrf = rrf_score * activation_factor;
-                    attr.hebbian_boost = *h;
-                    attr.sources.push("graph".to_string());
-                }
-            }
-
-            // Hybrid (BM25+vector) leg.
-            for (r, (id, _hybrid_raw)) in hybrid_ids.iter().enumerate() {
-                let hybrid_rrf = if sum_fusion {
-                    // Calibrated weighted-SUM: vector and BM25 each min-max normalised and
-                    // added with sweepable weights. The sweep (SHODH_FW_VEC/_BM25) tunes the
-                    // mix; additive (not max) so a candidate strong in BOTH legs outranks one
-                    // strong in a single leg — the consensus signal max-fusion discards.
-                    let (bm25, vec) = hybrid_components.get(id).copied().unwrap_or((0.0, 0.0));
-                    fw_vec * (vec / max_vec).clamp(0.0, 1.0)
-                        + fw_bm25 * (bm25 / max_bm).clamp(0.0, 1.0)
-                } else if flat_fusion {
-                    // The flatten, max-fusion form: per-candidate MAX of the calibrated
-                    // vector/BM25 legs (+ a small consensus bonus on the MIN). A candidate
-                    // strong in EITHER leg keeps a high score — so BM25's lexical crowd can't
-                    // dilute a vector-strong gold (multi_hop) and vector noise can't dilute a
-                    // BM25-exact gold (single_hop). A global weighted SUM can't serve both
-                    // (measured: monotonic multi_hop↔single_hop tradeoff); max preserves the
-                    // best signal per candidate.
-                    let (bm25, vec) = hybrid_components.get(id).copied().unwrap_or((0.0, 0.0));
-                    let vn = (vec / max_vec).clamp(0.0, 1.0) * effective_vec_trust;
-                    let bn = (bm25 / max_bm).clamp(0.0, 1.0);
-                    let (hi, lo) = if vn >= bn { (vn, bn) } else { (bn, vn) };
-                    hybrid_w * (hi + flat_consensus * lo)
-                } else if v2_fusion {
-                    // Borda: rank-1 ≈ full hybrid_w (scale-invariant, no crumb).
-                    hybrid_w * ((n_hybrid - r as f32) / n_hybrid)
-                } else {
-                    hybrid_w / (k + (r + 1) as f32)
-                };
-                *fused.entry(id.clone()).or_insert(0.0) += hybrid_rrf;
-
-                // Track per-memory hybrid RRF contribution
-                if let Some(ref mut attr_map) = attributions {
-                    let attr = attr_map
-                        .entry(id.clone())
-                        .or_insert_with(|| ScoreAttribution {
-                            memory_id: id.0.to_string(),
-                            attribute_boost: 1.0,
-                            temporal_prefilter_boost: 1.0,
-                            temporal_fact_boost: 1.0,
-                            interference_adjustment: 1.0,
-                            prospective_boost: 1.0,
-                            fact_source_boost: 1.0,
-                            ontological_boost: 1.0,
-                            importance_factor: 1.0,
-                            feedback_multiplier: 1.0,
-                            quality_gate: 1.0,
-                            ..Default::default()
-                        });
-                    attr.hybrid_rrf += hybrid_rrf;
-                    if !attr.sources.contains(&"vector".to_string()) {
-                        attr.sources.push("vector".to_string());
-                    }
-                }
-            }
 
             // ===========================================================================
             // LAYER 4.5: ATTRIBUTE QUERY BOOST
@@ -5364,25 +4935,22 @@ impl MemorySystem {
         // RH-8 gate: quality multiplier only applies in `Full` mode — lower modes
         // expose the raw fused score so per-layer attribution isn't masked.
         if layer_full && boost_quality {
-            let v2_no_verbosity = std::env::var("SHODH_FUSION_V2")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
             for mem in &mut memories {
                 let has_entities = !mem.experience.entities.is_empty();
                 let has_context = mem.experience.context.is_some();
                 let elaboration = 1.0
                     + if has_entities { 0.1 } else { 0.0 }
                     + if has_context { 0.1 } else { 0.0 };
-                let quality = if v2_no_verbosity {
-                    // Conscious restructure: drop the raw content-length factor — a
-                    // verbosity bias that multiplied short correct answers (a person
-                    // name) down below longer ones (org names), crashing ontology
-                    // 0.88→0.083 at `full`. Keep only the structural elaboration.
-                    elaboration
-                } else {
-                    let content_len = mem.experience.content.len() as f32;
-                    (content_len / 200.0).min(1.0) * elaboration
-                };
+                // PARKED FIX (not applied): the raw content-length factor is a
+                // verbosity bias — it multiplies short correct answers (a person
+                // name) below longer ones (org names), measured crashing ontology
+                // 0.88→0.083 at `full`. Using `elaboration` alone is the fix; it sat
+                // behind SHODH_FUSION_V2 and was never made default. Behaviour is
+                // preserved here on purpose so that removing score-blending fusion
+                // stays a SINGLE-variable change. Promoting it is a separate call
+                // that must be measured on its own.
+                let content_len = mem.experience.content.len() as f32;
+                let quality = (content_len / 200.0).min(1.0) * elaboration;
                 let quality_factor = quality.max(crate::constants::ELABORATION_QUALITY_MIN);
                 if let Some(score) = mem.score {
                     let mut cloned: Memory = mem.as_ref().clone();
@@ -5403,43 +4971,30 @@ impl MemorySystem {
         // Linguistic analysis: additive boost (5% of IC weight), not a full re-sort
         // RH-8 gate: linguistic re-sort only runs in `Full` mode.
         if layer_full && boost_linguistic && !query_analysis.focal_entities.is_empty() {
-            let v2_single = std::env::var("SHODH_FUSION_V2")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            if v2_single {
-                // Conscious restructure: FOLD the linguistic signal into the single
-                // .score (additive) instead of a separate sort-only re-rank that the
-                // final sort silently discards when len>max. One score, one sort.
-                for m in memories.iter_mut() {
-                    if let Some(s) = m.score {
-                        let add =
-                            Self::linguistic_boost(&m.experience.content, &query_analysis) * 0.05;
-                        let mut cloned: Memory = m.as_ref().clone();
-                        cloned.set_score(s + add);
-                        *m = Arc::new(cloned);
-                    }
-                }
-            } else {
-                // Legacy: sort-only re-rank by (score + linguistic). Precompute the
-                // key once per memory (computing it in the comparator re-scanned
-                // content O(n log n) times).
-                let boosted: std::collections::HashMap<MemoryId, f32> = memories
-                    .iter()
-                    .map(|m| {
-                        let key = m.score.unwrap_or(0.0)
-                            + Self::linguistic_boost(&m.experience.content, &query_analysis) * 0.05;
-                        (m.id.clone(), key)
-                    })
-                    .collect();
-                memories.sort_by(|a, b| {
-                    let score_a = boosted.get(&a.id).copied().unwrap_or(0.0);
-                    let score_b = boosted.get(&b.id).copied().unwrap_or(0.0);
-                    score_b
-                        .total_cmp(&score_a)
-                        .then_with(|| b.created_at.cmp(&a.created_at))
-                        .then_with(|| a.id.cmp(&b.id))
-                });
-            }
+            // PARKED FIX (not applied): folding the linguistic signal into the
+            // single .score was gated on SHODH_FUSION_V2. The legacy path below is a
+            // sort-only re-rank that the final sort discards when len > max_results,
+            // i.e. result-set SIZE decides whether the lexical order or .score wins.
+            // Kept as-is so the fusion removal stays a single-variable change.
+            // Legacy: sort-only re-rank by (score + linguistic). Precompute the
+            // key once per memory (computing it in the comparator re-scanned
+            // content O(n log n) times).
+            let boosted: std::collections::HashMap<MemoryId, f32> = memories
+                .iter()
+                .map(|m| {
+                    let key = m.score.unwrap_or(0.0)
+                        + Self::linguistic_boost(&m.experience.content, &query_analysis) * 0.05;
+                    (m.id.clone(), key)
+                })
+                .collect();
+            memories.sort_by(|a, b| {
+                let score_a = boosted.get(&a.id).copied().unwrap_or(0.0);
+                let score_b = boosted.get(&b.id).copied().unwrap_or(0.0);
+                score_b
+                    .total_cmp(&score_a)
+                    .then_with(|| b.created_at.cmp(&a.created_at))
+                    .then_with(|| a.id.cmp(&b.id))
+            });
         }
 
         self.logger
@@ -5654,21 +5209,21 @@ impl MemorySystem {
         }
 
         // Re-sort by score and trim to max_results after expansion.
-        // Conscious restructure (SHODH_FUSION_V2): this is the SINGLE arbiter — the
-        // linguistic signal is already folded into .score above — so sort by .score
-        // UNCONDITIONALLY, not only when len>max. That branch is what let result-set
-        // SIZE decide whether the lexical re-sort or .score won the final order.
-        let v2_single_sort = std::env::var("SHODH_FUSION_V2")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        if v2_single_sort || memories.len() > query.max_results {
+        // NOTE: this sort runs only when len > max_results, so for a short result set
+        // the preceding lexical re-rank decides the final order — i.e. result-set SIZE
+        // still arbitrates. The unconditional-sort fix sat behind the removed
+        // SHODH_FUSION_V2 flag; see the PARKED FIX note at the linguistic layer above.
+        if memories.len() > query.max_results {
             // Score desc → recency desc → MemoryId asc — deterministic competition cutoff.
-            // Quantize the score to 1e-6 before comparing: fused scores are accumulated
-            // by `+=` over a HashMap in non-deterministic iteration order, so f32
-            // non-associativity wobbles the last ULPs (~1e-9) and `total_cmp` would order
-            // otherwise-equal candidates differently run-to-run — flipping adjacent ranks
-            // before the created_at/id tie-breaks can fire (the harness's repeat-determinism
-            // gate caught exactly this). Rounding to 1e-6 (far above the ULP noise, far
+            // Quantize the score to 1e-6 before comparing. Under the removed additive
+            // fusion this was load-bearing: scores were accumulated by `+=` over a
+            // HashMap in non-deterministic iteration order, so f32 non-associativity
+            // wobbled the last ULPs (~1e-9) and `total_cmp` ordered otherwise-equal
+            // candidates differently run-to-run (the harness's repeat-determinism gate
+            // caught exactly this). MAX-union is order-independent, so that specific
+            // source is gone — the quantization is retained as a cheap guard against
+            // residual float wobble from the downstream multiplicative boost stack,
+            // which is NOT order-independent. Rounding to 1e-6 (far above the ULP noise, far
             // below the ~1e-5 score granularity) collapses the wobble into exact ties broken
             // deterministically by recency then id. Metric-neutral: only sub-1e-6
             // (effectively tied) candidates are reordered, never the top-k membership.

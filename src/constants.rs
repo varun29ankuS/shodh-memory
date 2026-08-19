@@ -1198,6 +1198,32 @@ pub const RRF_K_HYBRID_FUSION: f32 = 45.0;
 pub const RRF_K_GRAPH_FUSION: f32 = 30.0;
 
 // =============================================================================
+// UNION RETRIEVAL — PER-LEG PRIORS
+// =============================================================================
+// Score-blending fusion (RRF / weighted-Borda / weighted-SUM) was removed in
+// favour of a MAX-union: legs are retrieved and ranked INDEPENDENTLY, unioned
+// by MemoryId, and each candidate keeps the single best leg-evidence it has.
+// A leg can therefore only ever PROMOTE a candidate, never dilute one.
+//
+// These priors are MEASURED standalone recall@10 on the held-out LoCoMo set
+// (n = 1,531; runs 32255007672 / 32255017091 / 32255027433), normalised to the
+// strongest leg. They are observations of leg quality, not fitted parameters,
+// and must be re-measured — not hand-tuned — if the legs change.
+//
+//   graph  recall@10 0.5692  ->  1.000
+//   bm25   recall@10 0.4559  ->  0.801
+//   vector recall@10 0.4234  ->  0.744
+
+/// Union prior for the graph leg — the strongest leg, and the normalisation base.
+pub const UNION_LEG_PRIOR_GRAPH: f32 = 1.0;
+
+/// Union prior for the BM25 leg (0.4559 / 0.5692).
+pub const UNION_LEG_PRIOR_BM25: f32 = 0.801;
+
+/// Union prior for the dense-vector leg (0.4234 / 0.5692).
+pub const UNION_LEG_PRIOR_VECTOR: f32 = 0.744;
+
+// =============================================================================
 // RETRIEVAL PIPELINE BOOST CONSTANTS
 // All boosts are multiplicative factors applied to the RRF-fused base score.
 // Multiplicative (not additive) prevents boosts from dwarfing the semantic

@@ -1417,7 +1417,7 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
             vec![("SHODH_DISABLE_FACT_LAYERS", "1")],
         ),
         ("baseline (facts on)", vec![]),
-        ("graph-off", vec![("SHODH_GRAPH_FUSION_WEIGHT", "0")]),
+        ("graph-off", vec![("SHODH_UNION_LEGS", "vector,bm25")]),
         ("+graph-expand(K5)", vec![("SHODH_GRAPH_EXPAND_K", "5")]),
         (
             "+graph-expand+margin",
