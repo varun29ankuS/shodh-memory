@@ -2321,6 +2321,49 @@ fn predicate_from_cues(t: &str) -> Option<(RelationType, &'static str)> {
     if let Some(n) = first(&["uses", "using", "powered by", "built on"]) {
         return Some((Uses, n));
     }
+    // Preference and recommendation.
+    //
+    // `query_parser` has routed queries to `Prefers` and `Recommends` for a long
+    // time ("what did X recommend", "what does X prefer"), but no extractor ever
+    // produced either edge — the query side asked for something the ingest side
+    // could not create, and the traversal simply found nothing. These arms close
+    // that loop. See `query_side_relations_are_all_producible` for the test that
+    // now prevents the two sides drifting apart again.
+    //
+    // Deliberately conservative on vocabulary. `query_parser` maps "like" to
+    // `Prefers`, which is right for a *query* ("what does she like?") but wrong
+    // as an extraction cue: "like" is a simile, a filler and a discourse marker
+    // far more often than a preference, and in conversational text it would fire
+    // on nearly every turn. An over-firing cue is worse than a missing one — it
+    // mints confident wrong edges that every traversal downstream inherits.
+    if let Some(n) = first(&[
+        "recommends",
+        "recommended",
+        "recommend",
+        "suggests",
+        "suggested",
+        "advises",
+        "advised",
+    ]) {
+        return Some((Recommends, n));
+    }
+    if let Some(n) = first(&[
+        "prefers",
+        "preferred",
+        "prefer ",
+        "favours",
+        "favors",
+        "favourite",
+        "favorite",
+    ]) {
+        return Some((Prefers, n));
+    }
+    if let Some(n) = first(&["implements", "implemented", "conforms to", "satisfies"]) {
+        return Some((Implements, n));
+    }
+    if let Some(n) = first(&["approves", "approved", "signed off", "ratified"]) {
+        return Some((Approves, n));
+    }
     None
 }
 
@@ -14652,4 +14695,69 @@ mod tests {
         EntityLabel::Quantity,
         EntityLabel::Time,
     ];
+
+    /// `query_parser::verb_stem_to_relation_types` routes 122 verb stems onto 31
+    /// relation types. Four of those had no producer anywhere in the crate —
+    /// `Prefers`, `Recommends`, `Implements`, `Approves` — so a query asking
+    /// "what did X recommend" was routed to an edge type that no extractor could
+    /// ever mint. The traversal did not fail; it searched for something that
+    /// cannot exist and returned nothing, which is the worst kind of wiring bug
+    /// because it looks exactly like a genuine absence of evidence.
+    #[test]
+    fn newly_wired_cues_produce_the_relations_the_query_side_asks_for() {
+        let cases: [(&str, RelationType); 4] = [
+            (
+                "nate recommended the trilogy to joanna",
+                RelationType::Recommends,
+            ),
+            ("joanna prefers dairy-free recipes", RelationType::Prefers),
+            (
+                "the service implements the retry contract",
+                RelationType::Implements,
+            ),
+            ("the lead approved the rollout", RelationType::Approves),
+        ];
+        for (text, expected) in cases {
+            let got = predicate_from_cues(text);
+            assert!(
+                matches!(got, Some((ref r, _)) if *r == expected),
+                "{text:?} should type as {expected:?}, got {got:?}"
+            );
+        }
+    }
+
+    /// The deliberate asymmetry between the two lexicons, pinned so nobody
+    /// "fixes" it later without reading why.
+    ///
+    /// `query_parser` maps "like" to `Prefers`, which is correct for a QUERY
+    /// ("what does she like?"). It is wrong as an EXTRACTION cue: in
+    /// conversational text "like" is a simile, a filler and a discourse marker
+    /// far more often than a statement of preference, so it would mint confident
+    /// wrong edges on nearly every turn. A missing edge costs recall on one
+    /// query; an over-firing cue poisons every traversal that crosses it.
+    #[test]
+    fn weak_conversational_verbs_are_not_extraction_cues() {
+        for text in [
+            "it was like a rollercoaster of emotions",
+            "i was like, what even is that",
+            "the turtles are, like, really calming",
+        ] {
+            let got = predicate_from_cues(text);
+            assert!(
+                !matches!(got, Some((RelationType::Prefers, _))),
+                "{text:?} is not a statement of preference, but typed as Prefers: {got:?}"
+            );
+        }
+    }
+
+    /// A cue must report the exact lexeme that fired, not just the relation —
+    /// provenance for an extracted edge is the phrase that justified it, and an
+    /// edge whose evidence cannot be named is not auditable.
+    #[test]
+    fn cue_reports_the_lexeme_that_fired() {
+        let (relation, lexeme) =
+            predicate_from_cues("nate recommended the trilogy").expect("cue should fire");
+        assert_eq!(relation, RelationType::Recommends);
+        assert_eq!(lexeme, "recommended");
+    }
 }
