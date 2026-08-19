@@ -1971,16 +1971,28 @@ pub fn spreading_activation_retrieve_with_stats(
     // not noise — a rare thing on this benchmark, where almost every mechanism
     // measures flat.
     //
-    // Read the "~51% of 98%-reachable gold" line above carefully: it says the leg
-    // RANKS badly, not that it exits too narrowly. The candidates it holds past its
-    // own rank 10 are worse than the vector and BM25 candidates they displace in
-    // fusion, so widening the gate does not add the missing gold to the result
-    // list — it pushes better candidates out of it. Same lesson `reach_inject`
-    // already paid for.
+    // CAUSE — and it is NOT that the extra graph candidates are bad. That was the
+    // first explanation written here and it was wrong.
     //
-    // The fix for the 49% is to make the graph ORDER its own candidates better, or
-    // to rerank after fusion. It is not to hand fusion more of a list the graph
-    // could not order.
+    // The adaptive gate (`memory/mod.rs`, the `fitted` branch) is a logistic model
+    // over eleven standardized features, and `n_graph` — this leg's SIZE — is one
+    // of them, fitted at mu 9.90, sd 0.99. Setting the knob to 100 moves that
+    // feature ~91 standard deviations out of distribution, worth +27.7 to a logit
+    // whose bias is -0.99. The sigmoid saturates and the gate returns the same
+    // trust for every query regardless of the query. The regression is gate
+    // collapse, not candidate quality.
+    //
+    // So this knob has TWO scoring channels, despite the line above claiming it
+    // changes no scoring: the gate feature (default path, catastrophic) and the
+    // v2 Borda denominator (SHODH_FUSION_V2 only). Both are fixed on
+    // `fix/length-invariant-fusion`; until that lands, widening here regresses.
+    //
+    // What the "~51% of 98%-reachable gold" line does tell you is real and
+    // separate: the leg RANKS badly. Measured on the isolated leg
+    // (`SHODH_LEG=graph`), reach is 64.2% at depth 10 and 89.3% at depth 100 —
+    // 25 points of gold sitting in its own ranks 11-100. That is a reranking
+    // problem, and reranking is what unlocks a wider gate. Widening first, as
+    // this branch did, only exposes more of a list the graph could not order.
     let graph_leg_k = std::env::var("SHODH_GRAPH_LEG_K")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
