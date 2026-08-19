@@ -575,6 +575,11 @@ fn ppr_intern(
 /// `current` is always one endpoint (the edge came from its index), so when it is
 /// the `to`, the neighbour is `from`. With `dir_fix` off, the exact legacy
 /// behaviour is preserved so it can serve as the A/B control.
+///
+/// `dir_fix` now defaults to ON — see [`edge_dir_fix_enabled`]. The invariant
+/// the fix restores is simple enough to state: **the neighbour of `current`
+/// across an edge is never `current`.** `neighbour_is_never_the_node_we_are_standing_on`
+/// asserts it from both endpoints.
 /// Diagnostic counter: how many times the direction fix actually changed the
 /// traversal target (the current node was the `to` endpoint, so the true
 /// neighbour is `from`). Zero overhead when the fix is off, because the
@@ -602,14 +607,30 @@ fn edge_neighbor(
     }
 }
 
-/// Read the `SHODH_GRAPH_EDGE_DIR` A/B flag: when set, spreading/PPR/beam traversal
-/// follows edges to their true non-source endpoint instead of the legacy
-/// `to_entity`-only behaviour. Default off until the multi_hop comparison confirms
-/// it before flipping the production default.
+/// Whether traversal resolves an edge to its true non-source endpoint.
+///
+/// **Now on by default.** The legacy alternative is not a tuning choice, it is a
+/// defect: when `current` is already the `to` endpoint it resolves the neighbour
+/// to `current` itself. Walking to the node you are standing on is never the
+/// right answer — it silently drops all incoming connectivity and pumps
+/// activation back into the source instead of the real neighbour. Half of every
+/// directed edge's reach was unavailable: a query seeding at an edge's target
+/// could never reach its source, so `WorksAt`, `LocatedIn`, `Causes`,
+/// `CreatedBy` and the taxonomy's `IsA` were all one-way.
+///
+/// The taxonomy makes the cost concrete. `IsA` points *instance → category*
+/// (`turtle → animal`), so a question asking by category seeds at `animal` and
+/// must traverse backwards to reach `turtle`. Under the legacy behaviour that
+/// traversal returns `animal`, and the whole layer is inert in the only
+/// direction that matters.
+///
+/// `SHODH_GRAPH_EDGE_DIR=0` restores the legacy behaviour, so it remains
+/// available as an A/B control — the comparison the old default was waiting for
+/// can still be run, it just no longer costs correctness to wait.
 fn edge_dir_fix_enabled() -> bool {
     std::env::var("SHODH_GRAPH_EDGE_DIR")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+        .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+        .unwrap_or(true)
 }
 
 /// Intrinsic (decay-free, degree-free) transition weight of an edge for PPR: the
@@ -2598,6 +2619,98 @@ mod tests {
     // =========================================================================
     // PIPE-7: Bidirectional Spreading Activation Tests
     // =========================================================================
+
+    /// Build a minimal edge for direction tests. Only the endpoints matter.
+    fn directed_edge(from: Uuid, to: Uuid) -> crate::graph_memory::RelationshipEdge {
+        let now = chrono::Utc::now();
+        crate::graph_memory::RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: from,
+            to_entity: to,
+            relation_type: crate::graph_memory::RelationType::RelatedTo,
+            strength: 1.0,
+            created_at: now,
+            valid_at: now,
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: now,
+            activation_count: 1,
+            ltp_status: crate::graph_memory::LtpStatus::None,
+            tier: crate::graph_memory::EdgeTier::L1Working,
+            activation_timestamps: None,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+            provenance: Vec::new(),
+            promoted_at: None,
+        }
+    }
+
+    /// The invariant the direction fix restores: the neighbour of `current`
+    /// across an edge is never `current`. The legacy behaviour returned
+    /// `to_entity` unconditionally, so standing on the `to` endpoint resolved to
+    /// yourself — a self-loop that dropped every incoming connection.
+    #[test]
+    fn neighbour_is_never_the_node_we_are_standing_on() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let edge = directed_edge(a, b);
+
+        assert_eq!(
+            edge_neighbor(&edge, &a, true),
+            b,
+            "from the source, go to the target"
+        );
+        assert_eq!(
+            edge_neighbor(&edge, &b, true),
+            a,
+            "from the target, go BACK to the source — this is the half that was missing"
+        );
+        for current in [a, b] {
+            assert_ne!(
+                edge_neighbor(&edge, &current, true),
+                current,
+                "traversal must never resolve to the node it is standing on"
+            );
+        }
+    }
+
+    /// The defect, pinned so the control arm is honest about what it restores.
+    /// `SHODH_GRAPH_EDGE_DIR=0` reproduces it exactly for A/B comparison.
+    #[test]
+    fn the_legacy_control_still_reproduces_the_self_loop() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let edge = directed_edge(a, b);
+        assert_eq!(
+            edge_neighbor(&edge, &b, false),
+            b,
+            "legacy resolves the target endpoint to itself — that is the bug, kept only as a control"
+        );
+    }
+
+    /// A category node must be able to reach its instances. `IsA` points
+    /// instance -> category, so a query asking by category ("what animal...")
+    /// seeds at `animal` and reaches `turtle` only by traversing backwards.
+    /// Under the legacy behaviour the taxonomy is inert in exactly this
+    /// direction, which is the direction it exists for.
+    #[test]
+    fn a_category_can_reach_its_instances() {
+        let turtle = Uuid::new_v4();
+        let animal = Uuid::new_v4();
+        let is_a = directed_edge(turtle, animal);
+        assert_eq!(
+            edge_neighbor(&is_a, &animal, true),
+            turtle,
+            "seeding at the category must reach the instance"
+        );
+        assert_eq!(
+            edge_neighbor(&is_a, &animal, false),
+            animal,
+            "legacy: the taxonomy cannot be traversed from the category side at all"
+        );
+    }
 
     #[test]
     fn test_bidirectional_constants_valid() {
