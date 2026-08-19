@@ -401,24 +401,6 @@ pub const HYBRID_SEMANTIC_WEIGHT: f32 = 0.5;
 /// - Handles "related to" and "when I was working on X" queries
 pub const HYBRID_GRAPH_WEIGHT: f32 = 0.35;
 
-/// How many candidates the graph leg may emit into fusion.
-///
-/// Deliberately equal to `hybrid_search::default_candidate_count()` (100). The
-/// three legs must arrive at fusion with comparable candidate budgets, because
-/// truncation happens BEFORE fusion and is therefore not something a weight can
-/// undo: a candidate cut at the leg's exit is never scored, never ranked, and
-/// never recoverable downstream.
-///
-/// The graph leg previously defaulted to `query.max_results` — 10 in the eval —
-/// against 100 for vector and BM25. That is a 10x handicap applied silently, and
-/// the funnel diagnostic measured its cost: the leg emits ~51% of the gold it
-/// reaches 98% of.
-///
-/// Kept as a named constant rather than a literal so the parity is visible and
-/// survives someone changing one side. If `default_candidate_count` moves, this
-/// should move with it.
-pub const GRAPH_LEG_CANDIDATE_K: usize = 100;
-
 /// Weight for linguistic overlap in hybrid retrieval
 ///
 /// Justification:
