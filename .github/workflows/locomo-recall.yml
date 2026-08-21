@@ -418,3 +418,19 @@ jobs:
             locomo-reachability.log
             learning-curve.json
             learning-curve.log
+            ontology.json
+            ontology.log
+            lineage.json
+            lineage.log
+            multihop.json
+            multihop.log
+            temporal.json
+            temporal.log
+            locomo-linking.json
+            locomo-linking.log
+            locomo-funnel.json
+            locomo-funnel.log
+            forgetting.json
+            forgetting.log
+            selective.json
+            selective.log
