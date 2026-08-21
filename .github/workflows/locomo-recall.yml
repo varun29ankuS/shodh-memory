@@ -176,6 +176,8 @@ jobs:
           print(f"### Graph structure (anti-hub scoreboard)")
           print(f"- entities: {gs.get('total_entities',0)}  edges(est): {gs.get('total_edges',0)}  mean degree: {gs.get('mean_degree',0):.1f}")
           print(f"- **max degree: {gs.get('max_degree',0)}**  hubs (degree>{gs.get('hub_threshold',50)}): **{gs.get('hub_count',0)}**  top degrees: {gs.get('top_degrees',[])}")
+          chk = gs.get('ontology_type_checked',0); vio = gs.get('ontology_type_violations',0)
+          print(f"- **ontology type violations: {vio}/{chk}** ({(100.0*vio/chk if chk else 0):.2f}% of minted edges violate RelationType::admits — counted, not enforced)")
           print(f"  (max degree + hub count should FALL with IDF edges / lower hub_max)\n")
           print(f"- max_hops: {d['max_hops']}  (≤2hop% = canonical double-hop signal)")
           print("\n| category | cases | gold | ≤1hop% | ≤2hop% | unreach% | no-seed% | cases≥2seed% | gold≥2seed% |")

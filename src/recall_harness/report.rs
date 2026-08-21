@@ -628,6 +628,17 @@ pub struct GraphStructure {
     pub hub_threshold: usize,
     /// Top entity degrees, descending (the hub tail).
     pub top_degrees: Vec<usize>,
+    /// Minted edges checked against `RelationType::admits` (the denominator).
+    #[serde(default)]
+    pub ontology_type_checked: u64,
+    /// Of those, how many VIOLATED the relation's declared domain/range.
+    ///
+    /// `admits` is permissive by design and had never been called in production,
+    /// so this rate was unknown. Near zero means the constraint is cheap
+    /// insurance worth enforcing; large means the extraction path mints
+    /// type-nonsense at scale. Counted, never enforced.
+    #[serde(default)]
+    pub ontology_type_violations: u64,
 }
 
 /// Reachability tallies for one category (cumulative within-N-hops counts).

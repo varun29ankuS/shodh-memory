@@ -1966,6 +1966,8 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
             } else {
                 degree_sum as f64 / total_entities as f64
             },
+            ontology_type_checked: crate::metrics::ONTOLOGY_TYPE_CHECKED_TOTAL.get(),
+            ontology_type_violations: crate::metrics::ONTOLOGY_TYPE_VIOLATION_TOTAL.get(),
             hub_count: degrees
                 .iter()
                 .filter(|d| **d > HUB_REPORT_THRESHOLD)

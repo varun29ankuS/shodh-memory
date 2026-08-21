@@ -202,6 +202,38 @@ pub static ONTOLOGICAL_DENSITY_SKIP_TOTAL: LazyLock<IntCounter> = LazyLock::new(
     .expect("ONTOLOGICAL_DENSITY_SKIP_TOTAL metric must be valid at compile time")
 });
 
+/// Edges minted whose endpoint labels VIOLATE the relation's declared
+/// domain/range constraint (`RelationType::admits`).
+///
+/// `admits` is deliberately permissive — it defaults to admit and rejects only
+/// clear nonsense ("Tuesday recommends Postgres"), and generic bridges admit
+/// everything by design. It has also never been called in production: the
+/// constraint is built, tested, and unreferenced, so nobody knows how often the
+/// extractors actually mint a type-violating edge.
+///
+/// Counted, not enforced. A violation rate near zero means the constraint is
+/// cheap insurance worth turning on; a large one means the extraction path is
+/// producing type-nonsense at scale and enforcement would be a real prune. That
+/// number decides whether wiring `admits` matters, and it cannot be guessed.
+pub static ONTOLOGY_TYPE_VIOLATION_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    IntCounter::new(
+        "shodh_ontology_type_violation_total",
+        "Minted edges whose endpoint labels violate RelationType::admits",
+    )
+    .expect("ONTOLOGY_TYPE_VIOLATION_TOTAL metric must be valid at compile time")
+});
+
+/// Denominator for [`ONTOLOGY_TYPE_VIOLATION_TOTAL`] — edges that reached the
+/// type check at all. Without it the violation count is unreadable: 200
+/// violations is trivial in a million edges and catastrophic in a thousand.
+pub static ONTOLOGY_TYPE_CHECKED_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    IntCounter::new(
+        "shodh_ontology_type_checked_total",
+        "Minted edges that were checked against RelationType::admits",
+    )
+    .expect("ONTOLOGY_TYPE_CHECKED_TOTAL metric must be valid at compile time")
+});
+
 // ============================================================================
 // Embedding Metrics (P1.2: Instrument embed operations)
 // ============================================================================

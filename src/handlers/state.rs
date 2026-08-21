@@ -3932,6 +3932,35 @@ impl MultiUserMemoryManager {
                 // the PMI gate drops only INCIDENTAL ones (PMI below floor). Neither
                 // touches typed edges (cue/semantic/learned/label) or fragment bridges
                 // — those carry grounding the PMI lacks.
+                // Ontology type-constraint OBSERVATION (RelationType::admits).
+                //
+                // `admits` is built, tested, and has never been called in
+                // production, so the rate at which the extractors mint a
+                // type-violating edge is unknown. Count it here; enforcement is a
+                // separate decision that this number should make for us. Nothing
+                // is rejected by this block.
+                //
+                // `from_entity` starts as entity_uuids[i] and is swapped when the
+                // cue extractor says j is the source, so the labels are matched by
+                // uuid rather than by index.
+                {
+                    let (from_label, to_label) = if from_entity == entity_uuids[i].1 {
+                        (&entity_uuids[i].2, &entity_uuids[j].2)
+                    } else {
+                        (&entity_uuids[j].2, &entity_uuids[i].2)
+                    };
+                    crate::metrics::ONTOLOGY_TYPE_CHECKED_TOTAL.inc();
+                    if !relation_type.admits(from_label, to_label) {
+                        crate::metrics::ONTOLOGY_TYPE_VIOLATION_TOTAL.inc();
+                        tracing::debug!(
+                            "ontology type violation: {:?}({:?} -> {:?})",
+                            relation_type,
+                            from_label,
+                            to_label
+                        );
+                    }
+                }
+
                 let is_generic_prunable = !(fragment_of_comention[i] || fragment_of_comention[j])
                     && matches!(
                         relation_type,
