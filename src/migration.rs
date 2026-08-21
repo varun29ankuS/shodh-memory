@@ -154,7 +154,10 @@ pub fn migrate_all(storage_path: &Path, dry_run: bool) -> Result<MigrationReport
         .filter(|e| {
             let name = e.file_name();
             let name_str = name.to_string_lossy();
-            e.path().is_dir() && name_str != "shared" && !name_str.ends_with(".pre_cf_migration")
+            e.path().is_dir()
+                && name_str != "shared"
+                && !name_str.ends_with(".pre_cf_migration")
+                && e.path().join("storage").is_dir()
         })
         .collect();
 
@@ -190,8 +193,15 @@ pub fn migrate_all(storage_path: &Path, dry_run: bool) -> Result<MigrationReport
             }
         }
 
-        // Graph DB (graph/ subdir)
-        let graph_dir = user_path.join("graph");
+        // Graph DB (graph/ subdir; the server keeps the RocksDB at
+        // graph/graph after the Aug 2026 layout move, older layouts used
+        // graph/ directly)
+        let graph_candidate = user_path.join("graph").join("graph");
+        let graph_dir = if graph_candidate.exists() {
+            graph_candidate
+        } else {
+            user_path.join("graph")
+        };
         if graph_dir.exists() {
             match migrate_graph_db(&graph_dir, dry_run) {
                 Ok((migrated, skipped)) => {
@@ -281,20 +291,20 @@ struct MemoryDbCounts {
 }
 
 /// Known prefixes for sub-stores in the memory DB default CF.
-const FACTS_PREFIX: &[u8] = b"facts:";
-const FACTS_BY_ENTITY_PREFIX: &[u8] = b"facts_by_entity:";
-const FACTS_BY_TYPE_PREFIX: &[u8] = b"facts_by_type:";
-const FACTS_EMBEDDING_PREFIX: &[u8] = b"facts_embedding:";
-const TEMPORAL_FACTS_PREFIX: &[u8] = b"temporal_facts:";
-const TEMPORAL_BY_ENTITY_PREFIX: &[u8] = b"temporal_by_entity:";
-const TEMPORAL_BY_EVENT_PREFIX: &[u8] = b"temporal_by_event:";
-const TEMPORAL_BY_TIME_PREFIX: &[u8] = b"temporal_by_time:";
-const VMAPPING_PREFIX: &[u8] = b"vmapping:";
-const LEARNING_PREFIX: &[u8] = b"learning:";
+pub(crate) const FACTS_PREFIX: &[u8] = b"facts:";
+pub(crate) const FACTS_BY_ENTITY_PREFIX: &[u8] = b"facts_by_entity:";
+pub(crate) const FACTS_BY_TYPE_PREFIX: &[u8] = b"facts_by_type:";
+pub(crate) const FACTS_EMBEDDING_PREFIX: &[u8] = b"facts_embedding:";
+pub(crate) const TEMPORAL_FACTS_PREFIX: &[u8] = b"temporal_facts:";
+pub(crate) const TEMPORAL_BY_ENTITY_PREFIX: &[u8] = b"temporal_by_entity:";
+pub(crate) const TEMPORAL_BY_EVENT_PREFIX: &[u8] = b"temporal_by_event:";
+pub(crate) const TEMPORAL_BY_TIME_PREFIX: &[u8] = b"temporal_by_time:";
+pub(crate) const VMAPPING_PREFIX: &[u8] = b"vmapping:";
+pub(crate) const LEARNING_PREFIX: &[u8] = b"learning:";
 
 /// Prefixes whose values are plain string references (not serialized structs).
 /// Index entries: their values are just key references — no binary format to migrate.
-const INDEX_ONLY_PREFIXES: &[&[u8]] = &[
+pub(crate) const INDEX_ONLY_PREFIXES: &[&[u8]] = &[
     b"stats:",
     b"interference:",
     b"interference_meta:",
@@ -377,6 +387,7 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
                 &mut batch_count,
                 &mut counts.facts_migrated,
                 &mut counts.facts_skipped,
+                None,
             )?;
         } else if key.starts_with(FACTS_EMBEDDING_PREFIX) {
             // Vec<f32> embedding
@@ -390,6 +401,7 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
                 &mut batch_count,
                 &mut counts.facts_migrated,
                 &mut counts.facts_skipped,
+                None,
             )?;
         } else if key.starts_with(b"lineage:edges:") {
             // LineageEdge
@@ -403,6 +415,7 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
                 &mut batch_count,
                 &mut counts.lineage_migrated,
                 &mut counts.lineage_skipped,
+                None,
             )?;
         } else if key.starts_with(b"lineage:branches:") {
             // LineageBranch
@@ -416,6 +429,7 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
                 &mut batch_count,
                 &mut counts.lineage_migrated,
                 &mut counts.lineage_skipped,
+                None,
             )?;
         } else if key.starts_with(TEMPORAL_FACTS_PREFIX) {
             // TemporalFact
@@ -429,6 +443,7 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
                 &mut batch_count,
                 &mut counts.temporal_migrated,
                 &mut counts.temporal_skipped,
+                None,
             )?;
         } else if key.starts_with(VMAPPING_PREFIX) {
             // VectorMappingEntry
@@ -442,14 +457,41 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
                 &mut batch_count,
                 &mut counts.vector_mappings_migrated,
                 &mut counts.vector_mappings_skipped,
+                None,
             )?;
         } else if key.len() == 16 {
             // Memory record (16-byte UUID key) — uses SHO envelope
-            if let Some((version, _payload)) = serialization::unwrap_sho(&value) {
+            if let Some((version, payload)) = serialization::unwrap_sho(&value) {
                 if version == serialization::SHO_VERSION_POSTCARD {
-                    // Already postcard
-                    counts.memories_skipped += 1;
-                    continue;
+                    // Tagged postcard — VERIFY the payload decodes with the
+                    // current schema. v0.2.0-era payloads (pre-fine_label)
+                    // carry the tag but fail; they are repaired below via the
+                    // legacy mirror instead of being skipped on sight.
+                    match crate::memory::storage::deserialize_memory_for_migration(&value) {
+                        Ok(_) => {
+                            counts.memories_skipped += 1;
+                            continue;
+                        }
+                        Err(_) => {
+                            match crate::memory::types::decode_legacy_memory_flat(payload) {
+                                Ok(memory) => {
+                                    if !dry_run {
+                                        let new_value = serialization::encode_sho(&memory)?;
+                                        batch.put(&*key, &new_value);
+                                        batch_count += 1;
+                                    }
+                                    counts.memories_migrated += 1;
+                                }
+                                Err(lerr) => {
+                                    eprintln!(
+                                        "  WARNING: memory key ({} bytes) undecodable by current and legacy ({lerr}) schemas",
+                                        key.len()
+                                    );
+                                }
+                            }
+                            continue;
+                        }
+                    }
                 }
             }
 
@@ -498,6 +540,7 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
                     &mut batch_count,
                     &mut counts.vector_mappings_migrated,
                     &mut counts.vector_mappings_skipped,
+                    None,
                 )?;
             }
         }
@@ -521,27 +564,17 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
 // ---------------------------------------------------------------------------
 
 /// Graph DB column families that contain serialized data (entities, edges, episodes).
-const GRAPH_DATA_CFS: &[&str] = &["entities", "relationships", "episodes", "entity_edges"];
-
-/// Graph DB column families that contain index data (string references, counts) — skip.
-const GRAPH_INDEX_CFS: &[&str] = &[
-    "entity_pair_index",
-    "entity_episodes",
-    "name_index",
-    "lowercase_index",
-    "stemmed_index",
-];
+pub(crate) const GRAPH_DATA_CFS: &[&str] = &["entities", "relationships", "episodes", "entity_edges"];
 
 fn migrate_graph_db(graph_dir: &Path, dry_run: bool) -> Result<(usize, usize)> {
     let mut opts = RocksOptions::default();
     opts.create_if_missing(false);
     opts.create_missing_column_families(true);
 
-    let all_cfs: Vec<&str> = GRAPH_DATA_CFS
-        .iter()
-        .chain(GRAPH_INDEX_CFS.iter())
-        .copied()
-        .collect();
+    // Open every CF the server knows about (GRAPH_CF_NAMES is the single
+    // source of truth; GRAPH_DATA_CFS is the typed subset). Missing CFs in
+    // the open list cause "Column families not opened" errors.
+    let all_cfs: Vec<&str> = crate::graph_memory::GRAPH_CF_NAMES.to_vec();
 
     let cfs: Vec<ColumnFamilyDescriptor> = std::iter::once(ColumnFamilyDescriptor::new(
         "default",
@@ -586,6 +619,12 @@ fn migrate_graph_db(graph_dir: &Path, dry_run: bool) -> Result<(usize, usize)> {
 
             match *cf_name {
                 "entities" => {
+                    // Data records carry 16-byte UUID keys; anything else in
+                    // this CF is a legacy reference record and is skipped.
+                    if key.len() != 16 {
+                        skipped += 1;
+                        continue;
+                    }
                     migrate_generic_record::<EntityNode>(
                         &db,
                         Some(cf),
@@ -596,9 +635,16 @@ fn migrate_graph_db(graph_dir: &Path, dry_run: bool) -> Result<(usize, usize)> {
                         &mut batch_count,
                         &mut migrated,
                         &mut skipped,
+                        Some(crate::legacy::decode_legacy_entity),
                     )?;
                 }
-                "relationships" | "entity_edges" => {
+                "relationships" => {
+                    // Data records carry 16-byte UUID keys; legacy reference
+                    // records (e.g. "mem_edge:<uuid>" entries) are skipped.
+                    if key.len() != 16 {
+                        skipped += 1;
+                        continue;
+                    }
                     // This offline format-migration is a byte-level postcard
                     // rewrite (trailing-field defaults only) — it does not
                     // decode through `graph_memory::decode_relationship_edge`,
@@ -618,7 +664,13 @@ fn migrate_graph_db(graph_dir: &Path, dry_run: bool) -> Result<(usize, usize)> {
                         &mut batch_count,
                         &mut migrated,
                         &mut skipped,
+                        Some(crate::legacy::decode_legacy_relationship),
                     )?;
+                }
+                "entity_edges" => {
+                    // Index CF: values are plain "1" markers (graph traversal
+                    // index), not serialized records. Nothing to migrate.
+                    skipped += 1;
                 }
                 "episodes" => {
                     migrate_generic_record::<EpisodicNode>(
@@ -631,6 +683,7 @@ fn migrate_graph_db(graph_dir: &Path, dry_run: bool) -> Result<(usize, usize)> {
                         &mut batch_count,
                         &mut migrated,
                         &mut skipped,
+                        None,
                     )?;
                 }
                 _ => {}
@@ -705,6 +758,7 @@ fn migrate_shared_db(shared_dir: &Path, dry_run: bool) -> Result<(usize, usize)>
             &mut batch_count,
             &mut migrated,
             &mut skipped,
+            None,
         )?;
 
         if batch_count >= BATCH_SIZE && !dry_run {
@@ -727,9 +781,12 @@ fn migrate_shared_db(shared_dir: &Path, dry_run: bool) -> Result<(usize, usize)>
 
 /// Migrate a single record from legacy bincode to tagged postcard.
 ///
-/// If the record already has the postcard format tag, it is skipped.
-/// Otherwise it is decoded via `try_decode` (postcard-first, bincode fallback)
-/// and re-encoded as tagged postcard.
+/// If the record already has the postcard format tag AND decodes with the
+/// current schema, it is skipped. Tagged records that fail current-schema
+/// decode (v0.2.0-era payloads with shifted enum indices or added trailing
+/// fields) are repaired via the optional legacy decoder. Untagged records are
+/// decoded via `try_decode` (postcard-first, bincode fallback) with the same
+/// legacy fallback, and re-encoded as tagged postcard.
 #[allow(clippy::too_many_arguments)]
 fn migrate_generic_record<T>(
     _db: &DB,
@@ -741,33 +798,59 @@ fn migrate_generic_record<T>(
     batch_count: &mut usize,
     migrated: &mut usize,
     skipped: &mut usize,
+    legacy: Option<fn(&[u8]) -> Result<T, String>>,
 ) -> Result<()>
 where
     T: serde::de::DeserializeOwned + serde::Serialize,
 {
-    // Already in postcard format — skip
-    if serialization::has_format_tag_pub(value) {
-        *skipped += 1;
-        return Ok(());
-    }
+    let tagged = serialization::has_format_tag_pub(value);
 
-    // Decode with legacy bincode fallback. A record that can't be decoded — e.g. a
-    // pre-postcard bincode record missing fields added after the cutover, which
-    // bincode cannot default — is SKIPPED and reported, never fatal: one bad record
-    // must not abort the whole column-family migration. (Such records are already
-    // unreadable by the server's compat decoder, so skipping loses nothing new.)
-    let (val, _needs_migration): (T, bool) = match serialization::try_decode(value) {
-        Ok(decoded) => decoded,
-        Err(e) => {
-            eprintln!(
-                "  skip: undecodable record (key len={}, value len={}): {e}",
-                key.len(),
-                value.len()
-            );
+    // Try the current schema first.
+    let decoded: Option<(T, bool)> = match serialization::try_decode(value) {
+        Ok(decoded) => Some(decoded),
+        Err(current_err) => {
+            match legacy {
+                Some(legacy_decode) => match legacy_decode(value) {
+                    Ok(val) => Some((val, true)),
+                    Err(legacy_err) => {
+                        eprintln!(
+                            "  skip: record undecodable by current ({current_err}) and legacy ({legacy_err}) schemas (key len={}, value len={})",
+                            key.len(),
+                            value.len()
+                        );
+                        None
+                    }
+                },
+                None => {
+                    eprintln!(
+                        "  skip: undecodable record (key len={}, value len={}): {current_err}",
+                        key.len(),
+                        value.len()
+                    );
+                    None
+                }
+            }
+        }
+    };
+
+    let Some((val, needs_rewrite)) = decoded else {
+        // Records that fail both schemas are not data-loss candidates when
+        // the key is not a data-record key (16-byte UUID): legacy index and
+        // reference records (e.g. old "mem_edge:<uuid>" entries in the
+        // relationships CF) are skipped silently rather than warned about.
+        if key.len() != 16 {
             *skipped += 1;
             return Ok(());
         }
+        *skipped += 1;
+        return Ok(());
     };
+
+    // Tagged records that decode cleanly are already current: skip.
+    if tagged && !needs_rewrite {
+        *skipped += 1;
+        return Ok(());
+    }
 
     if !dry_run {
         let new_value = serialization::encode(&val)?;

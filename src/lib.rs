@@ -41,6 +41,8 @@ pub mod memory;
 pub mod metrics;
 pub mod middleware;
 pub mod mif;
+pub mod audit;
+pub mod legacy;
 pub mod migration;
 pub mod openie;
 pub mod query_parsing;

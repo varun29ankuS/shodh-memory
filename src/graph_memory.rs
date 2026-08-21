@@ -36,7 +36,7 @@ const CF_RELATION_STATS: &str = "relation_stats";
 /// on one canonical node instead of minting parallel mention nodes.
 const CF_ALIAS: &str = "entity_alias";
 
-const GRAPH_CF_NAMES: &[&str] = &[
+pub(crate) const GRAPH_CF_NAMES: &[&str] = &[
     CF_ENTITIES,
     CF_RELATIONSHIPS,
     CF_EPISODES,
@@ -3825,10 +3825,16 @@ impl GraphMemory {
     pub fn get_entity(&self, uuid: &Uuid) -> Result<Option<EntityNode>> {
         let key = uuid.as_bytes();
         match self.db.get_cf(self.entities_cf(), key)? {
-            Some(value) => {
-                let (entity, _) = decode_entity_node(&value)?;
-                Ok(Some(entity))
-            }
+            Some(value) => match decode_entity_node(&value) {
+                Ok((entity, _)) => Ok(Some(entity)),
+                Err(e) => {
+                    // Schema drift or corruption: an undecodable record must
+                    // never brick recall or maintenance. Treat it as absent
+                    // and surface it for the audit/repair tooling.
+                    tracing::warn!(%uuid, error = %e, "entity record undecodable; treating as absent");
+                    Ok(None)
+                }
+            },
             None => Ok(None),
         }
     }
@@ -3848,7 +3854,28 @@ impl GraphMemory {
     pub fn delete_entity(&self, uuid: &Uuid) -> Result<bool> {
         let entity = match self.get_entity(uuid)? {
             Some(e) => e,
-            None => return Ok(false),
+            None => {
+                // Undecodable record (schema drift): get_entity already
+                // degraded it to None with a warning. If the raw key still
+                // exists, purge the primary record directly so the orphan
+                // cleanup can reclaim it. Its index entries are inert
+                // (every lookup resolves to None) and are left in place.
+                let exists = self
+                    .db
+                    .get_cf(self.entities_cf(), uuid.as_bytes())?
+                    .is_some();
+                if !exists {
+                    return Ok(false);
+                }
+                self.db.delete_cf(self.entities_cf(), uuid.as_bytes())?;
+                {
+                    let mut cache = self.entity_embedding_cache.write();
+                    cache.retain(|(id, _)| id != uuid);
+                }
+                self.entity_count.fetch_sub(1, Ordering::Relaxed);
+                tracing::warn!(uuid = %uuid, "Purged undecodable entity record by raw key");
+                return Ok(true);
+            }
         };
 
         // 1. Remove from entities CF

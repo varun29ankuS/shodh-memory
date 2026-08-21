@@ -126,6 +126,12 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Read-only audit: classify every record by decodability, archive failures
+    Audit {
+        /// Write undecodable records (db, cf, key/value hex, error) to this JSONL file
+        #[arg(long)]
+        archive: Option<PathBuf>,
+    },
     /// Internal safe named-pipe exchange used by the TypeScript client on Windows.
     #[command(hide = true)]
     IpcExchange {
@@ -162,6 +168,17 @@ fn main() -> Result<()> {
             if !report.errors.is_empty() {
                 std::process::exit(1);
             }
+            Ok(())
+        }
+        Some(Command::Audit { archive }) => {
+            eprintln!(
+                "Shodh-Memory: auditing storage at {} (archive: {})",
+                cli.storage_path.display(),
+                archive.as_deref().map(|p| p.display().to_string()).unwrap_or_else(|| "(none)".into())
+            );
+
+            let report = shodh_memory::audit::audit_all(&cli.storage_path, archive.as_deref())?;
+            eprintln!("{report}");
             Ok(())
         }
         Some(Command::IpcExchange { timeout_ms }) => {

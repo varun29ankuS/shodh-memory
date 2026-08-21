@@ -2137,13 +2137,22 @@ impl<'de> Deserialize<'de> for Memory {
     where
         D: serde::Deserializer<'de>,
     {
-        let mut flat = MemoryFlat::deserialize(deserializer)?;
-        // Put the tail-carried toponyms back where they belong on the domain
-        // type. Records written before the field existed decode as empty.
-        flat.experience.toponyms = flat.toponyms;
-        Ok(Memory {
+        let flat = MemoryFlat::deserialize(deserializer)?;
+        Ok(Memory::from_flat(flat))
+    }
+}
+
+impl Memory {
+    /// Rebuild a `Memory` from its flat (wire) representation, moving the
+    /// tail-carried toponyms back onto the domain type.
+    pub(crate) fn from_flat(flat: MemoryFlat) -> Self {
+        Memory {
             id: flat.id,
-            experience: flat.experience,
+            experience: {
+                let mut exp = flat.experience;
+                exp.toponyms = flat.toponyms;
+                exp
+            },
             metadata: Arc::new(parking_lot::Mutex::new(MemoryMetadata {
                 importance: flat.importance,
                 access_count: flat.access_count,
@@ -2170,7 +2179,7 @@ impl<'de> Deserialize<'de> for Memory {
             related_todo_ids: flat.related_todo_ids,
             // Hierarchy
             parent_id: flat.parent_id,
-        })
+        }
     }
 }
 
@@ -5392,4 +5401,203 @@ mod tests {
             "new keys are added"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy v0.2.0 schema mirrors (schema-drift recovery)
+// ---------------------------------------------------------------------------
+// The npm-bundled v0.2.0 server (Jul 2 - Aug 19, 2026) wrote SHO v2 payloads
+// whose MemoryFlat layout differs from the current build:
+//   - NerEntityRecord gained a trailing `fine_label: Option<String>`
+//     (mid-payload inside Experience.ner_entities, so the trailing-field
+//     compat suffix in storage.rs cannot help)
+//   - MemoryFlat gained a trailing `toponyms: Vec<Toponym>`
+// These mirrors decode the old bytes; the From impls convert to the current
+// types (missing fields take their default values). Used by the migration
+// command to repair records in place. DO NOT rename/reorder these fields —
+// they must stay byte-compatible with v0.2.0 payloads.
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LegacyNerEntityRecord {
+    pub text: String,
+    pub entity_type: String,
+    pub confidence: f32,
+    pub start_char: Option<usize>,
+    pub end_char: Option<usize>,
+}
+
+impl From<LegacyNerEntityRecord> for NerEntityRecord {
+    fn from(r: LegacyNerEntityRecord) -> Self {
+        NerEntityRecord {
+            text: r.text,
+            entity_type: r.entity_type,
+            confidence: r.confidence,
+            start_char: r.start_char,
+            end_char: r.end_char,
+            fine_label: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LegacyExperience {
+    pub experience_type: ExperienceType,
+    pub content: String,
+    pub context: Option<RichContext>,
+    pub entities: Vec<String>,
+    pub metadata: HashMap<String, String>,
+    pub embeddings: Option<Vec<f32>>,
+    pub image_embeddings: Option<Vec<f32>>,
+    pub audio_embeddings: Option<Vec<f32>>,
+    pub video_embeddings: Option<Vec<f32>>,
+    pub media_refs: Vec<MediaRef>,
+    pub related_memories: Vec<MemoryId>,
+    pub causal_chain: Vec<MemoryId>,
+    pub outcomes: Vec<String>,
+    pub robot_id: Option<String>,
+    pub mission_id: Option<String>,
+    pub geo_location: Option<[f64; 3]>,
+    pub local_position: Option<[f32; 3]>,
+    pub heading: Option<f32>,
+    pub action_type: Option<String>,
+    pub reward: Option<f32>,
+    pub sensor_data: HashMap<String, f64>,
+    pub decision_context: Option<HashMap<String, String>>,
+    pub action_params: Option<HashMap<String, String>>,
+    pub outcome_type: Option<String>,
+    pub outcome_details: Option<String>,
+    pub confidence: Option<f32>,
+    pub alternatives_considered: Vec<String>,
+    pub weather: Option<HashMap<String, String>>,
+    pub terrain_type: Option<String>,
+    pub lighting: Option<String>,
+    pub nearby_agents: Vec<HashMap<String, String>>,
+    pub is_failure: bool,
+    pub is_anomaly: bool,
+    pub severity: Option<String>,
+    pub recovery_action: Option<String>,
+    pub root_cause: Option<String>,
+    pub pattern_id: Option<String>,
+    pub predicted_outcome: Option<String>,
+    pub prediction_accurate: Option<bool>,
+    pub tags: Vec<String>,
+    pub temporal_refs: Vec<String>,
+    pub ner_entities: Vec<LegacyNerEntityRecord>,
+    pub cooccurrence_pairs: Vec<(String, String)>,
+    pub importance_override: Option<f32>,
+}
+
+impl From<LegacyExperience> for Experience {
+    fn from(e: LegacyExperience) -> Self {
+        Experience {
+            experience_type: e.experience_type,
+            content: e.content,
+            context: e.context,
+            entities: e.entities,
+            metadata: e.metadata,
+            embeddings: e.embeddings,
+            image_embeddings: e.image_embeddings,
+            audio_embeddings: e.audio_embeddings,
+            video_embeddings: e.video_embeddings,
+            media_refs: e.media_refs,
+            related_memories: e.related_memories,
+            causal_chain: e.causal_chain,
+            outcomes: e.outcomes,
+            robot_id: e.robot_id,
+            mission_id: e.mission_id,
+            geo_location: e.geo_location,
+            local_position: e.local_position,
+            heading: e.heading,
+            action_type: e.action_type,
+            reward: e.reward,
+            sensor_data: e.sensor_data,
+            decision_context: e.decision_context,
+            action_params: e.action_params,
+            outcome_type: e.outcome_type,
+            outcome_details: e.outcome_details,
+            confidence: e.confidence,
+            alternatives_considered: e.alternatives_considered,
+            weather: e.weather,
+            terrain_type: e.terrain_type,
+            lighting: e.lighting,
+            nearby_agents: e.nearby_agents,
+            is_failure: e.is_failure,
+            is_anomaly: e.is_anomaly,
+            severity: e.severity,
+            recovery_action: e.recovery_action,
+            root_cause: e.root_cause,
+            pattern_id: e.pattern_id,
+            predicted_outcome: e.predicted_outcome,
+            prediction_accurate: e.prediction_accurate,
+            tags: e.tags,
+            temporal_refs: e.temporal_refs,
+            ner_entities: e.ner_entities.into_iter().map(Into::into).collect(),
+            cooccurrence_pairs: e.cooccurrence_pairs,
+            importance_override: e.importance_override,
+            toponyms: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LegacyMemoryFlat {
+    pub id: MemoryId,
+    pub experience: LegacyExperience,
+    pub importance: f32,
+    pub access_count: u32,
+    pub created_at: DateTime<Utc>,
+    pub last_accessed: DateTime<Utc>,
+    pub compressed: bool,
+    pub tier: MemoryTier,
+    pub entity_refs: Vec<EntityRef>,
+    pub activation: f32,
+    pub last_retrieval_id: Option<Uuid>,
+    pub agent_id: Option<String>,
+    pub run_id: Option<String>,
+    pub actor_id: Option<String>,
+    pub temporal_relevance: f32,
+    pub score: Option<f32>,
+    pub external_id: Option<String>,
+    pub version: u32,
+    pub history: Vec<MemoryRevision>,
+    pub related_todo_ids: Vec<TodoId>,
+    pub parent_id: Option<MemoryId>,
+}
+
+impl From<LegacyMemoryFlat> for MemoryFlat {
+    fn from(f: LegacyMemoryFlat) -> Self {
+        MemoryFlat {
+            id: f.id,
+            experience: f.experience.into(),
+            importance: f.importance,
+            access_count: f.access_count,
+            created_at: f.created_at,
+            last_accessed: f.last_accessed,
+            compressed: f.compressed,
+            tier: f.tier,
+            entity_refs: f.entity_refs,
+            activation: f.activation,
+            last_retrieval_id: f.last_retrieval_id,
+            agent_id: f.agent_id,
+            run_id: f.run_id,
+            actor_id: f.actor_id,
+            temporal_relevance: f.temporal_relevance,
+            score: f.score,
+            external_id: f.external_id,
+            version: f.version,
+            history: f.history,
+            related_todo_ids: f.related_todo_ids,
+            parent_id: f.parent_id,
+            toponyms: Vec::new(),
+        }
+    }
+}
+
+/// Decode a v0.2.0-era SHO v2 payload (pre-fine_label / pre-toponyms) into a
+/// current-schema `Memory`. Returns Err if the payload is not valid legacy
+/// postcard.
+pub(crate) fn decode_legacy_memory_flat(payload: &[u8]) -> Result<Memory, String> {
+    let flat: LegacyMemoryFlat =
+        postcard::from_bytes(payload).map_err(|e| format!("legacy MemoryFlat postcard: {e}"))?;
+    Ok(Memory::from_flat(flat.into()))
 }
