@@ -293,6 +293,14 @@ struct Args {
     #[arg(long)]
     longmemeval_limit: Option<usize>,
 
+    /// LongMemEval shard start: skip this many manifest questions before
+    /// applying `--longmemeval-limit`. Each question carries its own ~490-turn
+    /// haystack, so a full run cannot fit a single job's timeout; disjoint
+    /// (offset, limit) windows let parallel jobs cover the suite exactly once.
+    /// The manifest order is deterministic, so the windows are stable.
+    #[arg(long)]
+    longmemeval_offset: Option<usize>,
+
     /// Simulated edge age in days, applied AFTER ingest and BEFORE queries
     /// (decay study). When `> 0`, the harness ages the knowledge-graph edges via
     /// `simulate_edge_aging` at the production ~6h cadence, so recall quality is
@@ -420,11 +428,16 @@ fn run(args: &Args) -> Result<i32> {
         let report = shodh_memory::recall_harness::runner::run_longmemeval(
             lme_dir,
             &storage_path,
+            args.longmemeval_offset,
             args.longmemeval_limit,
             10,
             &layer_modes,
         )
         .context("LongMemEval run")?;
+        // Write the report so a sharded run can be recombined. Previously this
+        // path printed only, and `--output` was passed a file the run ignored.
+        std::fs::write(&args.output, serde_json::to_string_pretty(&report)?)
+            .with_context(|| format!("writing {}", args.output.display()))?;
         println!(
             "LongMemEval-S: {} questions (NER={}) — recall@{} = {:.4} — p@1 = {:.4}",
             report.questions, report.ner_backend, report.k, report.recall_at_k, report.p_at_1
@@ -1085,8 +1098,14 @@ fn summarise(report: &Report) {
     for name in mode_order {
         if let Some(layer) = report.layers.get(name) {
             eprintln!(
-                "  {:<12} ndcg@10={:.4} recall@10={:.4} mrr={:.4} p@1={:.4} map={:.4}",
-                name, layer.ndcg_at_10, layer.recall_at_10, layer.mrr, layer.p_at_1, layer.map
+                "  {:<12} ndcg@10={:.4} recall@10={:.4} hit@10={:.4} mrr={:.4} p@1={:.4} map={:.4}",
+                name,
+                layer.ndcg_at_10,
+                layer.recall_at_10,
+                layer.hit_at_10,
+                layer.mrr,
+                layer.p_at_1,
+                layer.map
             );
         }
     }
