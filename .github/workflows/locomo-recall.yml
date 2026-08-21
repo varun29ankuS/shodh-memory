@@ -119,6 +119,12 @@ jobs:
           # not once per run (which earned us a 429 rate-limit after this session's runs).
           dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
           [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          # fp32 weights, so the cost of int8 quantisation on retrieval can be
+          # measured (SHODH_USE_QUANTIZED_MODEL=0). Semantic similarity is the
+          # strongest ranking signal in the pipeline and it has only ever been
+          # produced by the quantised model - the price of that has never been
+          # measured. Fetched unconditionally so the arm is always runnable.
+          [ -s "$MODEL_DIR/model.onnx" ]           || dl "$MODEL_DIR/model.onnx" "$BASE/onnx/model.onnx"
           [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
           ls -la "$MODEL_DIR"
 
@@ -384,5 +390,6 @@ jobs:
             locomo-recall.log
             locomo-reachability.json
             locomo-reachability.log
+            pool.jsonl
             learning-curve.json
             learning-curve.log
