@@ -1366,6 +1366,16 @@ pub fn spreading_activation_retrieve_with_stats(
     if activation_map.is_empty() {
         tracing::warn!("No entities found in graph, falling back to semantic search");
         stats.retrieval_time_us = start_time.elapsed().as_micros() as u64;
+        // Keep the `graph_pool` funnel denominator aligned with the `graph`
+        // stage (mod.rs records that one even when this leg returns empty):
+        // a no-seed query has an EMPTY pool, not a missing measurement —
+        // omitting it would silently inflate graph_pool.present%.
+        if crate::memory::gold_funnel::is_armed() {
+            crate::memory::gold_funnel::record(
+                "graph_pool",
+                std::iter::empty::<&crate::memory::types::MemoryId>(),
+            );
+        }
         return Ok((Vec::new(), stats)); // Caller should fall back to semantic search
     }
 
@@ -1925,6 +1935,23 @@ pub fn spreading_activation_retrieve_with_stats(
         })
     });
 
+    // Funnel stage `graph_pool`: the leg's COMPLETE scored pool, before any
+    // truncation. The existing `graph` stage (mod.rs) sees only the emitted
+    // top-`graph_leg_k` list, so it cannot distinguish "gold never entered the
+    // pool" (a membership problem — seeds, edge direction, expansion caps) from
+    // "gold entered the pool but the final_score ordering cut it at the exit
+    // gate" (an ordering problem the graph cannot fix — the pool ordering is
+    // semantic-dominated because PPR stationary masses are ~1e-3 against 0..1
+    // cosine scores). Recorded on the sorted-but-uncut list so the funnel's
+    // mean_rank_when_present locates WHERE in the pool ordering gold sits.
+    // No-op unless the recall harness armed the funnel for this query.
+    if crate::memory::gold_funnel::is_armed() {
+        crate::memory::gold_funnel::record(
+            "graph_pool",
+            scored_memories.iter().map(|am| &am.memory.id),
+        );
+    }
+
     // Bound the candidate set before the O(n²) lateral-inhibition pass below. The caller
     // keeps only the top ~200 graph candidates anyway, so this loses nothing — but without
     // it, reachability injection's large candidate set makes lateral inhibition (pairwise
@@ -2440,6 +2467,143 @@ mod tests {
         assert!(
             entities.get(&b).copied().unwrap_or(0.0) > 0.0,
             "entity→entity spreading must survive passage interning"
+        );
+    }
+
+    /// The `graph_pool` funnel stage must see the COMPLETE scored pool —
+    /// recorded after the final-score sort but BEFORE the GRAPH_CANDIDATE_CAP
+    /// (200) and `graph_leg_k` truncations — on the live retrieval path.
+    ///
+    /// Construction: one seed entity with 202 attached episodes, all with
+    /// identical evidence (equal activation, no embeddings, no query-token
+    /// overlap), so the deterministic content tie-break is the total order.
+    /// The gold episode's content sorts LAST → pool rank 201, beyond both the
+    /// 200-cap and the emitted top-`max_results`. A mutation that removes the
+    /// record, or moves it after either truncation, changes the recorded rank
+    /// to absent/None and fails the exact-rank assertion.
+    #[test]
+    fn graph_pool_funnel_stage_records_the_pool_before_truncation() {
+        use crate::graph_memory::{EntityNode, EpisodeSource};
+        use crate::memory::types::{Experience, MemoryId};
+        use chrono::Utc;
+        use std::sync::Arc;
+
+        struct StubEmbedder;
+        impl crate::embeddings::Embedder for StubEmbedder {
+            fn encode(&self, _text: &str) -> Result<Vec<f32>> {
+                Ok(vec![0.1, 0.2, 0.3, 0.4])
+            }
+            fn dimension(&self) -> usize {
+                4
+            }
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let hub = graph
+            .add_entity(EntityNode {
+                uuid: Uuid::new_v4(),
+                name: "hub".to_string(),
+                labels: vec![EntityLabel::Concept],
+                created_at: Utc::now(),
+                last_seen_at: Utc::now(),
+                mention_count: 1,
+                summary: String::new(),
+                attributes: HashMap::new(),
+                name_embedding: None,
+                salience: 1.0,
+                is_proper_noun: false,
+                selectivity: None,
+                fine_type: None,
+                kb_id: None,
+            })
+            .unwrap();
+
+        // 201 distractors that sort BEFORE the gold by content, plus one gold
+        // that sorts last. All evidence is identical, so the content tie-break
+        // (total order) pins gold to pool rank 201 — outside the 200-cap.
+        let now = Utc::now();
+        let add_episode = |content: String| -> Uuid {
+            let ep = EpisodicNode {
+                uuid: Uuid::new_v4(),
+                name: content.clone(),
+                content,
+                valid_at: now,
+                created_at: now,
+                entity_refs: vec![hub],
+                source: EpisodeSource::Message,
+                metadata: HashMap::new(),
+            };
+            let id = ep.uuid;
+            graph.add_episode(ep).unwrap();
+            id
+        };
+        for i in 0..201 {
+            add_episode(format!("content_{i:03}"));
+        }
+        let gold_uuid = add_episode("zzz_gold".to_string());
+
+        let episode_to_memory = |ep: &EpisodicNode| -> Result<Option<SharedMemory>> {
+            Ok(Some(Arc::new(Memory::new(
+                MemoryId(ep.uuid),
+                Experience {
+                    content: ep.content.clone(),
+                    ..Default::default()
+                },
+                0.5,
+                None,
+                None,
+                None,
+                Some(now),
+            ))))
+        };
+
+        let query = Query {
+            query_text: Some("hub".to_string()),
+            ner_entities: Some(vec!["hub".to_string()]),
+            ..Query::default()
+        };
+
+        let mut gold_set = HashSet::new();
+        gold_set.insert(MemoryId(gold_uuid));
+        crate::memory::gold_funnel::begin(gold_set);
+
+        let (emitted, _stats) = spreading_activation_retrieve_with_stats(
+            "hub",
+            &query,
+            &graph,
+            &StubEmbedder,
+            None,
+            None,
+            None,
+            episode_to_memory,
+        )
+        .expect("graph-leg retrieval");
+
+        let stages = crate::memory::gold_funnel::take().expect("funnel was armed");
+        let pool_rank = stages
+            .iter()
+            .find(|(stage, _)| stage == "graph_pool")
+            .unwrap_or_else(|| panic!("graph_pool stage must be recorded; got {stages:?}"))
+            .1;
+        assert_eq!(
+            pool_rank,
+            Some(201),
+            "graph_pool must rank gold in the FULL sorted pool (202 candidates, \
+             gold last by content tie-break). None/absent means the record was \
+             dropped or moved after a truncation"
+        );
+
+        // And the emitted leg output must NOT contain the gold — the record
+        // observed candidates the exit gate cut, which is its entire purpose.
+        assert!(
+            emitted.len() <= query.max_results,
+            "leg emission must respect graph_leg_k (= max_results here)"
+        );
+        assert!(
+            emitted.iter().all(|am| am.memory.id != MemoryId(gold_uuid)),
+            "gold at pool rank 201 must be cut by the exit gate in this construction"
         );
     }
 
