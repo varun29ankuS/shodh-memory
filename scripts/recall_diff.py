@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,58 @@ LATENCY_METRICS = ("latency_p50_ms", "latency_p95_ms", "latency_p99_ms")
 # RH-12 (#272): per-case median latency distribution stats. Absent on
 # pre-RH-12 reports, so the renderer skips them when both sides are zero.
 LATENCY_DIST_METRICS = ("latency_min_ms", "latency_max_ms", "latency_iqr_ms")
+
+
+# --- Uncertainty -------------------------------------------------------------
+#
+# Mirrors `src/recall_harness/uncertainty.rs`; kept in sync by
+# `renderer_matches_the_rust_estimators` in that module's tests.
+#
+# The interval is NOT run-to-run noise — retrieval here is deterministic and the
+# harness hard-fails if rank lists diverge across repeats (RH-12). It is the
+# generalisation interval: if this same system met a different draw of questions
+# from the same distribution, how far could the number move? That is what a
+# reader assumes a bare point estimate has already accounted for, and it has not.
+Z_95 = 1.959963984540054
+
+
+def wilson_ci95(p: float, n: int) -> float:
+    """95% Wilson half-width for a proportion (`p@1`).
+
+    The normal approximation is unusable in this regime: at p=0 it reports a
+    half-width of exactly zero, claiming certainty from a handful of cases.
+    """
+    if n <= 0:
+        return 1.0
+    p = min(max(p, 0.0), 1.0)
+    z2 = Z_95 * Z_95
+    denom = 1.0 + z2 / n
+    centre = (p + z2 / (2 * n)) / denom
+    spread = (Z_95 / denom) * math.sqrt(p * (1 - p) / n + z2 / (4 * n * n))
+    return max(abs(p - max(centre - spread, 0.0)), abs(min(centre + spread, 1.0) - p))
+
+
+def bounded_mean_ci95(n: int) -> float:
+    """95% half-width for a mean of per-case scores in [0,1].
+
+    Popoviciu's bound (variance <= 1/4) — a rigorous upper bound, since the
+    report does not carry per-case variance. Never optimistic.
+    """
+    if n <= 0:
+        return 1.0
+    return min(Z_95 * 0.5 / math.sqrt(n), 1.0)
+
+
+def ci_for(metric: str, value: float, n: int) -> float:
+    return wilson_ci95(value, n) if metric == "p@1" else bounded_mean_ci95(n)
+
+
+def fmt_uncertainty(metric: str, base: float, cur: float, n: int) -> str:
+    """`±0.0980 (n=100)`, plus a flag when the delta is under the resolution."""
+    ci = ci_for(metric, base, n)
+    within = abs(cur - base) < ci
+    tag = " · **within sampling error**" if within else ""
+    return f"±{ci:.4f} (n={n}){tag}"
 
 
 def load_report(path: Path) -> dict[str, Any]:
@@ -89,18 +142,32 @@ def render(baseline: dict[str, Any], current: dict[str, Any], tolerance_pct: flo
         lines.append("> **Infrastructure failure:** one or both reports are missing the `full` layer.")
         return "\n".join(lines)
 
+    n_cases = int(current.get("case_count", 0) or baseline.get("case_count", 0) or 0)
+
     lines.append("### Quality (gated)")
     lines.append("")
-    lines.append("| metric | baseline → current (Δ) |")
-    lines.append("| ------ | ---------------------- |")
+    lines.append("| metric | baseline → current (Δ) | 95% CI |")
+    lines.append("| ------ | ---------------------- | ------ |")
     for m in GATING_METRICS:
+        b, c = base_full.get(m, 0.0), cur_full.get(m, 0.0)
         lines.append(
-            f"| `{m}` | {fmt_metric(base_full.get(m, 0.0), cur_full.get(m, 0.0), tolerance_pct, gating=True)} |"
+            f"| `{m}` | {fmt_metric(b, c, tolerance_pct, gating=True)} "
+            f"| {fmt_uncertainty(m, b, c, n_cases)} |"
         )
     for m in INFO_METRICS:
+        b, c = base_full.get(m, 0.0), cur_full.get(m, 0.0)
         lines.append(
-            f"| `{m}` | {fmt_metric(base_full.get(m, 0.0), cur_full.get(m, 0.0), tolerance_pct, gating=False)} |"
+            f"| `{m}` | {fmt_metric(b, c, tolerance_pct, gating=False)} "
+            f"| {fmt_uncertainty(m, b, c, n_cases)} |"
         )
+    lines.append("")
+    smallest = bounded_mean_ci95(n_cases)
+    lines.append(
+        f"> Deltas smaller than **±{smallest:.4f}** are below what {n_cases} questions can "
+        f"resolve. They are still real changes *on this fixed benchmark* — retrieval is "
+        f"deterministic — but they are not evidence about quality in general. The fix for an "
+        f"under-resolved metric is more questions, never a looser tolerance."
+    )
     lines.append("")
 
     lines.append("### Latency (informational)")

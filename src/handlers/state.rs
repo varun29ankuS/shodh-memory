@@ -431,6 +431,78 @@ fn tag_surface_claimed_by_ner(tag: &str, ner_claimed: &HashSet<String>) -> bool 
     ner_claimed.contains(&tag.trim().to_lowercase())
 }
 
+/// Build the graph node for a user-supplied tag surface.
+///
+/// The tag's ontology label comes from `classify_tag_label`, and BOTH salience
+/// and `is_proper_noun` derive from that label — `is_proper_noun` via
+/// `EntityNode::derive_proper_noun`, the one sanctioned derivation. The
+/// coupling is the point: this path used to classify a tag into a real
+/// `EntityLabel` and then DISCARD it, hardcoding `is_proper_noun: false`, so
+/// "rocksdb" (Database) or "auth-service" (Service) lost the proper-noun
+/// salience boost and — worse — entered the stemmed merge index that exists
+/// precisely to keep named things from fusing with near-stems.
+fn build_tag_entity(
+    tag_name: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    name_embedding: Option<Vec<f32>>,
+) -> EntityNode {
+    let label = classify_tag_label(tag_name);
+    let labels = vec![label.clone()];
+    let is_proper_noun = EntityNode::derive_proper_noun(&labels);
+    EntityNode {
+        uuid: uuid::Uuid::new_v4(),
+        name: tag_name.to_string(),
+        labels,
+        created_at: now,
+        last_seen_at: now,
+        mention_count: 1,
+        summary: String::new(),
+        attributes: HashMap::new(),
+        name_embedding,
+        salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
+            &label,
+            is_proper_noun,
+        ),
+        is_proper_noun,
+        selectivity: None,
+        fine_type: None,
+        kb_id: None,
+    }
+}
+
+/// Resolve a NER span to its ontology label and fine type.
+///
+/// The fine label (GLiNER's 141-way schema leaf) rolls up to its coarse
+/// `EntityLabel` via the schema; a span with no fine label uses the coarse
+/// 4-class view directly, with `Misc` falling to `Concept`. An unrecognised
+/// fine label becomes `Other(fine)` rather than a guess.
+///
+/// Shared by the admission filter and the node-construction phase so the
+/// label that decides whether a span is ADMITTED is the same label the node
+/// is then TYPED with. Resolving twice by different rules is how the 4-class
+/// view got to veto spans the schema had already typed: `Misc` swallows
+/// Repository, Service, Product, Work, Law, … — so "serde" (fine-typed, but
+/// lowercase and short) had to clear a confidence bar a Person never faces.
+fn resolve_ner_entity_label(
+    ner_entity: &crate::embeddings::ner::NerEntity,
+) -> (EntityLabel, Option<String>) {
+    match &ner_entity.fine_label {
+        // Delegates rather than repeating the rollup: `label_for_fine` is the
+        // single fine -> EntityLabel resolution, and a second hand-written copy
+        // here is the same parallel-path defect this resolver exists to kill.
+        Some(fine) => (crate::entity_type::label_for_fine(fine), Some(fine.clone())),
+        None => {
+            let coarse = match ner_entity.entity_type {
+                NerEntityType::Person => EntityLabel::Person,
+                NerEntityType::Organization => EntityLabel::Organization,
+                NerEntityType::Location => EntityLabel::Location,
+                NerEntityType::Misc => EntityLabel::Concept,
+            };
+            (coarse, None)
+        }
+    }
+}
+
 /// Classify a tag into a specific EntityLabel based on naming patterns.
 ///
 /// Tags enter the graph as entities. Instead of defaulting everything to
@@ -2802,18 +2874,28 @@ impl MultiUserMemoryManager {
                 if is_structural_non_entity(name) {
                     return false;
                 }
-                // 7. MISC type without uppercase needs higher confidence
-                if matches!(e.entity_type, NerEntityType::Misc)
-                    && !name.chars().any(|c| c.is_uppercase())
-                    && e.confidence < 0.8
-                {
+                // 7./8. Extra skepticism for spans whose RESOLVED ontology
+                //     label does not denote a named individual: lowercase
+                //     spans need higher confidence (7) and short spans need
+                //     very high confidence (8). The heuristic is sound — an
+                //     unnamed, lowercase, short, low-confidence span probably
+                //     IS noise — but it used to ask the coarse 4-class view
+                //     (`Misc`), which swallows Repository, Service, Database,
+                //     Product, Work, Law, Cyber, …: a span fine-typed
+                //     `software` ("serde": 5 chars, lowercase) had to clear a
+                //     0.8 confidence bar a Person never faces, and unlike the
+                //     salience cost of misfiled proper nouns, a dropped span
+                //     is unrecoverable downstream. Named individuals keep only
+                //     the absolute floor (rule 3); unnamed classes keep the
+                //     old bars unchanged — spans with no fine label still
+                //     resolve `Misc` → `Concept` (unnamed), so the untyped
+                //     population this skepticism was written for is gated
+                //     exactly as before.
+                let denotes_name = resolve_ner_entity_label(e).0.denotes_named_individual();
+                if !denotes_name && !name.chars().any(|c| c.is_uppercase()) && e.confidence < 0.8 {
                     return false;
                 }
-                // 8. Short MISC entities need very high confidence
-                if matches!(e.entity_type, NerEntityType::Misc)
-                    && name.len() < 5
-                    && e.confidence < 0.80
-                {
+                if !denotes_name && name.len() < 5 && e.confidence < 0.80 {
                     return false;
                 }
                 // 9. Hook metadata patterns (tool:Edit, tool:Write, auto-captured, modified file)
@@ -3020,31 +3102,25 @@ impl MultiUserMemoryManager {
         let ner_entities: Vec<(String, EntityNode)> = filtered_entities
             .into_iter()
             .map(|ner_entity| {
-                // Primary label + fine type from GLiNER's top-scoring span for this
-                // surface. The fine label rolls up to its coarse EntityLabel via the
-                // schema (kills the MISC→regex funnel); the fallback path has no fine
-                // label and uses the coarse 4-class view directly.
-                let (label, fine_type) = match &ner_entity.fine_label {
-                    Some(fine) => {
-                        let coarse = crate::entity_type::coarse_of(fine)
-                            .map(EntityLabel::from_coarse_id)
-                            .unwrap_or_else(|| EntityLabel::Other(fine.clone()));
-                        (coarse, Some(fine.clone()))
-                    }
-                    None => {
-                        let coarse = match ner_entity.entity_type {
-                            NerEntityType::Person => EntityLabel::Person,
-                            NerEntityType::Organization => EntityLabel::Organization,
-                            NerEntityType::Location => EntityLabel::Location,
-                            NerEntityType::Misc => EntityLabel::Concept,
-                        };
-                        (coarse, None)
-                    }
-                };
+                // Primary label + fine type from GLiNER's top-scoring span for
+                // this surface (kills the MISC→regex funnel), via the SAME
+                // resolver the admission filter above uses — one label decides
+                // both admission and typing.
+                let (label, fine_type) = resolve_ner_entity_label(&ner_entity);
+                // Asked of the RESOLVED label via the one sanctioned
+                // derivation, not of the coarse 4-class NER view. That view
+                // collapses everything outside person / org / location into
+                // `Misc`, so it answered "no" for every titled work, product,
+                // project, repository, service, named event and law — filing
+                // them as common nouns, which cost them the salience boost
+                // and, worse, put them in the stemmed merge index that exists
+                // to keep proper nouns apart.
+                let labels = vec![label.clone()];
+                let is_proper_noun = EntityNode::derive_proper_noun(&labels);
                 let node = EntityNode {
                     uuid: uuid::Uuid::new_v4(),
                     name: ner_entity.text.clone(),
-                    labels: vec![label.clone()],
+                    labels,
                     created_at: now,
                     last_seen_at: now,
                     mention_count: 1,
@@ -3060,14 +3136,14 @@ impl MultiUserMemoryManager {
                         .cloned(),
                     // Use ontological salience as the base, scaled by NER confidence
                     salience: {
-                        let is_pn = !matches!(ner_entity.entity_type, NerEntityType::Misc);
                         let base = crate::graph_memory::EntityExtractor::calculate_base_salience(
-                            &label, is_pn,
+                            &label,
+                            is_proper_noun,
                         );
                         // NER confidence modulates: high-confidence entities get full base salience
                         base * (0.5 + 0.5 * ner_entity.confidence)
                     },
-                    is_proper_noun: !matches!(ner_entity.entity_type, NerEntityType::Misc),
+                    is_proper_noun,
                     selectivity: None,
                     fine_type,
                     kb_id: None,
@@ -3114,29 +3190,15 @@ impl MultiUserMemoryManager {
                     && !tag_name.contains(". ")
                     && !tag_name.ends_with('.')
                 {
-                    let label = classify_tag_label(tag_name);
                     Some((
                         tag_name.to_string(),
-                        EntityNode {
-                            uuid: uuid::Uuid::new_v4(),
-                            name: tag_name.to_string(),
-                            labels: vec![label.clone()],
-                            created_at: now,
-                            last_seen_at: now,
-                            mention_count: 1,
-                            summary: String::new(),
-                            attributes: HashMap::new(),
-                            name_embedding: entity_name_embeddings
+                        build_tag_entity(
+                            tag_name,
+                            now,
+                            entity_name_embeddings
                                 .and_then(|map| map.get(tag_name))
                                 .cloned(),
-                            salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
-                                &label, false,
-                            ),
-                            is_proper_noun: false,
-                            selectivity: None,
-                            fine_type: None,
-                            kb_id: None,
-                        },
+                        ),
                     ))
                 } else {
                     None
@@ -3189,12 +3251,14 @@ impl MultiUserMemoryManager {
                 let emb = entity_name_embeddings
                     .and_then(|map| map.get(&term))
                     .cloned();
+                let labels = vec![EntityLabel::Technology];
+                let is_proper_noun = EntityNode::derive_proper_noun(&labels);
                 Some((
                     term.clone(),
                     EntityNode {
                         uuid: uuid::Uuid::new_v4(),
                         name: term,
-                        labels: vec![EntityLabel::Technology],
+                        labels,
                         created_at: now,
                         last_seen_at: now,
                         mention_count: 1,
@@ -3203,9 +3267,9 @@ impl MultiUserMemoryManager {
                         name_embedding: emb,
                         salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
                             &EntityLabel::Technology,
-                            true,
+                            is_proper_noun,
                         ),
-                        is_proper_noun: true,
+                        is_proper_noun,
                         selectivity: None,
                         fine_type: None,
                         kb_id: None,
@@ -3223,12 +3287,20 @@ impl MultiUserMemoryManager {
                     return None;
                 }
                 known_names.push(issue_id.to_string());
+                // `Task` derives common-noun under `denotes_named_individual`
+                // (the class covers "fix the login bug", not just IDs), so an
+                // issue ID now loses the proper-noun salience boost and enters
+                // the stemmed merge index. Merge risk is nil in practice: the
+                // stemmer keeps digit-bearing single tokens intact, so
+                // "SHO-42" and "SHO-421" stem to themselves and stay distinct.
+                let labels = vec![EntityLabel::Task];
+                let is_proper_noun = EntityNode::derive_proper_noun(&labels);
                 Some((
                     issue_id.to_string(),
                     EntityNode {
                         uuid: uuid::Uuid::new_v4(),
                         name: issue_id.to_string(),
-                        labels: vec![EntityLabel::Task],
+                        labels,
                         created_at: now,
                         last_seen_at: now,
                         mention_count: 1,
@@ -3239,9 +3311,9 @@ impl MultiUserMemoryManager {
                             .cloned(),
                         salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
                             &EntityLabel::Task,
-                            true,
+                            is_proper_noun,
                         ),
-                        is_proper_noun: true,
+                        is_proper_noun,
                         selectivity: None,
                         fine_type: None,
                         kb_id: None,
@@ -3272,12 +3344,14 @@ impl MultiUserMemoryManager {
                     known_names.push(name.clone());
                     let emb = entity_name_embeddings.and_then(|m| m.get(&name)).cloned();
                     let concept_label = EntityLabel::Other("Concept".to_string());
+                    let labels = vec![concept_label.clone()];
+                    let is_proper_noun = EntityNode::derive_proper_noun(&labels);
                     Some((
                         name.clone(),
                         EntityNode {
                             uuid: uuid::Uuid::new_v4(),
                             name,
-                            labels: vec![concept_label.clone()],
+                            labels,
                             created_at: now,
                             last_seen_at: now,
                             mention_count: 1,
@@ -3286,9 +3360,9 @@ impl MultiUserMemoryManager {
                             name_embedding: emb,
                             salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
                                 &concept_label,
-                                false,
+                                is_proper_noun,
                             ),
-                            is_proper_noun: false,
+                            is_proper_noun,
                             selectivity: None,
                             fine_type: None,
                             kb_id: None,
@@ -4288,6 +4362,112 @@ mod tests {
         assert_eq!(classify_tag_label("graph_memory.rs"), EntityLabel::Module);
         assert_eq!(classify_tag_label("index.ts"), EntityLabel::Module);
         assert_eq!(classify_tag_label("utils-lib"), EntityLabel::Module);
+    }
+
+    /// REGRESSION — the worst of the four competing proper-noun definitions.
+    /// The tag path classified a tag into a real `EntityLabel` and then threw
+    /// the classification away, hardcoding `is_proper_noun: false` and passing
+    /// `false` into the salience call. `build_tag_entity` must instead derive
+    /// both from the classified label: a tag typed into a named class
+    /// (Database, Service, …) is a proper noun with the boosted salience, and
+    /// an unrecognised tag falls to `Concept` where the skeptical default is
+    /// actually earned.
+    #[test]
+    fn tag_entities_derive_proper_noun_and_salience_from_their_classified_label() {
+        use crate::graph_memory::EntityExtractor;
+        let now = chrono::Utc::now();
+
+        // "rocksdb" classifies to Database — a named individual. Under the old
+        // hardcoded `false` it lost the 20% salience boost and entered the
+        // stemmed merge index that exists to keep named things apart.
+        let db = build_tag_entity("rocksdb", now, None);
+        assert_eq!(db.labels, vec![EntityLabel::Database]);
+        assert!(
+            db.is_proper_noun,
+            "a Database-classified tag names an individual"
+        );
+        assert_eq!(
+            db.salience,
+            EntityExtractor::calculate_base_salience(&EntityLabel::Database, true),
+            "salience must be computed with the SAME derived value as the field"
+        );
+
+        // An unrecognised tag falls to Concept — a genuine common noun. The
+        // old blanket `false` was only accidentally right for this case; now
+        // it is right by derivation.
+        let concept = build_tag_entity("miscellaneous musing", now, None);
+        assert_eq!(concept.labels, vec![EntityLabel::Concept]);
+        assert!(!concept.is_proper_noun);
+        assert_eq!(
+            concept.salience,
+            EntityExtractor::calculate_base_salience(&EntityLabel::Concept, false),
+        );
+
+        // Field and labels can never disagree, whatever the tag.
+        for tag in [
+            "production",
+            "ci-pipeline",
+            "README.md",
+            "settings.toml",
+            "auth-api",
+        ] {
+            let node = build_tag_entity(tag, now, None);
+            assert_eq!(
+                node.is_proper_noun,
+                EntityNode::derive_proper_noun(&node.labels),
+                "tag {tag:?} produced a node whose flag diverges from its labels"
+            );
+        }
+    }
+
+    /// The admission filter and the node-construction phase must resolve a
+    /// span to the SAME ontology label — `resolve_ner_entity_label` is that
+    /// single resolver. The cases pin the exact mapping the skepticism rules
+    /// (7/8) key off: a fine-typed named artefact ("serde" as `software` →
+    /// Product) is exempt from the extra confidence bars, while an untyped
+    /// span (`Misc` → Concept) and an unrecognised fine label (`Other`) stay
+    /// gated exactly as the old 4-class rule gated them.
+    #[test]
+    fn ner_label_resolution_decides_admission_and_typing_with_one_answer() {
+        use crate::embeddings::ner::NerEntity;
+        let span = |fine: Option<&str>, entity_type: NerEntityType| NerEntity {
+            text: "serde".to_string(),
+            entity_type,
+            confidence: 0.6,
+            start: 0,
+            end: 5,
+            fine_label: fine.map(str::to_string),
+        };
+
+        // GLiNER fine type rolls up through the schema: software → product →
+        // Product, a named individual. Under the coarse view this span was
+        // `Misc` — lowercase and 5 chars, it needed 0.8 confidence to survive.
+        let (label, fine) = resolve_ner_entity_label(&span(Some("software"), NerEntityType::Misc));
+        assert_eq!(label, EntityLabel::Product);
+        assert_eq!(fine.as_deref(), Some("software"));
+        assert!(
+            label.denotes_named_individual(),
+            "a named artefact must be exempt from the generic-span confidence bars"
+        );
+
+        // No fine label, coarse Misc → Concept: the population rules 7/8 were
+        // written for, still gated.
+        let (label, fine) = resolve_ner_entity_label(&span(None, NerEntityType::Misc));
+        assert_eq!(label, EntityLabel::Concept);
+        assert_eq!(fine, None);
+        assert!(!label.denotes_named_individual());
+
+        // No fine label, coarse Person: named, never faced the bars, still
+        // does not.
+        let (label, _) = resolve_ner_entity_label(&span(None, NerEntityType::Person));
+        assert_eq!(label, EntityLabel::Person);
+        assert!(label.denotes_named_individual());
+
+        // A fine label outside the schema must not be guessed at: Other(_) is
+        // not a named individual, so the skeptical bars apply.
+        let (label, _) = resolve_ner_entity_label(&span(Some("florb"), NerEntityType::Misc));
+        assert_eq!(label, EntityLabel::Other("florb".to_string()));
+        assert!(!label.denotes_named_individual());
     }
 
     /// Build a minimal NER-phase entity for the twin-suppression tests.

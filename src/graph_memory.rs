@@ -137,8 +137,25 @@ pub struct EntityNode {
     #[serde(default = "default_salience")]
     pub salience: f32,
 
-    /// Whether this is a proper noun (names, places, products)
-    /// Proper nouns have higher base salience than common nouns
+    /// Whether this entity is a named individual (proper noun) — "Paris",
+    /// "PostgreSQL", "GDPR" — rather than a common-noun concept.
+    ///
+    /// DERIVED FIELD. The only sanctioned way to set it is
+    /// [`EntityNode::derive_proper_noun`] over `labels`, which delegates to
+    /// [`EntityLabel::denotes_named_individual`] — the single definition of
+    /// proper-noun-ness in this codebase. A literal `true`/`false` at a
+    /// construction site is a bug, not an override: it desynchronises this
+    /// field from the labels that justify it, and the divergence is invisible
+    /// until a merge or salience decision goes wrong much later.
+    ///
+    /// The value is cached here rather than computed on read because the
+    /// struct is serialized via `crate::serialization` (postcard: positional,
+    /// non-self-describing) — removing the field would shift `selectivity`,
+    /// `fine_type` and `kb_id` and silently corrupt every stored entity.
+    ///
+    /// Consumers: [`EntityExtractor::calculate_base_salience`] (20% boost)
+    /// and `add_entity`'s stemmed merge index, which excludes proper nouns so
+    /// "Paris" (stem "pari") never merges with "Parison".
     #[serde(default)]
     pub is_proper_noun: bool,
 
@@ -182,6 +199,25 @@ pub struct EntityNode {
     /// the corruption KB linking exists to avoid.
     #[serde(default)]
     pub kb_id: Option<String>,
+}
+
+impl EntityNode {
+    /// Derive [`Self::is_proper_noun`] from an entity's labels — the ONLY
+    /// sanctioned way to compute that field (see its doc comment).
+    ///
+    /// `any` (not `all`) is deliberate: it mirrors `add_entity`'s merge rule
+    /// (`existing.is_proper_noun || entity.is_proper_noun`), so a node whose
+    /// labels accumulate across mentions answers the same whether the
+    /// derivation runs once over the merged label set or per-mention with the
+    /// results OR-ed by the merge. Any other combinator would make the answer
+    /// depend on mention order.
+    ///
+    /// An empty label set derives `false`: with no class evidence there is no
+    /// evidence of a name, and `false` is also what `#[serde(default)]` gives
+    /// records written before this field existed — the two defaults agree.
+    pub fn derive_proper_noun(labels: &[EntityLabel]) -> bool {
+        labels.iter().any(|l| l.denotes_named_individual())
+    }
 }
 
 fn default_salience() -> f32 {
@@ -373,6 +409,92 @@ impl EntityLabel {
             Self::Norp => &[EntityLabel::Organization],
             // Base types and Other have no parents
             _ => &[],
+        }
+    }
+
+    /// Whether instances of this class are referred to by a **proper name**
+    /// rather than described by a common noun.
+    ///
+    /// This is a second, orthogonal axis to [`Self::parent_labels`]. Subsumption
+    /// answers "what kind of thing is this" and puts each label in one place in a
+    /// tree; this answers "does this thing bear a name", which cuts *across* that
+    /// tree. `Work` sits under `Concept` and `Repository` under `Technology`, yet
+    /// "Little Women" and "shodh-memory" are both named individuals — there is no
+    /// position in a subsumption hierarchy that expresses the property they share.
+    ///
+    /// # Why this exists
+    ///
+    /// Proper-noun-ness was previously derived from the coarse 4-class NER view:
+    /// `!matches!(entity_type, NerEntityType::Misc)`. That view predates the
+    /// 141-fine schema and collapses everything outside person/org/location into
+    /// `Misc`, so **every named thing that is not a person, organisation or place
+    /// was filed as a common noun** — titled works, products, projects,
+    /// repositories, services, named events, laws, CVEs. Two consequences, both
+    /// silent: the entity loses the proper-noun salience boost in
+    /// [`EntityExtractor::calculate_base_salience`], and it is written into the
+    /// stemmed merge index — the index this codebase deliberately keeps proper
+    /// nouns out of "to prevent 'Paris' → 'pari' merging with 'Parison'".
+    ///
+    /// # The asymmetry that settles the borderline cases
+    ///
+    /// A wrong `true` costs a missed merge opportunity. A wrong `false` can fuse
+    /// two distinct named things into one node, and every traversal downstream
+    /// inherits that error. Losing a merge is recoverable; asserting that two
+    /// different things are one is not. Borderline classes therefore resolve to
+    /// `true`.
+    ///
+    /// # Compatibility
+    ///
+    /// This is deliberately a **superset** of the old coarse rule: nothing that
+    /// was treated as a proper noun before becomes a common noun now, so the
+    /// change can only stop misfiling named things — it cannot introduce a new
+    /// stem collision. `Environment` and `Role` are the honest wrinkles: neither
+    /// is really a named individual ("production", "tech lead"), but both mapped
+    /// to proper under the coarse rule (via `Location` and `Person`), and
+    /// demoting them would be an unmeasured behaviour change smuggled in beside
+    /// a bug fix. They stay until measured.
+    pub fn denotes_named_individual(&self) -> bool {
+        match self {
+            // People and the collectives they form.
+            Self::Person
+            | Self::Title
+            | Self::Role
+            | Self::Organization
+            | Self::Team
+            | Self::Norp => true,
+            // Places.
+            Self::Location | Self::Gpe | Self::Facility | Self::Environment => true,
+            // Named artefacts and creations. This is the group the coarse rule
+            // lost: "iPhone", "Little Women", "GDPR", "Log4Shell", "Excalibur".
+            Self::Product | Self::Work | Self::Law | Self::Cyber | Self::Vehicle | Self::Weapon => {
+                true
+            }
+            // Named technical entities — "Rust", "PostgreSQL", "shodh-memory",
+            // "auth-service", "serde", "nightly-build".
+            Self::Technology
+            | Self::Project
+            | Self::Repository
+            | Self::Service
+            | Self::Database
+            | Self::Module
+            | Self::Pipeline => true,
+            // Named occurrences — "the Boston Marathon".
+            Self::Event => true,
+            // Genuinely common nouns, structural values, and free text. A date,
+            // a sum of money or a measurement is not an individual with a name;
+            // `Other` carries an unrecognised label and must not be guessed at.
+            Self::Concept
+            | Self::Keyword
+            | Self::Skill
+            | Self::Date
+            | Self::Time
+            | Self::Money
+            | Self::Quantity
+            | Self::Metric
+            | Self::Configuration
+            | Self::Task
+            | Self::Document
+            | Self::Other(_) => false,
         }
     }
 
@@ -2146,6 +2268,87 @@ impl RelationType {
             RelationType::Causes | RelationType::Triggers | RelationType::ResultsIn
         )
     }
+
+    /// Whether this relation can plausibly hold between endpoints of these types.
+    ///
+    /// A domain/range constraint, in the sense ontology work calls `Φ`: the
+    /// permissible (subject type, relation, object type) triples. The 2026
+    /// ontology-guided GraphRAG line of work (e.g. OMD-GraphRAG) validates
+    /// extracted triples against exactly this and discards the violations,
+    /// reporting ~3% average F1 over schema-free extraction on MultiHop-RAG.
+    /// Nothing here validated endpoints at all, so `WorksAt` could link a `Date`
+    /// to a `Money` and no stage would object.
+    ///
+    /// This matters more after the cue lexicon grew: cue firing on the LoCoMo
+    /// corpus went from ~1.6% of documents to ~6.7% when `Prefers`,
+    /// `Recommends`, `Implements` and `Approves` were wired. Coverage without a
+    /// precision guard just mints more confident wrong edges, and a wrong edge
+    /// is inherited by every traversal that crosses it.
+    ///
+    /// # Deliberately permissive
+    ///
+    /// The default is **admit**. Only combinations that are clearly nonsense are
+    /// rejected, for two reasons. Typed edges are scarce — a measured 83% of a
+    /// live graph is generic — so a false rejection removes one of the few
+    /// meaning-bearing edges the graph has, while a false admission adds one
+    /// wrong edge among many weak ones. And an over-tight constraint fails
+    /// silently and invisibly: nobody notices the edge that was never created.
+    ///
+    /// Generic bridges (`CoOccurs`, `RelatedTo`, `AssociatedWith`, `CoRetrieved`)
+    /// admit everything by design — they assert adjacency, not meaning, and
+    /// constraining them would be a category error.
+    pub fn admits(&self, from: &EntityLabel, to: &EntityLabel) -> bool {
+        use RelationType::*;
+
+        // A measurement, an amount, or a point in time cannot *act*. These are
+        // values, not agents, and no amount of cue evidence makes "Tuesday
+        // recommends Postgres" a fact worth storing.
+        fn is_value(l: &EntityLabel) -> bool {
+            matches!(
+                l,
+                EntityLabel::Date
+                    | EntityLabel::Time
+                    | EntityLabel::Money
+                    | EntityLabel::Quantity
+                    | EntityLabel::Metric
+            )
+        }
+
+        // Somewhere a thing can be, organisationally or physically.
+        fn is_place_or_org(l: &EntityLabel) -> bool {
+            matches!(
+                l,
+                EntityLabel::Location
+                    | EntityLabel::Gpe
+                    | EntityLabel::Facility
+                    | EntityLabel::Organization
+                    | EntityLabel::Team
+                    | EntityLabel::Environment
+            )
+        }
+
+        match self {
+            // Untyped bridges: no constraint, by design.
+            CoOccurs | RelatedTo | AssociatedWith | CoRetrieved => true,
+
+            // Agentive relations need an agent on the subject side.
+            WorksWith | WorksAt | EmployedBy | Manages | Knows | Teaches | Learned | Prefers
+            | Recommends | Approves | AssignedTo | CreatedBy | DevelopedBy => !is_value(from),
+
+            // Placement relations need somewhere to be placed.
+            LocatedIn | LocatedAt | DeploysTo => !is_value(from) && is_place_or_org(to),
+
+            // NOTE for whoever merges `feat/lexical-stemming-and-taxonomy`: that
+            // branch adds an `IsA` variant, and it belongs here as
+            // `!is_value(from)` — a value is not a kind of anything useful, and
+            // `crate::taxonomy` never mints one. Omitted rather than guessed at,
+            // because the variant does not exist on this branch.
+
+            // Everything else: no constraint yet. An unstated constraint is
+            // honest; a guessed one silently deletes edges.
+            _ => true,
+        }
+    }
 }
 
 /// SHODH_PERSON_PERSON_KNOWS=1 — type Person↔Person co-mentions as `Knows`
@@ -2234,6 +2437,49 @@ fn predicate_from_cues(t: &str) -> Option<(RelationType, &'static str)> {
     }
     if let Some(n) = first(&["uses", "using", "powered by", "built on"]) {
         return Some((Uses, n));
+    }
+    // Preference and recommendation.
+    //
+    // `query_parser` has routed queries to `Prefers` and `Recommends` for a long
+    // time ("what did X recommend", "what does X prefer"), but no extractor ever
+    // produced either edge — the query side asked for something the ingest side
+    // could not create, and the traversal simply found nothing. These arms close
+    // that loop. See `query_side_relations_are_all_producible` for the test that
+    // now prevents the two sides drifting apart again.
+    //
+    // Deliberately conservative on vocabulary. `query_parser` maps "like" to
+    // `Prefers`, which is right for a *query* ("what does she like?") but wrong
+    // as an extraction cue: "like" is a simile, a filler and a discourse marker
+    // far more often than a preference, and in conversational text it would fire
+    // on nearly every turn. An over-firing cue is worse than a missing one — it
+    // mints confident wrong edges that every traversal downstream inherits.
+    if let Some(n) = first(&[
+        "recommends",
+        "recommended",
+        "recommend",
+        "suggests",
+        "suggested",
+        "advises",
+        "advised",
+    ]) {
+        return Some((Recommends, n));
+    }
+    if let Some(n) = first(&[
+        "prefers",
+        "preferred",
+        "prefer ",
+        "favours",
+        "favors",
+        "favourite",
+        "favorite",
+    ]) {
+        return Some((Prefers, n));
+    }
+    if let Some(n) = first(&["implements", "implemented", "conforms to", "satisfies"]) {
+        return Some((Implements, n));
+    }
+    if let Some(n) = first(&["approves", "approved", "signed off", "ratified"]) {
+        return Some((Approves, n));
     }
     None
 }
@@ -3035,18 +3281,20 @@ impl GraphMemory {
         if let Ok(Some(existing)) = self.find_entity_by_name_strict(name) {
             return Some(existing.uuid);
         }
+        let labels = vec![EntityLabel::Event];
+        let is_proper_noun = EntityNode::derive_proper_noun(&labels);
         let node = EntityNode {
             uuid: Uuid::new_v4(),
             name: name.to_string(),
-            labels: vec![EntityLabel::Event],
+            labels,
             created_at: now,
             last_seen_at: now,
             mention_count: 1,
             summary: String::new(),
             attributes: HashMap::new(),
             name_embedding: None,
-            salience: EntityExtractor::calculate_base_salience(&EntityLabel::Event, false),
-            is_proper_noun: false,
+            salience: EntityExtractor::calculate_base_salience(&EntityLabel::Event, is_proper_noun),
+            is_proper_noun,
             selectivity: None,
             fine_type: None,
             kb_id: None,
@@ -3651,6 +3899,11 @@ impl GraphMemory {
                 entity.mention_count = existing.mention_count + 1;
                 entity.last_seen_at = Utc::now();
                 entity.created_at = existing.created_at;
+                // OR, never demote: once any mention's labels evidenced a name,
+                // the node stays out of the stemmed merge index. This is the
+                // merge rule `EntityNode::derive_proper_noun` mirrors with
+                // `any`, so OR-ing per-mention derivations here equals one
+                // derivation over the merged label set below.
                 entity.is_proper_noun = existing.is_proper_noun || entity.is_proper_noun;
 
                 // Preserve the canonical name (first-seen name wins)
@@ -14425,5 +14678,407 @@ mod tests {
             graph.get_relationship(&bridge_uuid).unwrap().is_none(),
             "with the feature off the bridge is pruned like any other edge"
         );
+    }
+
+    /// The coarse 4-class NER view — the rule this replaced — answered "proper
+    /// noun?" by asking whether the type was anything other than `Misc`. These
+    /// are the classes it got wrong: every one of them names an individual, and
+    /// every one of them rolls up to `Misc`.
+    #[test]
+    fn named_artefacts_outside_person_org_location_are_proper_nouns() {
+        for label in [
+            EntityLabel::Work,       // "Little Women"
+            EntityLabel::Product,    // "iPhone"
+            EntityLabel::Project,    // "Apollo"
+            EntityLabel::Repository, // "shodh-memory"
+            EntityLabel::Service,    // "auth-service"
+            EntityLabel::Database,   // "PostgreSQL"
+            EntityLabel::Technology, // "Rust"
+            EntityLabel::Module,     // "serde"
+            EntityLabel::Pipeline,   // "nightly-build"
+            EntityLabel::Event,      // "the Boston Marathon"
+            EntityLabel::Law,        // "GDPR"
+            EntityLabel::Cyber,      // "Log4Shell"
+            EntityLabel::Vehicle,
+            EntityLabel::Weapon,
+        ] {
+            assert!(
+                label.denotes_named_individual(),
+                "{label:?} names an individual but was reported as a common noun;                  it would lose the salience boost and enter the stemmed merge index"
+            );
+        }
+    }
+
+    /// Values and generic nouns must NOT be treated as named individuals — a
+    /// date or a sum of money is not an individual that bears a name, and
+    /// `Other` carries an unrecognised label that must not be guessed at.
+    #[test]
+    fn values_and_generic_nouns_are_not_named_individuals() {
+        for label in [
+            EntityLabel::Concept,
+            EntityLabel::Keyword,
+            EntityLabel::Skill,
+            EntityLabel::Date,
+            EntityLabel::Time,
+            EntityLabel::Money,
+            EntityLabel::Quantity,
+            EntityLabel::Metric,
+            EntityLabel::Configuration,
+            EntityLabel::Task,
+            EntityLabel::Document,
+            EntityLabel::Other("unrecognised".to_string()),
+        ] {
+            assert!(
+                !label.denotes_named_individual(),
+                "{label:?} is not a named individual"
+            );
+        }
+    }
+
+    /// The guarantee that makes this safe to land: the new predicate is a
+    /// SUPERSET of the rule it replaces. Anything the coarse view called a
+    /// proper noun still is one, so the change cannot introduce a stem
+    /// collision — it can only stop misfiling named things. If this fails,
+    /// some class was demoted and an unmeasured behaviour change rode in
+    /// beside a bug fix.
+    #[test]
+    fn predicate_never_demotes_what_the_coarse_rule_called_proper() {
+        use crate::embeddings::ner::NerEntityType;
+        let mut checked = 0;
+        for label in ALL_ENTITY_LABELS_FOR_TEST {
+            let coarse_said_proper =
+                !matches!(NerEntityType::from_coarse(&label), NerEntityType::Misc);
+            if coarse_said_proper {
+                checked += 1;
+                assert!(
+                    label.denotes_named_individual(),
+                    "{label:?} was a proper noun under the coarse rule and is not under the new one - that is a demotion, not a fix"
+                );
+            }
+        }
+        // Without this, the loop passes vacuously the moment `from_coarse` stops
+        // returning a non-`Misc` class for anything — and a test that cannot
+        // fail is invisible to a failing-test sweep, which is exactly how the
+        // inert Hebbian layer stayed hidden behind tautological asserts. Ten
+        // labels map to person/org/location today.
+        assert!(
+            checked >= 10,
+            "expected the coarse rule to call at least 10 labels proper, saw {checked} - the guarantee above is asserting nothing"
+        );
+    }
+
+    /// Orthogonality is the point: this axis must not be derivable from the
+    /// subsumption hierarchy. `Work` and `Concept` share a parent relationship
+    /// (`Work` rolls up to `Concept`) yet differ on named-ness, which is exactly
+    /// the property no position in a type tree can express.
+    #[test]
+    fn named_ness_is_orthogonal_to_the_subsumption_hierarchy() {
+        assert!(EntityLabel::Work
+            .parent_labels()
+            .contains(&EntityLabel::Concept));
+        assert!(EntityLabel::Work.denotes_named_individual());
+        assert!(!EntityLabel::Concept.denotes_named_individual());
+    }
+
+    /// Every label in the ontology, so the tests above cannot silently skip a
+    /// variant added later.
+    const ALL_ENTITY_LABELS_FOR_TEST: [EntityLabel; 35] = [
+        EntityLabel::Person,
+        EntityLabel::Organization,
+        EntityLabel::Location,
+        EntityLabel::Technology,
+        EntityLabel::Concept,
+        EntityLabel::Event,
+        EntityLabel::Date,
+        EntityLabel::Product,
+        EntityLabel::Skill,
+        EntityLabel::Keyword,
+        EntityLabel::Project,
+        EntityLabel::Task,
+        EntityLabel::Document,
+        EntityLabel::Repository,
+        EntityLabel::Service,
+        EntityLabel::Database,
+        EntityLabel::Metric,
+        EntityLabel::Configuration,
+        EntityLabel::Environment,
+        EntityLabel::Pipeline,
+        EntityLabel::Team,
+        EntityLabel::Role,
+        EntityLabel::Module,
+        EntityLabel::Norp,
+        EntityLabel::Gpe,
+        EntityLabel::Facility,
+        EntityLabel::Vehicle,
+        EntityLabel::Weapon,
+        EntityLabel::Work,
+        EntityLabel::Law,
+        EntityLabel::Title,
+        EntityLabel::Cyber,
+        EntityLabel::Money,
+        EntityLabel::Quantity,
+        EntityLabel::Time,
+    ];
+
+    /// The derivation helper and the predicate are two doors into ONE
+    /// definition: for every label in the ontology (plus `Other`, which the
+    /// fixed array cannot carry), a single-label derivation must equal the
+    /// predicate, and an empty label set must derive `false` — the same
+    /// default `#[serde(default)]` gives records that predate the field.
+    #[test]
+    fn derive_proper_noun_agrees_with_the_predicate_for_every_label() {
+        let other = EntityLabel::Other("unrecognised".to_string());
+        for label in ALL_ENTITY_LABELS_FOR_TEST.iter().chain([&other]) {
+            assert_eq!(
+                EntityNode::derive_proper_noun(std::slice::from_ref(label)),
+                label.denotes_named_individual(),
+                "derivation and predicate disagree for {label:?} — there are two definitions again"
+            );
+        }
+        assert!(
+            !EntityNode::derive_proper_noun(&[]),
+            "no labels is no evidence of a name"
+        );
+    }
+
+    /// `derive_proper_noun` uses `any` PRECISELY so that it commutes with
+    /// `add_entity`'s merge rule (`existing || incoming`): deriving once over a
+    /// merged label set must equal OR-ing the per-mention derivations,
+    /// otherwise the answer would depend on which mention arrived first.
+    /// Checked exhaustively over every ordered label pair.
+    #[test]
+    fn derivation_over_merged_labels_equals_or_of_per_label_derivations() {
+        let other = EntityLabel::Other("unrecognised".to_string());
+        let all: Vec<&EntityLabel> = ALL_ENTITY_LABELS_FOR_TEST.iter().chain([&other]).collect();
+        for a in &all {
+            for b in &all {
+                let merged = vec![(*a).clone(), (*b).clone()];
+                assert_eq!(
+                    EntityNode::derive_proper_noun(&merged),
+                    a.denotes_named_individual() || b.denotes_named_individual(),
+                    "merge of {a:?} + {b:?} disagrees with OR of the parts"
+                );
+            }
+        }
+    }
+
+    /// End-to-end through `add_entity`: a node first seen as `Concept` (common
+    /// noun) and re-mentioned as `Repository` (named) must come back with the
+    /// merged label set AND `is_proper_noun == derive_proper_noun(labels)` —
+    /// the stored field and the labels that justify it stay in sync across the
+    /// OR-merge, which is the whole point of deriving instead of hardcoding.
+    #[test]
+    fn add_entity_or_merge_stays_consistent_with_label_derivation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let mention = |label: EntityLabel| {
+            let labels = vec![label];
+            let is_proper_noun = EntityNode::derive_proper_noun(&labels);
+            EntityNode {
+                uuid: Uuid::new_v4(),
+                name: "shodh".to_string(),
+                labels,
+                created_at: Utc::now(),
+                last_seen_at: Utc::now(),
+                mention_count: 1,
+                summary: String::new(),
+                attributes: HashMap::new(),
+                name_embedding: None,
+                salience: 0.5,
+                is_proper_noun,
+                selectivity: None,
+                fine_type: None,
+                kb_id: None,
+            }
+        };
+
+        let first = graph.add_entity(mention(EntityLabel::Concept)).unwrap();
+        assert!(
+            !graph.get_entity(&first).unwrap().unwrap().is_proper_noun,
+            "a lone Concept mention is a common noun"
+        );
+
+        let second = graph.add_entity(mention(EntityLabel::Repository)).unwrap();
+        assert_eq!(first, second, "same name must merge, not fork");
+
+        let merged = graph.get_entity(&first).unwrap().unwrap();
+        assert!(
+            merged.is_proper_noun,
+            "the Repository mention evidenced a name; the OR-merge must promote"
+        );
+        assert_eq!(
+            merged.is_proper_noun,
+            EntityNode::derive_proper_noun(&merged.labels),
+            "stored flag diverged from its own labels across the merge"
+        );
+    }
+
+    /// `query_parser::verb_stem_to_relation_types` routes 122 verb stems onto 31
+    /// relation types. Four of those had no producer anywhere in the crate —
+    /// `Prefers`, `Recommends`, `Implements`, `Approves` — so a query asking
+    /// "what did X recommend" was routed to an edge type that no extractor could
+    /// ever mint. The traversal did not fail; it searched for something that
+    /// cannot exist and returned nothing, which is the worst kind of wiring bug
+    /// because it looks exactly like a genuine absence of evidence.
+    #[test]
+    fn newly_wired_cues_produce_the_relations_the_query_side_asks_for() {
+        let cases: [(&str, RelationType); 4] = [
+            (
+                "nate recommended the trilogy to joanna",
+                RelationType::Recommends,
+            ),
+            ("joanna prefers dairy-free recipes", RelationType::Prefers),
+            (
+                "the service implements the retry contract",
+                RelationType::Implements,
+            ),
+            ("the lead approved the rollout", RelationType::Approves),
+        ];
+        for (text, expected) in cases {
+            let got = predicate_from_cues(text);
+            assert!(
+                matches!(got, Some((ref r, _)) if *r == expected),
+                "{text:?} should type as {expected:?}, got {got:?}"
+            );
+        }
+    }
+
+    /// The deliberate asymmetry between the two lexicons, pinned so nobody
+    /// "fixes" it later without reading why.
+    ///
+    /// `query_parser` maps "like" to `Prefers`, which is correct for a QUERY
+    /// ("what does she like?"). It is wrong as an EXTRACTION cue: in
+    /// conversational text "like" is a simile, a filler and a discourse marker
+    /// far more often than a statement of preference, so it would mint confident
+    /// wrong edges on nearly every turn. A missing edge costs recall on one
+    /// query; an over-firing cue poisons every traversal that crosses it.
+    #[test]
+    fn weak_conversational_verbs_are_not_extraction_cues() {
+        for text in [
+            "it was like a rollercoaster of emotions",
+            "i was like, what even is that",
+            "the turtles are, like, really calming",
+        ] {
+            let got = predicate_from_cues(text);
+            assert!(
+                !matches!(got, Some((RelationType::Prefers, _))),
+                "{text:?} is not a statement of preference, but typed as Prefers: {got:?}"
+            );
+        }
+    }
+
+    /// A cue must report the exact lexeme that fired, not just the relation —
+    /// provenance for an extracted edge is the phrase that justified it, and an
+    /// edge whose evidence cannot be named is not auditable.
+    #[test]
+    fn cue_reports_the_lexeme_that_fired() {
+        let (relation, lexeme) =
+            predicate_from_cues("nate recommended the trilogy").expect("cue should fire");
+        assert_eq!(relation, RelationType::Recommends);
+        assert_eq!(lexeme, "recommended");
+    }
+
+    /// The nonsense this exists to stop. A value cannot be the agent of an
+    /// agentive relation — no cue evidence makes "Tuesday recommends Postgres"
+    /// worth storing.
+    #[test]
+    fn a_value_cannot_be_the_agent_of_an_agentive_relation() {
+        for value in [
+            EntityLabel::Date,
+            EntityLabel::Time,
+            EntityLabel::Money,
+            EntityLabel::Quantity,
+            EntityLabel::Metric,
+        ] {
+            for relation in [
+                RelationType::Recommends,
+                RelationType::Prefers,
+                RelationType::WorksAt,
+                RelationType::Manages,
+                RelationType::Approves,
+                RelationType::Knows,
+            ] {
+                assert!(
+                    !relation.admits(&value, &EntityLabel::Product),
+                    "{relation:?} must not admit {value:?} as its subject"
+                );
+            }
+        }
+    }
+
+    /// Placement must land somewhere. `LocatedIn` pointing at a sum of money is
+    /// an extraction error, not a fact.
+    #[test]
+    fn placement_relations_require_a_place_or_organisation_as_target() {
+        assert!(RelationType::LocatedIn.admits(&EntityLabel::Person, &EntityLabel::Gpe));
+        assert!(RelationType::LocatedIn.admits(&EntityLabel::Team, &EntityLabel::Facility));
+        assert!(!RelationType::LocatedIn.admits(&EntityLabel::Person, &EntityLabel::Money));
+        assert!(!RelationType::LocatedIn.admits(&EntityLabel::Person, &EntityLabel::Date));
+    }
+
+    /// Generic bridges assert adjacency, not meaning. Constraining them would be
+    /// a category error, and would gut the 83% of a live graph that is generic.
+    #[test]
+    fn generic_bridges_are_never_constrained() {
+        for relation in [
+            RelationType::CoOccurs,
+            RelationType::RelatedTo,
+            RelationType::AssociatedWith,
+            RelationType::CoRetrieved,
+        ] {
+            for (from, to) in [
+                (EntityLabel::Date, EntityLabel::Money),
+                (EntityLabel::Quantity, EntityLabel::Time),
+                (EntityLabel::Person, EntityLabel::Product),
+            ] {
+                assert!(
+                    relation.admits(&from, &to),
+                    "{relation:?} is an untyped bridge and must admit {from:?} -> {to:?}"
+                );
+            }
+        }
+    }
+
+    /// The permissive default is deliberate: typed edges are scarce, so a false
+    /// rejection costs more than a false admission. Ordinary, plausible triples
+    /// must pass untouched — if this fails, the constraint has grown teeth it
+    /// was not meant to have.
+    #[test]
+    fn ordinary_typed_triples_are_admitted() {
+        let ok = [
+            (
+                RelationType::WorksAt,
+                EntityLabel::Person,
+                EntityLabel::Organization,
+            ),
+            (
+                RelationType::Recommends,
+                EntityLabel::Person,
+                EntityLabel::Work,
+            ),
+            (
+                RelationType::Prefers,
+                EntityLabel::Person,
+                EntityLabel::Technology,
+            ),
+            (
+                RelationType::Manages,
+                EntityLabel::Team,
+                EntityLabel::Project,
+            ),
+            (
+                RelationType::Uses,
+                EntityLabel::Service,
+                EntityLabel::Database,
+            ),
+            (RelationType::Causes, EntityLabel::Event, EntityLabel::Event),
+        ];
+        for (relation, from, to) in ok {
+            assert!(
+                relation.admits(&from, &to),
+                "{relation:?} must admit the ordinary triple {from:?} -> {to:?}"
+            );
+        }
     }
 }

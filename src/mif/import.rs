@@ -244,16 +244,22 @@ pub fn import_graph_entities(kg: &MifKnowledgeGraph, graph: &GraphMemory) -> (us
     let mut errors = Vec::new();
 
     for entity in &kg.entities {
-        let labels: Vec<EntityLabel> = entity.types.iter().map(|t| parse_entity_label(t)).collect();
+        let mut labels: Vec<EntityLabel> =
+            entity.types.iter().map(|t| parse_entity_label(t)).collect();
+        if labels.is_empty() {
+            labels.push(EntityLabel::Concept);
+        }
+        // MIF does not carry `is_proper_noun`, so it must be reconstructed —
+        // and the only sanctioned reconstruction is deriving it from the
+        // imported labels. The previous hardcoded `true` kept every imported
+        // common-noun concept out of the stemmed merge index, so re-imported
+        // graphs deduped differently from natively-built ones.
+        let is_proper_noun = EntityNode::derive_proper_noun(&labels);
 
         let node = EntityNode {
             uuid: entity.id,
             name: entity.name.clone(),
-            labels: if labels.is_empty() {
-                vec![EntityLabel::Concept]
-            } else {
-                labels
-            },
+            labels,
             created_at: entity.created_at,
             last_seen_at: entity.last_seen_at,
             mention_count: 1,
@@ -261,7 +267,7 @@ pub fn import_graph_entities(kg: &MifKnowledgeGraph, graph: &GraphMemory) -> (us
             attributes: entity.attributes.clone(),
             name_embedding: None,
             salience: 0.5,
-            is_proper_noun: true,
+            is_proper_noun,
             selectivity: None,
             fine_type: entity.fine_type.clone(),
             kb_id: None,
@@ -443,7 +449,21 @@ fn parse_reminder_status(s: &str) -> ProspectiveTaskStatus {
     }
 }
 
-fn parse_entity_label(s: &str) -> EntityLabel {
+/// Parse an entity label from its external string form.
+///
+/// **The only string -> `EntityLabel` parser.** There used to be a second,
+/// smaller one in `handlers/mif.rs` covering 9 labels and matching
+/// case-SENSITIVELY, so the same value typed an entity differently depending on
+/// which door it came through: `"repository"` became `Repository` via file
+/// import and `Other("repository")` over HTTP, and lowercase `"person"` — the
+/// form every other parser in this crate accepts — failed outright and became
+/// `Other("person")`. An entity's type is not a property of its transport.
+///
+/// Unrecognised input becomes `Other(s)` rather than a guess, for the same
+/// reason [`crate::entity_type::label_for_fine`] does: an unknown label means
+/// the caller and this crate disagree about what types exist, and `Other`
+/// surfaces that where a plausible substitute would bury it.
+pub fn parse_entity_label(s: &str) -> EntityLabel {
     match s.to_lowercase().as_str() {
         "person" => EntityLabel::Person,
         "organization" => EntityLabel::Organization,
@@ -544,5 +564,43 @@ fn parse_edge_tier(s: &str) -> EdgeTier {
         "L2Episodic" => EdgeTier::L2Episodic,
         "L3Semantic" => EdgeTier::L3Semantic,
         _ => EdgeTier::L1Working,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two doors must agree. Before unification the HTTP handler carried its
+    /// own 9-label, case-sensitive parser, so an entity's type depended on which
+    /// transport it arrived through — `"repository"` typed as `Repository` via
+    /// file import and `Other("repository")` over HTTP, and lowercase `"person"`
+    /// failed outright over HTTP. These cases are the ones that diverged.
+    #[test]
+    fn the_same_string_types_the_same_way_whichever_door_it_arrives_through() {
+        for (input, expected) in [
+            ("repository", EntityLabel::Repository),
+            ("Repository", EntityLabel::Repository),
+            ("person", EntityLabel::Person),
+            ("Person", EntityLabel::Person),
+            ("service", EntityLabel::Service),
+            ("team", EntityLabel::Team),
+        ] {
+            assert_eq!(
+                parse_entity_label(input),
+                expected,
+                "{input:?} must parse to {expected:?} regardless of transport or case"
+            );
+        }
+    }
+
+    /// An unrecognised label is a disagreement about what types exist, and must
+    /// surface as `Other` rather than be guessed into something plausible.
+    #[test]
+    fn an_unknown_label_surfaces_as_other_rather_than_a_guess() {
+        match parse_entity_label("not-a-real-label") {
+            EntityLabel::Other(s) => assert_eq!(s, "not-a-real-label"),
+            other => panic!("expected Other(_), got {other:?}"),
+        }
     }
 }

@@ -21,3 +21,4 @@ pub mod ontology_harness;
 pub mod report;
 pub mod runner;
 pub mod temporal_harness;
+pub mod uncertainty;

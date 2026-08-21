@@ -335,10 +335,12 @@ fn resolve_entity_label(
     use crate::graph_memory::EntityLabel;
     if let Some((ner_type, confidence, fine)) = ner_lookup.get(&entity_name.to_lowercase()) {
         if let Some(fine) = fine {
-            let coarse = crate::entity_type::coarse_of(fine)
-                .map(EntityLabel::from_coarse_id)
-                .unwrap_or_else(|| EntityLabel::Other(fine.clone()));
-            return (coarse, *confidence, Some(fine.clone()));
+            // One resolver — see `entity_type::label_for_fine`.
+            return (
+                crate::entity_type::label_for_fine(fine),
+                *confidence,
+                Some(fine.clone()),
+            );
         }
         let label = match ner_type.as_str() {
             "PER" => EntityLabel::Person,
@@ -8462,6 +8464,14 @@ impl MemorySystem {
                     } else {
                         vec![crate::graph_memory::EntityLabel::Concept]
                     };
+                // Derived from the labels, NOT from surface capitalization.
+                // The old first-letter-uppercase heuristic was a second,
+                // competing definition of proper-noun-ness; the label
+                // predicate (`EntityLabel::denotes_named_individual`) is the
+                // only one. For an entity already in the graph the resolved
+                // labels carry the answer; a brand-new fact entity falls to
+                // `Concept` and honestly answers "no name evidence".
+                let is_proper_noun = crate::graph_memory::EntityNode::derive_proper_noun(&labels);
 
                 let entity = crate::graph_memory::EntityNode {
                     uuid: Uuid::new_v4(),
@@ -8483,11 +8493,7 @@ impl MemorySystem {
                     },
                     name_embedding: embedding_map.get(entity_name).cloned(),
                     salience: fact.confidence * 0.5,
-                    is_proper_noun: entity_name
-                        .chars()
-                        .next()
-                        .map(|c| c.is_uppercase())
-                        .unwrap_or(false),
+                    is_proper_noun,
                     selectivity: None,
                     fine_type: None,
                     kb_id: None,
@@ -8855,10 +8861,20 @@ impl MemorySystem {
                     .map(|(entity_name, embedding)| {
                         let (label, salience, fine_type) =
                             resolve_entity_label(entity_name, &ner_lookup);
+                        // Derived from the resolved label, NOT from surface
+                        // capitalization — the label predicate is the single
+                        // definition of proper-noun-ness. The heuristic this
+                        // replaces called lowercase named things ("serde",
+                        // "auth-service") common nouns and capitalized common
+                        // nouns proper, disagreeing with the NER ingest path
+                        // for the same surface.
+                        let labels = vec![label];
+                        let is_proper_noun =
+                            crate::graph_memory::EntityNode::derive_proper_noun(&labels);
                         crate::graph_memory::EntityNode {
                             uuid: Uuid::new_v4(),
                             name: entity_name.clone(),
-                            labels: vec![label],
+                            labels,
                             created_at: now,
                             last_seen_at: now,
                             mention_count: 1,
@@ -8866,11 +8882,7 @@ impl MemorySystem {
                             attributes: std::collections::HashMap::new(),
                             name_embedding: embedding,
                             salience,
-                            is_proper_noun: entity_name
-                                .chars()
-                                .next()
-                                .map(|c| c.is_uppercase())
-                                .unwrap_or(false),
+                            is_proper_noun,
                             selectivity: None,
                             fine_type,
                             kb_id: None,

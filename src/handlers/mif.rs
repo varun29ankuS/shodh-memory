@@ -353,18 +353,10 @@ pub async fn add_entity(
         .map_err(AppError::Internal)?;
     let graph_guard = graph.write();
 
-    let entity_label = match req.label.as_str() {
-        "Person" => graph_memory::EntityLabel::Person,
-        "Organization" => graph_memory::EntityLabel::Organization,
-        "Location" => graph_memory::EntityLabel::Location,
-        "Event" => graph_memory::EntityLabel::Event,
-        "Concept" => graph_memory::EntityLabel::Concept,
-        "Technology" => graph_memory::EntityLabel::Technology,
-        "Product" => graph_memory::EntityLabel::Product,
-        "Skill" => graph_memory::EntityLabel::Skill,
-        "Date" => graph_memory::EntityLabel::Date,
-        _ => graph_memory::EntityLabel::Other(req.label.clone()),
-    };
+    // One parser for both doors — see `mif::import::parse_entity_label`. This
+    // site used to carry its own 9-label, case-sensitive copy, which typed the
+    // same entity differently over HTTP than via file import.
+    let entity_label = crate::mif::import::parse_entity_label(&req.label);
 
     let mut attributes = HashMap::new();
     if let Some(attrs) = &req.attributes {
@@ -376,10 +368,18 @@ pub async fn add_entity(
         }
     }
 
+    // Derived from the requested label — the single definition of
+    // proper-noun-ness. The previous hardcoded `true` declared every entity
+    // added through this endpoint a named individual, including `Concept`,
+    // `Skill` and `Date`, exempting them from the stemmed merge that
+    // identically-typed natively-extracted entities go through.
+    let labels = vec![entity_label.clone()];
+    let is_proper_noun = graph_memory::EntityNode::derive_proper_noun(&labels);
+
     let entity = graph_memory::EntityNode {
         uuid: uuid::Uuid::new_v4(),
         name: req.name.clone(),
-        labels: vec![entity_label.clone()],
+        labels,
         created_at: chrono::Utc::now(),
         last_seen_at: chrono::Utc::now(),
         mention_count: 1,
@@ -387,7 +387,7 @@ pub async fn add_entity(
         attributes,
         name_embedding: None,
         salience: 0.5,
-        is_proper_noun: true,
+        is_proper_noun,
         selectivity: None,
         fine_type: None,
         kb_id: None,

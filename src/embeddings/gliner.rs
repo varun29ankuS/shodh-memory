@@ -519,9 +519,9 @@ impl GlinerTyper {
             if fine_label.is_empty() {
                 continue;
             }
-            let coarse = crate::entity_type::coarse_of(&fine_label)
-                .map(EntityLabel::from_coarse_id)
-                .unwrap_or_else(|| EntityLabel::Other(fine_label.clone()));
+            // One sanctioned resolver, not a fourth hand-written copy of the
+            // same three steps — see `entity_type::label_for_fine`.
+            let coarse = crate::entity_type::label_for_fine(&fine_label);
             let start_byte = words[cand.start].start;
             let end_byte = words[cand.end].end;
             let surface = text.get(start_byte..end_byte).unwrap_or("").to_string();
