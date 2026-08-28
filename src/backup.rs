@@ -84,9 +84,10 @@ impl ShodhBackupEngine {
     /// path in it would escape `backup_path` at every join below. Every user-scoped path in this
     /// engine goes through here.
     fn user_backup_dir(&self, user_id: &str) -> Result<PathBuf> {
-        Ok(self
-            .backup_path
-            .join(crate::path_guard::sanitize_component(user_id, "backup user id")?))
+        Ok(self.backup_path.join(crate::path_guard::sanitize_component(
+            user_id,
+            "backup user id",
+        )?))
     }
 
     /// Create a full backup of a RocksDB database

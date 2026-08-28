@@ -29,7 +29,15 @@ mod tests {
     fn accepts_everything_the_api_layer_accepts() {
         // Parity with validate_user_id is the point — an id accepted at the API boundary must
         // never fail at the filesystem boundary. Unicode-alphanumeric ids are valid upstream.
-        for ok in ["all", "user-1", "a.b", "X_9", "someone@example.com", "名前", "müller"] {
+        for ok in [
+            "all",
+            "user-1",
+            "a.b",
+            "X_9",
+            "someone@example.com",
+            "名前",
+            "müller",
+        ] {
             assert!(sanitize_component(ok, "user id").is_ok(), "{ok}");
         }
     }
@@ -37,8 +45,19 @@ mod tests {
     #[test]
     fn rejects_everything_that_could_leave_the_directory() {
         for bad in [
-            "", ".", "..", "../x", "a/b", "a\\b", "/etc", "a\0b", ".hidden", "a..b",
-            "trailing.", "a b", &"x".repeat(129),
+            "",
+            ".",
+            "..",
+            "../x",
+            "a/b",
+            "a\\b",
+            "/etc",
+            "a\0b",
+            ".hidden",
+            "a..b",
+            "trailing.",
+            "a b",
+            &"x".repeat(129),
         ] {
             assert!(sanitize_component(bad, "user id").is_err(), "{bad:?}");
         }
