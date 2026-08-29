@@ -1021,7 +1021,13 @@ fn reachable_inject(
     // Bound the injected set to the strongest-path reachable entities.
     if best.len() > REACH_MAX_ENTITIES {
         let mut items: Vec<(Uuid, f32)> = best.into_iter().collect();
-        items.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+        // Score desc -> entity id asc. `best` is a HashMap, so `into_iter` yields a
+        // per-map random order (Rust seeds every map separately, so the order differs
+        // between two maps in the SAME process), and the truncate below cuts through
+        // equal-score plateaus. Without a total order the injected entity set differs
+        // between two repeats of one query. This is the RH-12 hazard already guarded
+        // on the memory sort downstream; this sort is one layer upstream and was missed.
+        items.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         items.truncate(REACH_MAX_ENTITIES);
         return Ok(items.into_iter().collect());
     }
@@ -1098,7 +1104,14 @@ fn traverse_beam(
         if next.is_empty() {
             break;
         }
-        next.sort_unstable_by(|a, b| b.score.total_cmp(&a.score));
+        // Score desc -> endpoint id asc. Paths are pushed in graph-iteration order and
+        // the beam cut below lands mid-plateau whenever two walks score equally, so
+        // which path survives must not depend on the order neighbours arrived in.
+        next.sort_unstable_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.endpoint.cmp(&b.endpoint))
+        });
         next.truncate(BEAM);
         for p in &next {
             let e = reached.entry(p.endpoint).or_insert(0.0);
