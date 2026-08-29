@@ -286,6 +286,36 @@ harness = false
 name = "hebbian_benchmarks"
 harness = false
 
+# Cargo's default dev profile is `debug = true` — full DWARF/PDB debug info for
+# the workspace *and* for every dependency. On this crate that is not a rounding
+# error: the debug tree measured 29.7 GB, of which 3.46 GB was seven PDB files
+# and most of the 5.97 GB of rlibs was dependency debug info that nothing here
+# reads. Dependencies are not stepped through, so they get none; the workspace
+# keeps line tables, which is everything a backtrace or a failing test needs to
+# name a file and a line. Full variable inspection under a debugger is the only
+# thing given up, and that is recovered by building with `--profile dev-debug`
+# below when it is actually wanted.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# Tests inherit `dev`, so the same reasoning applies — stated explicitly rather
+# than relied upon, because a future `[profile.dev]` edit should not silently
+# change what `cargo test` emits.
+[profile.test]
+debug = "line-tables-only"
+
+[profile.test.package."*"]
+debug = false
+
+# Opt-in full debuginfo, for the rare session that needs a real debugger:
+#   cargo build --profile dev-debug
+[profile.dev-debug]
+inherits = "dev"
+debug = true
+
 [profile.release]
 opt-level = 3
 lto = true

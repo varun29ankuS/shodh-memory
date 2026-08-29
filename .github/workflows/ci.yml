@@ -116,9 +116,28 @@ jobs:
         working-directory: front/ui
         run: npm ci
 
+      # The Rust side has `cargo audit` wired in, so a Rust advisory fails the
+      # build. front/ui had nothing equivalent, which meant JavaScript
+      # advisories were invisible: nanoid sat on a high-severity infinite-loop
+      # advisory (GHSA-2v37-7h3g-55p8) through every green PR until someone
+      # happened to run `npm install` by hand. `--audit-level=high` matches the
+      # Rust gate — moderate and low are reported without failing.
+      - name: Audit
+        working-directory: front/ui
+        run: npm audit --audit-level=high
+
       - name: Typecheck
         working-directory: front/ui
         run: npx tsc -b --noEmit
+
+      # front/ui had no test runner at all until now, so a logic regression in
+      # the API layer could only be caught by a human opening the dashboard.
+      # isHumanProfile decides which profiles a person is ever shown, including
+      # the auto-select on first load — when it was too permissive the app
+      # opened on `.mcp-shims` and every surface truthfully reported empty.
+      - name: Test
+        working-directory: front/ui
+        run: npm test
 
       - name: Build
         working-directory: front/ui

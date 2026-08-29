@@ -1206,6 +1206,29 @@ pub fn spreading_activation_retrieve_with_stats(
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
+    // TRUE GRAPH ISOLATION (`SHODH_GRAPH_PURE=1`, diagnostic, default off).
+    //
+    // `SHODH_LEG=graph` isolates the graph's CANDIDATE SET but not its SCORING.
+    // Every graph-reached candidate still gets a `cosine_similarity(query, memory)`
+    // (see the `semantic_score` below), and `fuse_hybrid_score` weights it by
+    // `semantic_weight / sum`. With `graph_weight` pinned at its 0.1 floor on any
+    // corpus whose seed entities average more than 2 edges, that makes the "graph
+    // leg" roughly 75% embedding cosine, 15% linguistic and 10% graph activation.
+    // So every graph-internal lever measured through `SHODH_LEG=graph` could move
+    // at most a tenth of the score, and the vector model was doing the ranking.
+    //
+    // `SHODH_GRAPH_PURE=1` sets the weights to (semantic 0, graph 1, linguistic 0)
+    // so the leg is ranked by graph activation ALONE. This is what "does the
+    // knowledge graph work on its own" actually requires, and it is not reachable
+    // via `SHODH_GRAPH_W_FLOOR`, which clamps at `1.0 - linguistic - 0.05`.
+    //
+    // Diagnostic only: it is not a proposed default, and the floor sweep already
+    // showed that shifting weight toward the graph costs ranking quality
+    // (ndcg 0.4577 -> 0.4481, p@1 0.3638 -> 0.3468 at graph_w ~0.8).
+    let graph_pure = std::env::var("SHODH_GRAPH_PURE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     // Determine weights based on density
     let (semantic_weight, graph_weight, linguistic_weight) = if let Some(density) = graph_density {
         stats.mode = "associative".to_string();
@@ -1219,6 +1242,13 @@ pub fn spreading_activation_retrieve_with_stats(
             HYBRID_GRAPH_WEIGHT,
             HYBRID_LINGUISTIC_WEIGHT,
         )
+    };
+    // Applied AFTER the density branch so it overrides both paths.
+    let (semantic_weight, graph_weight, linguistic_weight) = if graph_pure {
+        stats.mode = "graph_pure".to_string();
+        (0.0, 1.0, 0.0)
+    } else {
+        (semantic_weight, graph_weight, linguistic_weight)
     };
 
     stats.semantic_weight = semantic_weight;
@@ -1957,7 +1987,10 @@ pub fn spreading_activation_retrieve_with_stats(
 
     // Step 6.5: Lateral inhibition — high-scoring memories suppress similar competitors
     // Mimics cortical winner-take-all dynamics (Rumelhart & Zipser 1985)
-    if scored_memories.len() > 1 {
+    // Ablatable as the `lateral_inhibition` family (see `memory::ablation`).
+    // This ran unconditionally with no gate anywhere in the repo, so its effect
+    // had never been measured in either direction.
+    if scored_memories.len() > 1 && crate::memory::ablation::is_enabled("lateral_inhibition") {
         let penalties = calculate_lateral_inhibition(&scored_memories);
         for (i, penalty) in penalties.iter().enumerate() {
             scored_memories[i].final_score -= penalty;
@@ -2001,7 +2034,15 @@ pub fn spreading_activation_retrieve_with_stats(
     // coactivation writes in mod.rs do — the traversed-edge STATS are still
     // collected above (`stats.traversed_edges`) so diagnostics are unaffected,
     // only the persistent strength MUTATION is skipped.
-    if !stats.traversed_edges.is_empty() && !recall_readonly() {
+    // Two independent suppressors, deliberately separate: `recall_readonly()` is
+    // measurement integrity (no recall-path writes during an eval), while the
+    // `graph_potentiation` family ablates THIS mechanism alone. Keeping them
+    // apart is what allows the potentiation write to be measured against a live
+    // run rather than only against a frozen one.
+    if !stats.traversed_edges.is_empty()
+        && !recall_readonly()
+        && crate::memory::ablation::is_enabled("graph_potentiation")
+    {
         if let Err(e) = graph.batch_strengthen_synapses(&stats.traversed_edges) {
             tracing::debug!("Spreading activation edge strengthening failed: {}", e);
         }

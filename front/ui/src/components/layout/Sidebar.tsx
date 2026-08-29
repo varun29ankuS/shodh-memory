@@ -1,4 +1,3 @@
-import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink } from "react-router-dom";
 import {
   Search,
@@ -6,6 +5,7 @@ import {
   ListChecks,
   ChevronDown,
   MessageSquare,
+  Newspaper,
   KeyRound,
   Globe,
   Share2,
@@ -15,38 +15,6 @@ import { isHumanProfile, type Reachability } from "@/lib/api";
 import { useSession } from "@/stores/session";
 import shodhMark from "@/assets/shodh-mark.png";
 
-/**
- * Primary navigation — an icon rail that expands on hover or focus.
- *
- * Names are what the thing is, not what the subsystem is called:
- *   Recall     — the search surface (was "Live")
- *   Anomalies  — deviations from this user's own baseline (was unqualified)
- *   Tasks      — the todo list (was "Work", which named nothing)
- *
- * The rail is Gridline's structure with two deliberate departures. Its icons
- * are sized for a far sparser screen than this one, so they are smaller here.
- * And Gridline leaves the rail icon-only, hanging labels off tooltips — seven
- * unlabelled glyphs is a memory game, and a tooltip only pays out after you
- * have already guessed which one to point at. Expanding the whole column
- * instead shows every label at once, which is the question a person actually
- * has ("which of these is the one I want?").
- *
- * Three things this has to get right, none of them optional — all three
- * verified in a browser, not assumed:
- *
- *  - It expands as an OVERLAY. The stage behind it holds a graph; reflowing a
- *    force layout because a pointer crossed the edge of the screen is
- *    disorienting, and it re-lays-out the very thing being pointed at.
- *  - Focus expands it exactly as hover does, and the labels are in the DOM at
- *    all times — clipped, never absent — so a screen reader is never handed a
- *    column of bare icons.
- *  - Leaving is delayed. Pointers travel diagonally toward content and clip
- *    the rail's corner on the way out; closing on the first mouseleave makes
- *    it flicker.
- *
- * Reduced motion is handled globally in index.css, which collapses every
- * transition to 0.01ms — this component needs no separate branch for it.
- */
 
 /**
  * The destinations, and the one line each of them is.
@@ -83,6 +51,13 @@ import shodhMark from "@/assets/shodh-mark.png";
  * destination two ways.
  */
 export const DESTINATIONS = [
+  {
+    id: "briefing",
+    path: "/briefing",
+    label: "Briefing",
+    caption: "What changed, and what is worth a look",
+    icon: Newspaper,
+  },
   {
     id: "chat",
     path: "/chat",
@@ -136,7 +111,6 @@ export const DESTINATIONS = [
 
 export type DestinationId = (typeof DESTINATIONS)[number]["id"];
 
-const CLOSE_DELAY_MS = 180;
 
 /**
  * Label text that is clipped rather than removed when the rail is collapsed.
@@ -225,53 +199,24 @@ function ProfileSwitcher({ reach, open }: { reach: Reachability; open: boolean }
 }
 
 export function Sidebar({ reach }: { reach: Reachability }) {
-  const [open, setOpen] = useState(false);
-  const closeTimer = useRef<number | undefined>(undefined);
-
-  const cancelClose = useCallback(() => {
-    if (closeTimer.current !== undefined) {
-      window.clearTimeout(closeTimer.current);
-      closeTimer.current = undefined;
-    }
-  }, []);
-
-  const openRail = useCallback(() => {
-    cancelClose();
-    setOpen(true);
-  }, [cancelClose]);
-
-  const closeRail = useCallback(() => {
-    cancelClose();
-    closeTimer.current = window.setTimeout(() => setOpen(false), CLOSE_DELAY_MS);
-  }, [cancelClose]);
-
-  useEffect(() => cancelClose, [cancelClose]);
+  // The rail used to be icon-only and expand on hover. DIRECTION.md's reason
+  // for the expansion still stands -- "seven unlabelled glyphs is a memory
+  // game" -- and standing it open satisfies that requirement more completely
+  // than hovering did: the labels are simply always readable, with no motion,
+  // no dwell delay, nothing to discover, and no state to get stuck open or shut.
+  //
+  // The overlay shadow goes with it. A shadow says "this is floating over your
+  // work and will go away"; a rail that never goes away should sit in the page,
+  // and the content is offset by its full width (RAIL_OFFSET) rather than
+  // sliding under it.
+  const open = true;
 
   return (
     <aside
       aria-label="Primary navigation"
-      // React's onFocus bubbles, so one handler on the container covers every
-      // control inside without wiring each one.
-      onMouseEnter={openRail}
-      onMouseLeave={closeRail}
-      onFocus={openRail}
-      // A blur that lands on another control inside the rail is not a leave.
-      onBlur={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) closeRail();
-      }}
-      // Escape closes it for keyboard users who expanded it by tabbing in and
-      // want it out of the way without leaving the rail.
-      onKeyDown={(e) => {
-        if (e.key === "Escape") {
-          cancelClose();
-          setOpen(false);
-        }
-      }}
       className={cn(
         "border-sidebar-border bg-sidebar text-sidebar-foreground",
-        "absolute inset-y-0 left-0 z-30 flex flex-col overflow-hidden border-r",
-        "transition-[width] duration-200 ease-out",
-        open ? "w-56 shadow-2xl shadow-black/40" : "w-14",
+        "absolute inset-y-0 left-0 z-30 flex w-56 flex-col overflow-hidden border-r",
       )}
     >
       <div className="border-sidebar-border flex h-12 shrink-0 items-center gap-3 border-b px-[0.9rem]">

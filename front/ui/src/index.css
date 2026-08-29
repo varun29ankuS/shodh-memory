@@ -461,3 +461,90 @@
     transform: scale(1.6);
   }
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   PAPER — the second ground.
+
+   The block above says the product is dark-only. That was true until the
+   briefing, which is a *reading* surface: a page an analyst opens once a
+   morning and reads, rather than a console they work inside all day. Dark is
+   right for the console and wrong for the page, and the briefing mockup was
+   recognised on sight by its paper ground — so the ground is part of what that
+   view IS, not a preference on top of it.
+
+   Two rules kept this from becoming a rewrite:
+
+   1. The dark values stay in `:root`. Unset means dark, exactly as before, so
+      nothing that renders today changes until someone asks for paper.
+   2. Paper remaps the SAME shadcn semantic names. The 148 semantic utilities
+      in the ported chrome therefore follow the ground for free, and there is
+      still one place to change a colour.
+
+   The `--paper-*` namespace is separate on purpose: the dot maps read those
+   three tokens directly from the computed style at draw time, and they must
+   resolve to the *current* ground whichever theme is active. Semantic names
+   would have worked; explicit ones say what the canvas is asking for.
+
+   Accent discipline is unchanged, and survives the swap: one accent, hue-shifted
+   rather than luminance-shifted, so it holds as small text on both grounds.
+   Alarm stays separated from accent by HUE (crimson vs orange-red) — on paper
+   a luminance-separated alarm disappears.
+   ───────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* Night ground, for the canvas renderer. Mirrors the values above. */
+  --paper-bg: #0e0d0a;
+  --paper-ink-4: #635f50;
+  --paper-accent: #f4622e;
+}
+
+[data-theme="paper"] {
+  --paper-bg: #e9e6dc;
+  --paper-ink-4: #9a9484;
+  --paper-accent: #c0391a;
+
+  --background: #e9e6dc;
+  --foreground: #16150f;
+
+  --card: #f3f1e9;
+  --card-foreground: #16150f;
+  --popover: #f3f1e9;
+  --popover-foreground: #16150f;
+
+  --primary: #c0391a;
+  --primary-foreground: #f3f1e9;
+
+  --secondary: #ded9cb;
+  --secondary-foreground: #16150f;
+
+  --muted: #ded9cb;
+  --muted-foreground: #6d6959;
+
+  --accent: #ded9cb;
+  --accent-foreground: #16150f;
+
+  --destructive: #9d1236;
+  --destructive-foreground: #f3f1e9;
+  --warn: #8a6320;
+
+  --border: #c3bcaa;
+  --input: #c3bcaa;
+  --ring: #c0391a;
+
+  /* Chart hues re-picked for a light ground: the dark set is tuned for
+     luminance contrast against #08090a and washes out on paper. */
+  --chart-1: #5b4bc4;
+  --chart-2: #1f6fb8;
+  --chart-3: #2f7d52;
+  --chart-4: #b23a6b;
+  --chart-5: #1f7d76;
+
+  --sidebar: #e2ded2;
+  --sidebar-foreground: #16150f;
+  --sidebar-primary: #c0391a;
+  --sidebar-primary-foreground: #f3f1e9;
+  --sidebar-accent: #ded9cb;
+  --sidebar-accent-foreground: #16150f;
+  --sidebar-border: #c3bcaa;
+  --sidebar-ring: #c0391a;
+}

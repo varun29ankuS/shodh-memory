@@ -42,6 +42,7 @@ Usage:
 import argparse
 import json
 import os
+import sys
 import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -91,6 +92,18 @@ class ShodhMemoryClient:
 # LLM Provider Abstraction
 # ============================================================================
 
+# Completion budget for the judge's answer.
+#
+# This was hardcoded at 10 for every provider. A reasoning model spends its
+# first tokens thinking, so at 10 it returns `content: None` with
+# `finish_reason: "length"` and never emits the digit — measured against
+# `stealth/ox-alpha`, which answers correctly at 64 (29 completion tokens,
+# 19 of them internal) and returns nothing at 10. Ten tokens silently
+# disqualifies an entire class of judge. Override with
+# SHODH_JUDGE_MAX_TOKENS.
+JUDGE_MAX_TOKENS = int(os.environ.get("SHODH_JUDGE_MAX_TOKENS", "64"))
+
+
 class LLMProvider(ABC):
     """Abstract base class for LLM providers."""
 
@@ -112,10 +125,12 @@ class OpenAIProvider(LLMProvider):
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=10,
+            max_tokens=JUDGE_MAX_TOKENS,
             temperature=0
         )
-        return response.choices[0].message.content.strip()
+        # `content` is None when the budget was spent on internal reasoning
+        # tokens; return "" so the caller reports an abstention, not a crash.
+        return (response.choices[0].message.content or "").strip()
 
 
 class OpenAICompatibleProvider(LLMProvider):
@@ -133,10 +148,12 @@ class OpenAICompatibleProvider(LLMProvider):
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=10,
+            max_tokens=JUDGE_MAX_TOKENS,
             temperature=0
         )
-        return response.choices[0].message.content.strip()
+        # `content` is None when the budget was spent on internal reasoning
+        # tokens; return "" so the caller reports an abstention, not a crash.
+        return (response.choices[0].message.content or "").strip()
 
 
 class AnthropicProvider(LLMProvider):
@@ -150,10 +167,10 @@ class AnthropicProvider(LLMProvider):
     def complete(self, prompt: str) -> str:
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=10,
+            max_tokens=JUDGE_MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}]
         )
-        return response.content[0].text.strip()
+        return (response.content[0].text or "").strip() if response.content else ""
 
 
 class OllamaProvider(LLMProvider):
@@ -174,9 +191,9 @@ class OllamaProvider(LLMProvider):
         response = ollama.chat(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0, "num_predict": 10}
+            options={"temperature": 0, "num_predict": JUDGE_MAX_TOKENS}
         )
-        return response["message"]["content"].strip()
+        return (response["message"]["content"] or "").strip()
 
 
 class BasetenProvider(LLMProvider):
@@ -200,7 +217,7 @@ class BasetenProvider(LLMProvider):
             headers={"Authorization": f"Api-Key {self.api_key}"},
             json={
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 10,
+                "max_tokens": JUDGE_MAX_TOKENS,
                 "temperature": 0
             }
         )
@@ -243,8 +260,11 @@ class EvalResult:
     question_id: str
     question_type: str
     correct: bool
-    predicted_idx: int
+    predicted_idx: Optional[int]
     correct_idx: int
+    # False when the judge returned no usable answer (API error / unparseable).
+    # Accuracy is computed over judged items only; see `select_answer_with_llm`.
+    judged: bool
     latency_store_ms: float
     latency_recall_ms: float
     num_memories_stored: int
@@ -360,8 +380,18 @@ def select_answer_with_llm(
     question: str,
     choices: list[str],
     context: str
-) -> int:
-    """Use LLM to select the best answer given retrieved context."""
+) -> Optional[int]:
+    """Use LLM to select the best answer given retrieved context.
+
+    Returns the chosen option index, or ``None`` when no judgement was
+    obtained — the API call failed, or the response contained no parseable
+    option digit. `None` MUST NOT be coerced to an index by callers: a
+    defaulted answer is indistinguishable from a real prediction, so every
+    arm scores the rate at which the gold label happens to sit at that
+    index and every arm scores it identically. That reads as "no layer
+    changes the answer", which is the hypothesis under test. Abstain
+    instead, and let the caller report the judged count alongside accuracy.
+    """
 
     choices_text = "\n".join([f"{i}. {choice}" for i, choice in enumerate(choices)])
 
@@ -385,17 +415,26 @@ Your answer (single digit 0-9):"""
 
     try:
         answer_text = provider.complete(prompt)
+        if not answer_text:
+            # Reasoning models exhaust the completion budget on internal
+            # tokens and return an empty body with finish_reason="length".
+            print(
+                "LLM Empty: no completion body — raise SHODH_JUDGE_MAX_TOKENS "
+                f"(currently {JUDGE_MAX_TOKENS})"
+            )
+            return None
         # Extract digit from response
         for char in answer_text:
             if char.isdigit():
                 idx = int(char)
                 if 0 <= idx <= 9:
                     return idx
-        return 0  # Default to first option if parsing fails
+        print(f"LLM Unparseable: no option digit in {answer_text!r:.200}")
+        return None
 
     except Exception as e:
         print(f"LLM Error: {e}")
-        return 0
+        return None
 
 
 def evaluate_single_item(
@@ -426,7 +465,8 @@ def evaluate_single_item(
     )
 
     correct_idx = item["correct_choice_index"]
-    is_correct = predicted_idx == correct_idx
+    judged = predicted_idx is not None
+    is_correct = judged and predicted_idx == correct_idx
 
     return EvalResult(
         question_id=item["question_id"],
@@ -434,13 +474,16 @@ def evaluate_single_item(
         correct=is_correct,
         predicted_idx=predicted_idx,
         correct_idx=correct_idx,
+        judged=judged,
         latency_store_ms=store_latency,
         latency_recall_ms=recall_latency,
         num_memories_stored=num_stored,
         question_text=item["question"],
         retrieved_context=context,
         correct_answer=item["choices"][correct_idx],
-        predicted_answer=item["choices"][predicted_idx],
+        predicted_answer=(
+            item["choices"][predicted_idx] if judged else "<no judgement>"
+        ),
         all_choices=item["choices"]
     )
 
@@ -518,15 +561,36 @@ def run_evaluation(
     print("RESULTS")
     print("=" * 60)
 
-    # Overall accuracy
-    total_correct = sum(1 for r in results if r.correct)
-    overall_accuracy = total_correct / len(results) * 100
+    # Overall accuracy — over JUDGED items only. An item the judge never
+    # answered is an abstention, not a wrong answer: scoring it as wrong
+    # silently converts an outage into a quality number.
+    judged_results = [r for r in results if r.judged]
+    unjudged = len(results) - len(judged_results)
+    if not judged_results:
+        print(
+            f"\nFATAL: the judge returned no usable answer for any of "
+            f"{len(results)} items. No accuracy number exists for this run — "
+            f"check the LLM provider (credits, key, rate limits) and re-run."
+        )
+        sys.exit(2)
+    if unjudged:
+        print(
+            f"\nWARNING: {unjudged}/{len(results)} items unjudged "
+            f"({unjudged / len(results) * 100:.1f}%) — accuracy below is over "
+            f"the {len(judged_results)} judged items only."
+        )
 
-    print(f"\nOverall Accuracy: {overall_accuracy:.2f}% ({total_correct}/{len(results)})")
+    total_correct = sum(1 for r in judged_results if r.correct)
+    overall_accuracy = total_correct / len(judged_results) * 100
+
+    print(
+        f"\nOverall Accuracy: {overall_accuracy:.2f}% "
+        f"({total_correct}/{len(judged_results)} judged, {unjudged} unjudged)"
+    )
 
     # Per-category accuracy
     by_type = defaultdict(list)
-    for r in results:
+    for r in judged_results:
         by_type[r.question_type].append(r.correct)
 
     print("\nAccuracy by Question Type:")
@@ -550,6 +614,8 @@ def run_evaluation(
         "provider": provider_name,
         "model": model,
         "total_items": len(results),
+        "judged_items": len(judged_results),
+        "unjudged_items": unjudged,
         "overall_accuracy": overall_accuracy,
         "accuracy_by_type": {
             qtype: sum(correct_list) / len(correct_list) * 100
@@ -562,6 +628,7 @@ def run_evaluation(
                 "question_id": r.question_id,
                 "question_type": r.question_type,
                 "correct": r.correct,
+                "judged": r.judged,
                 "predicted_idx": r.predicted_idx,
                 "correct_idx": r.correct_idx,
                 "latency_store_ms": r.latency_store_ms,
