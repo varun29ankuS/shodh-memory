@@ -4547,7 +4547,17 @@ impl GraphMemory {
         // Sort by pruning priority: LTP-protected edges last (survive pruning),
         // then by effective strength descending (strongest survive).
         //
-        // CROSS-INGEST DETERMINISM — the same defect Phase 3.1 of
+        // CROSS-INGEST DETERMINISM. Latent, not observed: this was fixed while
+        // hunting the `conv-42_q19` repeat divergence and it did NOT fix it.
+        // Measured on the locomo gate before and after, the metrics are
+        // bit-identical (ndcg@10 0.4114 both runs) and the divergence survives,
+        // so no entity in that corpus exceeds MAX_ENTITY_DEGREE and this branch
+        // never executes there. It is kept because the defect is real on any
+        // corpus with hubs — which the defence and GDELT graphs have — not
+        // because it was shown to matter here. The remaining divergence is
+        // elsewhere and is present on main independently of this branch.
+        //
+        // It is the same defect Phase 3.1 of
         // `get_entity_relationships_limited` fixes on the READ path, which this
         // write path never got. `get_entity_relationships` returns edges in
         // prefix-scan order, i.e. edge-UUID order, and edge UUIDs are
