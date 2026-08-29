@@ -8,7 +8,6 @@ use chrono::{DateTime, Utc};
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, DB};
 use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4546,30 +4545,67 @@ impl GraphMemory {
         }
 
         // Sort by pruning priority: LTP-protected edges last (survive pruning),
-        // then by effective strength descending (strongest survive)
-        let mut scored: Vec<(Uuid, f32, bool)> = all_edges
+        // then by effective strength descending (strongest survive).
+        //
+        // CROSS-INGEST DETERMINISM — the same defect Phase 3.1 of
+        // `get_entity_relationships_limited` fixes on the READ path, which this
+        // write path never got. `get_entity_relationships` returns edges in
+        // prefix-scan order, i.e. edge-UUID order, and edge UUIDs are
+        // `Uuid::new_v4()` — random per ingest. A stable sort on (protection,
+        // strength) therefore leaves equal-priority edges in that random order,
+        // and `take(prune_count)` below does not merely reorder them: it
+        // DELETES them. Fresh graphs carry large exact-strength plateaus (every
+        // co-occurrence edge starts at its tier's initial weight) and hub
+        // entities carry far more edges than MAX_ENTITY_DEGREE, so two ingests
+        // of the same corpus permanently kept different edge sets. Not a
+        // different order over one graph — a different graph.
+        //
+        // Ordered by a key that is a pure function of graph CONTENT: (peer
+        // entity name, relation type, edge uuid). Peer names are repeat-stable
+        // via deterministic entity resolution, and `add_relationship` dedups by
+        // (from, to, type), so the uuid only ever separates content-identical
+        // edges, where the choice cannot matter.
+        let peer_of = |e: &RelationshipEdge| -> Uuid {
+            if e.from_entity == *entity_uuid {
+                e.to_entity
+            } else {
+                e.from_entity
+            }
+        };
+        let mut peer_names: HashMap<Uuid, String> = HashMap::new();
+        for e in &all_edges {
+            let peer = peer_of(e);
+            peer_names.entry(peer).or_insert_with(|| {
+                self.get_entity(&peer)
+                    .ok()
+                    .flatten()
+                    .map(|ent| ent.name)
+                    .unwrap_or_default()
+            });
+        }
+
+        // `effective_strength()` reads Utc::now(), so it is snapshotted once per
+        // edge here rather than called from inside the comparator.
+        let mut scored: Vec<(&RelationshipEdge, f32, bool)> = all_edges
             .iter()
-            .map(|e| {
-                let is_protected = e.is_potentiated();
-                (e.uuid, e.effective_strength(), is_protected)
-            })
+            .map(|e| (e, e.effective_strength(), e.is_potentiated()))
             .collect();
 
         // Sort: unprotected+weak first (pruning candidates), protected+strong last (survivors)
         scored.sort_by(|a, b| {
-            // Protected edges sort after unprotected
-            match a.2.cmp(&b.2) {
-                CmpOrdering::Equal => {
-                    // Within same protection class, weaker edges first (prune candidates)
-                    a.1.total_cmp(&b.1)
-                }
-                other => other,
-            }
+            // Protected edges sort after unprotected; then weaker first.
+            a.2.cmp(&b.2)
+                .then_with(|| a.1.total_cmp(&b.1))
+                .then_with(|| peer_names[&peer_of(a.0)].cmp(&peer_names[&peer_of(b.0)]))
+                .then_with(|| {
+                    format!("{:?}", a.0.relation_type).cmp(&format!("{:?}", b.0.relation_type))
+                })
+                .then_with(|| a.0.uuid.cmp(&b.0.uuid))
         });
 
         // Prune excess: first N edges in sorted order are weakest/unprotected
         let prune_count = scored.len() - MAX_ENTITY_DEGREE;
-        let to_prune: Vec<Uuid> = scored.iter().take(prune_count).map(|s| s.0).collect();
+        let to_prune: Vec<Uuid> = scored.iter().take(prune_count).map(|s| s.0.uuid).collect();
 
         for edge_uuid in &to_prune {
             if let Err(e) = self.delete_relationship(edge_uuid) {
