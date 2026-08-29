@@ -204,9 +204,15 @@ def evaluate_item(
                 choices=item["choices"],
                 context=context,
             )
-            per.judged = True
-            per.predicted_idx = predicted
-            per.correct = predicted == item["correct_choice_index"]
+            # `None` means no judgement was obtained (API error / unparseable
+            # response). Leave `judged` False so this arm is excluded from the
+            # accuracy denominator rather than scored as a wrong answer — a
+            # defaulted index makes every arm score the gold-label
+            # distribution, identically, which reads as "no layer matters".
+            if predicted is not None:
+                per.judged = True
+                per.predicted_idx = predicted
+                per.correct = predicted == item["correct_choice_index"]
         result.layers[layer] = per
 
     return result
@@ -299,9 +305,10 @@ def print_summary(agg: dict) -> None:
     )
     print(
         f"{'layer':<14} {'latency p50':>12} {'p95':>8} {'avg':>8}"
-        f"   {'jaccard@full':>12}   {'accuracy':>10}"
+        f"   {'jaccard@full':>12}   {'judged':>8}   {'accuracy':>10}"
     )
-    print("-" * 72)
+    print("-" * 84)
+    total = agg["total_items"]
     for layer in LAYER_MODES:
         s = agg["layers"][layer]
         acc = "—" if s["accuracy_pct"] is None else f"{s['accuracy_pct']:>8.2f}%"
@@ -309,8 +316,16 @@ def print_summary(agg: dict) -> None:
             f"{layer:<14} {s['latency_ms_p50']:>10.1f}ms "
             f"{s['latency_ms_p95']:>6.1f}ms "
             f"{s['latency_ms_avg']:>6.1f}ms"
-            f"     {s['jaccard_vs_full_avg']:>9.3f}     {acc}"
+            f"     {s['jaccard_vs_full_avg']:>9.3f}"
+            f"   {s['judged_count']:>4}/{total:<3}   {acc}"
         )
+    # The first arm evaluated pays the embedding-model warmup, so its latency
+    # is a startup cost, not a property of that layer. Say so rather than
+    # letting the column be read as a per-layer comparison.
+    print(
+        f"\nNOTE: `{LAYER_MODES[0]}` runs first and absorbs model/index warmup; "
+        "its latency is not comparable to the arms after it."
+    )
 
     print("\nAccuracy by question_type x layer:")
     print("-" * 72)
@@ -453,6 +468,19 @@ def main() -> int:
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2)
     print(f"Detailed results saved to: {args.output}")
+
+    # A run where the judge never answered has no accuracy result, only a
+    # latency and overlap result. Exit non-zero so an automated caller cannot
+    # mistake a formatted table for a measurement.
+    expected = LAYER_MODES if args.judge_all_layers else ("full",)
+    starved = [l for l in expected if agg["layers"][l]["judged_count"] == 0]
+    if starved:
+        print(
+            f"\nFATAL: no judgements obtained for {', '.join(starved)} across "
+            f"{agg['total_items']} items. The accuracy column is empty, not zero "
+            "— check the LLM provider (credits, key, rate limits) and re-run."
+        )
+        return 2
     return 0
 
 
