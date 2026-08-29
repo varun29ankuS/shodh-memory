@@ -6638,7 +6638,7 @@ impl GraphMemory {
         }
 
         // Sort by strength descending and limit
-        associations.sort_by(|a, b| b.1.total_cmp(&a.1));
+        associations.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         associations.truncate(max_results);
 
         Ok(associations)
@@ -6930,7 +6930,7 @@ impl GraphMemory {
             .max(1)
             .min(eligible.len());
 
-        eligible.sort_by(|a, b| b.1.total_cmp(&a.1));
+        eligible.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         let rescued: std::collections::HashSet<usize> =
             eligible.iter().take(budget).map(|(i, _)| *i).collect();
 
