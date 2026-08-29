@@ -133,7 +133,7 @@ tokio-util = { version = "0.7", features = ["rt"] }  # TaskTracker for graceful 
 futures = "0.3"  # Stream utilities for SSE
 axum = { version = "0.8", features = ["json", "ws"] }
 tower = { version = "0.5", features = ["limit", "buffer", "load-shed"] }
-tower-http = { version = "0.6", features = ["cors", "fs", "timeout"] }
+tower-http = { version = "0.7", features = ["cors", "fs", "timeout"] }
 tower_governor = { version = "0.8", features = ["axum"] }
 
 # Serialization
