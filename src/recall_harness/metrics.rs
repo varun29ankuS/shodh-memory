@@ -37,6 +37,16 @@ pub struct Metrics {
     pub mrr: f64,
     pub p_at_1: f64,
     pub map: f64,
+    /// Hit-rate at `k`: 1.0 if ANY relevant item is in the top-`k`, else 0.0.
+    ///
+    /// The lenient counterpart to [`Self::recall_at_k`], which is the FRACTION
+    /// of a case's gold that was found. With 3.13 gold per multi_hop case,
+    /// finding two of three scores 0.67 there and 1.00 here. Published
+    /// memory/RAG "recall@k" figures are usually this form, so quoting
+    /// `recall_at_k` against them understates us and quoting `hit_at_k` as if
+    /// it were full recall overstates us. Both are carried so that any
+    /// comparison has to say which one it means.
+    pub hit_at_k: f64,
 }
 
 impl Metrics {
@@ -56,6 +66,7 @@ impl Metrics {
             mrr: mrr(retrieved, &relevant),
             p_at_1: p_at_1(retrieved, &relevant),
             map: map(retrieved, &relevant),
+            hit_at_k: hit_at_k(retrieved, &relevant, k),
         }
     }
 }
@@ -88,6 +99,24 @@ pub fn recall_at_k(retrieved: &[Uuid], relevant: &HashSet<Uuid>, k: usize) -> f6
         .filter(|id| relevant.contains(id))
         .count();
     hits as f64 / relevant.len() as f64
+}
+
+/// Hit-rate at cutoff `k`: `1.0` if ANY relevant item appears in the top-`k`.
+///
+/// The lenient counterpart to [`recall_at_k`]. A case with three gold items of
+/// which one is retrieved scores `1.0` here and `0.33` there. Both are honest;
+/// they answer different questions, and most published "recall@k" numbers in
+/// this space are this one.
+pub fn hit_at_k(retrieved: &[Uuid], relevant: &HashSet<Uuid>, k: usize) -> f64 {
+    if k == 0 || retrieved.is_empty() || relevant.is_empty() {
+        return 0.0;
+    }
+    let cap = retrieved.len().min(k);
+    if retrieved[..cap].iter().any(|id| relevant.contains(id)) {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 /// Mean Reciprocal Rank: `1 / rank` of the first relevant item, or `0.0` if
@@ -427,6 +456,64 @@ mod tests {
     // ---- Metrics::compute aggregator ---------------------------------------
 
     #[test]
+    #[test]
+    fn hit_at_k_is_lenient_where_recall_at_k_is_fractional() {
+        // The exact case that makes our headline number look low against
+        // published figures: three gold, one retrieved.
+        let id = ids();
+        let rel: HashSet<Uuid> = [id[0], id[1], id[2]].into_iter().collect();
+        let retrieved = vec![id[0], id[3], id[4]];
+        approx(recall_at_k(&retrieved, &rel, 3), 1.0 / 3.0);
+        approx(hit_at_k(&retrieved, &rel, 3), 1.0);
+    }
+
+    #[test]
+    fn hit_at_k_is_zero_when_nothing_relevant_is_in_the_window() {
+        let id = ids();
+        let rel: HashSet<Uuid> = [id[0]].into_iter().collect();
+        // Gold sits at rank 3, outside a k=2 window.
+        let retrieved = vec![id[3], id[4], id[0]];
+        approx(hit_at_k(&retrieved, &rel, 2), 0.0);
+        approx(hit_at_k(&retrieved, &rel, 3), 1.0);
+    }
+
+    #[test]
+    fn hit_at_k_equals_recall_at_k_when_there_is_exactly_one_gold() {
+        // single_hop averages 1.06 gold/case, so the two metrics nearly coincide
+        // there and diverge on multi_hop (3.13). That is why the headline gap is
+        // category-dependent rather than a constant offset.
+        let id = ids();
+        let rel: HashSet<Uuid> = [id[1]].into_iter().collect();
+        for retrieved in [vec![id[1], id[3]], vec![id[3], id[1]], vec![id[3], id[4]]] {
+            approx(
+                hit_at_k(&retrieved, &rel, 2),
+                recall_at_k(&retrieved, &rel, 2),
+            );
+        }
+    }
+
+    #[test]
+    fn hit_at_k_never_exceeds_one_or_falls_below_recall() {
+        // Ordering property: hit >= recall always, since hit is 1 whenever any
+        // gold is inside the window and recall is a fraction of the same set.
+        let id = ids();
+        let rel: HashSet<Uuid> = [id[0], id[1]].into_iter().collect();
+        for k in 0..6usize {
+            for retrieved in [
+                vec![],
+                vec![id[0]],
+                vec![id[3], id[0], id[1]],
+                vec![id[0], id[1]],
+            ] {
+                let h = hit_at_k(&retrieved, &rel, k);
+                let r = recall_at_k(&retrieved, &rel, k);
+                assert!((0.0..=1.0).contains(&h), "hit out of range at k={k}");
+                assert!(h >= r - 1e-12, "hit {h} < recall {r} at k={k}");
+            }
+        }
+    }
+
+    #[test]
     fn compute_returns_all_six_consistent_with_individual_fns() {
         let id = ids();
         let retrieved = vec![id[3], id[0], id[1]]; // miss, hit, hit
@@ -455,6 +542,7 @@ mod tests {
                 mrr: 0.0,
                 p_at_1: 0.0,
                 map: 0.0,
+                hit_at_k: 0.0,
             }
         );
     }

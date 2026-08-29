@@ -3691,6 +3691,7 @@ impl MultiUserMemoryManager {
                 if rep_i.as_ref().is_some_and(|r| r.degree > hub_max)
                     || rep_j.as_ref().is_some_and(|r| r.degree > hub_max)
                 {
+                    crate::metrics::HUB_SATURATION_EDGE_SKIP_TOTAL.inc();
                     tracing::debug!(
                         "Skipping edge '{}'-'{}': hub saturated (degrees: {:?}, {:?})",
                         entity_uuids[i].0,
