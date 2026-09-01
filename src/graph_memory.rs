@@ -2493,6 +2493,23 @@ pub fn infer_relation_type_for_pair(from: &EntityLabel, to: &EntityLabel) -> Rel
         (Organization, Gpe) | (Organization, Location) => LocatedIn,
         (Event, Gpe) | (Event, Location) | (Event, Facility) => LocatedIn,
 
+        // Anything else co-mentioned with a place is sited at it. This IS a
+        // wildcard and it is deliberate: a narrower version measured WORSE.
+        //
+        // Removing the original `(_, Location) | (Location, _) => LocatedIn` in
+        // favour of specific pairs cost more coverage than the specific pairs
+        // added — typed fraction 29.21% -> 23.71%, isolated-in-typed 48.2% ->
+        // 52.5% (runs 33516784385 vs 33532140842). `Location` is 18 entities
+        // and `Gpe` 33, and every pair touching them had been typed by that arm.
+        //
+        // So keep the reach and fix what was actually broken: the original sent
+        // BOTH directions to LocatedIn, so a place in the FROM position claimed
+        // to be inside the other endpoint — "the park is located in Andrew".
+        // Directed, the same wildcard says "the park contains Andrew", which is
+        // the right shape of claim and what the arm was reaching for.
+        (_, Gpe) | (_, Location) => LocatedIn,
+        (Gpe, _) | (Location, _) => Contains,
+
         // AUTHORSHIP. A creative work or product is made by an agent, and the
         // arrow runs from the artefact to its maker.
         (Work, Person) | (Work, Organization) => CreatedBy,
@@ -14279,16 +14296,17 @@ mod tests {
         assert_eq!(infer_relation_type_for_pair(&Vehicle, &Person), R::OwnedBy);
         assert_eq!(infer_relation_type_for_pair(&Person, &Weapon), R::Uses);
 
-        // AND THE GUARD THAT MATTERS: no wildcard containment. A person merely
-        // mentioned near a place must NOT become "the place contains the
-        // person" — a visibly wrong type is worse than a visibly absent one,
-        // because it is indistinguishable from a confident correct answer.
-        assert_eq!(
+        // Containment IS a wildcard over places, and the direction still has to
+        // hold at the edges of it. A narrower rule set measured worse (typed
+        // fraction 29.21% -> 23.71%), so the coverage is deliberate; what must
+        // never come back is the undirected form.
+        assert_eq!(infer_relation_type_for_pair(&Gpe, &Person), R::Contains);
+        assert_eq!(infer_relation_type_for_pair(&Person, &Gpe), R::LocatedIn);
+        assert_ne!(
             infer_relation_type_for_pair(&Gpe, &Person),
-            R::CoOccurs,
-            "wildcard containment would assert a place contains any co-mentioned person"
+            infer_relation_type_for_pair(&Person, &Gpe),
+            "a place and a person must not relate the same way in both directions"
         );
-        assert_eq!(infer_relation_type_for_pair(&Gpe, &Event), R::CoOccurs);
     }
 
     #[test]
