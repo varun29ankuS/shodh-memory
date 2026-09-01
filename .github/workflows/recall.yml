@@ -39,6 +39,17 @@ on:
         description: 'Ingest+query repeats (use 1 for a fast diagnosis run)'
         required: false
         default: '5'
+      suite:
+        description: >-
+          Which suite. `locomo-gate` is the 100-case PR gate. `locomo` is the
+          1,531-case held-out set - use it to settle a question the gate cannot
+          resolve, since whole-case metrics move in steps of 1/n and the gate's
+          step is 0.01 overall and 0.04 on multi_hop, both larger than a 2%
+          allowance. Slow; diagnostic, not a gate.
+        required: false
+        default: 'locomo-gate'
+        type: choice
+        options: ['locomo-gate', 'locomo']
 
 permissions:
   contents: read
@@ -55,6 +66,9 @@ env:
   # per-stage diagnosis (`all`) or a fast single repeat.
   LAYER: ${{ github.event.inputs.layer || 'full' }}
   REPEATS: ${{ github.event.inputs.repeats || '5' }}
+  # PR runs are always the gated 100-case suite; only a manual dispatch can
+  # reach the 1,531-case held-out set.
+  SUITE: ${{ github.event.inputs.suite || 'locomo-gate' }}
 
 jobs:
   smoke:
@@ -160,7 +174,7 @@ jobs:
           # across 5 independent ingest+query passes; rank-list divergence
           # across passes is hard-failed as `infrastructure`.
           ./target/release/recall-eval \
-            --suite locomo-gate \
+            --suite "${SUITE}" \
             --layer "${LAYER}" \
             --repeats "${REPEATS}" \
             --output current.json \

@@ -566,34 +566,8 @@ fn run_one_pass(
     // populated graph wired in). The manager is kept alive for the whole pass.
     let manager = build_manager(storage_path)?;
 
-    // NER-backend gate (eval fidelity): every CI number before 2026-06-11 was
-    // silently measured on the rule-based fallback NER (census-shape proof,
-    // run 27342411453). Refuse to measure on it again — a harness that tests a
-    // different recognizer than production ships is not measuring the system.
-    // SHODH_ALLOW_FALLBACK_NER=1 is the explicit, visible escape hatch.
-    let ner_backend = if manager.get_neural_ner().is_fallback_mode() {
-        "fallback"
-    } else {
-        "neural"
-    };
-    eprintln!("NER_BACKEND={ner_backend}");
-    // cfg!(test) exemption: lib tests exercise the harness MACHINERY on
-    // runners that may lack the model; the gate protects MEASUREMENTS (the
-    // recall-eval binary is never cfg(test)).
-    if ner_backend == "fallback"
-        && !cfg!(test)
-        && !std::env::var("SHODH_ALLOW_FALLBACK_NER")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-    {
-        anyhow::bail!(
-            "recall harness refusing to run on the FALLBACK NER (model not \
-             loaded) — results would not measure the shipped system. Provide \
-             the pinned model or set SHODH_ALLOW_FALLBACK_NER=1 to override \
-             visibly."
-        );
-    }
-
+    // The NER-backend gate now lives in `ingest_corpus`, so every measurement
+    // path is covered rather than only the two that remembered to ask.
     let id_map = ingest_corpus(&manager, corpus)?;
     let system = manager.get_user_memory(EVAL_USER)?;
 
@@ -1001,6 +975,22 @@ pub const EVAL_USER: &str = "recall-eval";
 /// activation / lineage / ontology layer disabled. The manager wires a per-user
 /// graph + NER, so the eval exercises the same ingest path production does.
 pub(crate) fn build_manager(storage_path: &Path) -> Result<MultiUserMemoryManager> {
+    // Pin here, not at the entry points. The pinning was applied per analysis
+    // fn and two paths never got it: bridge_harness::ingest_fresh and
+    // forgetting_harness::analyze_selective_forgetting, both called straight
+    // from the recall-eval dispatch. Unpinned they run with ONNX threads at
+    // the PRODUCTION default of 24 on a 4-core runner, rayon on every core,
+    // SHODH_RECALL_READONLY unset so recall MUTATES usage state mid-eval, and
+    // a live scoring clock -- the last two documented in pin_harness_threads
+    // itself as the causes of repeat non-determinism it exists to prevent.
+    //
+    // This is the chokepoint rather than ingest_corpus because the env has to
+    // be set before MultiUserMemoryManager::new below, which initialises the
+    // embedder and reads the thread counts. Every measurement path calls
+    // build_manager, and it is crate-internal to the harness, so the
+    // production server is unaffected. The per-entry-point calls that remain
+    // are now redundant, and harmless: the function only sets what is unset.
+    pin_harness_threads();
     std::fs::create_dir_all(storage_path)
         .with_context(|| format!("creating storage dir {}", storage_path.display()))?;
     MultiUserMemoryManager::new(storage_path.to_path_buf(), ServerConfig::default())
@@ -1015,10 +1005,53 @@ pub(crate) fn build_manager(storage_path: &Path) -> Result<MultiUserMemoryManage
 /// memory, then build the entity graph from it. Without the
 /// `process_experience_into_graph` step the graph stays empty and Layer 2
 /// spreading activation is a no-op.
+/// Refuse to measure on the rule-based fallback NER.
+///
+/// This lives at the INGEST chokepoint rather than at each entry point, and the
+/// placement is the fix. The gate previously existed only inside `run_one_pass`
+/// and `run_longmemeval`; the other seven measurement paths that build a corpus
+/// -- `analyze_ablation`, `analyze_funnel`, `analyze_graph_reachability`,
+/// `analyze_linking`, `run_learning_arm`, `ingest_fresh` and
+/// `analyze_selective_forgetting` -- had none, so they would quietly measure a
+/// different recogniser than the one production ships and report the result as
+/// if it were the system.
+///
+/// That is not hypothetical. `.github/workflows/locomo-recall.yml` drives
+/// `--ablation`, `--funnel`, `--forgetting` and `--learning` and fetches no
+/// GLiNER model at all, while `recall.yml` fetches and verifies it. The
+/// ablation matrix -- the instrument behind the graph lever verdicts -- was on
+/// the fallback path, and nothing in its output said so.
+///
+/// Every path reaches ingest, so a guard here cannot be forgotten by a path
+/// written later. `SHODH_ALLOW_FALLBACK_NER=1` remains the visible escape
+/// hatch, and `cfg!(test)` is exempt because lib tests exercise the harness
+/// MACHINERY on runners that may lack the model -- the gate protects
+/// MEASUREMENTS, and the recall-eval binary is never `cfg(test)`.
+pub(crate) fn guard_ner_backend(manager: &MultiUserMemoryManager) -> Result<()> {
+    let backend = if manager.get_neural_ner().is_fallback_mode() {
+        "fallback"
+    } else {
+        "neural"
+    };
+    eprintln!("NER_BACKEND={backend}");
+    if backend == "fallback"
+        && !cfg!(test)
+        && !std::env::var("SHODH_ALLOW_FALLBACK_NER")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    {
+        anyhow::bail!(
+            "recall harness refusing to run on the FALLBACK NER (model not              loaded) -- results would not measure the shipped system. Provide              the pinned model or set SHODH_ALLOW_FALLBACK_NER=1 to override              visibly."
+        );
+    }
+    Ok(())
+}
+
 pub fn ingest_corpus(
     manager: &MultiUserMemoryManager,
     corpus: &[CorpusItem],
 ) -> Result<HashMap<String, Uuid>> {
+    guard_ner_backend(manager)?;
     let mut map = HashMap::with_capacity(corpus.len());
     let ner = manager.get_neural_ner();
     let user_mem = manager.get_user_memory(EVAL_USER)?;
@@ -2122,7 +2155,145 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
         degrees.sort_unstable_by(|a, b| b.cmp(a));
         let total_entities = degrees.len();
         let degree_sum: usize = degrees.iter().sum();
+
+        // Relation-type histogram over STORED edges. Walked from the entity side
+        // and de-duplicated by edge uuid, because get_entity_relationships
+        // returns an edge once from each endpoint it is reachable from and
+        // counting incidences would double most of them.
+        //
+        // SYMMETRIC types carry no order, so a path hop through one contributes
+        // nothing a composition could be non-commutative about. They are also
+        // the ones fully determined by entity->episode incidence, so this split
+        // is the same line as "stored vs derivable".
+        const SYMMETRIC: [&str; 7] = [
+            "CoOccurs",
+            "RelatedTo",
+            "AssociatedWith",
+            "CoRetrieved",
+            "WorksWith",
+            "Knows",
+            "AlternativeTo",
+        ];
+        let mut relation_types: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut seen_edges: std::collections::HashSet<uuid::Uuid> = Default::default();
+        for e in &entities {
+            for edge in g.get_entity_relationships(&e.uuid).unwrap_or_default() {
+                if !seen_edges.insert(edge.uuid) {
+                    continue;
+                }
+                *relation_types
+                    .entry(format!("{:?}", edge.relation_type))
+                    .or_insert(0) += 1;
+            }
+        }
+        let symmetric_edges: usize = relation_types
+            .iter()
+            .filter(|(name, _)| SYMMETRIC.contains(&name.as_str()))
+            .map(|(_, n)| *n)
+            .sum();
+        let typed_edges: usize = relation_types.values().sum::<usize>() - symmetric_edges;
+
+        // Entity labels. A label-pair typing rule can be correct and enabled and
+        // still never fire, because the labels it matches are not produced.
+        let mut entity_labels: std::collections::BTreeMap<String, usize> = Default::default();
+        for e in &entities {
+            if e.labels.is_empty() {
+                *entity_labels.entry("<unlabelled>".to_string()).or_insert(0) += 1;
+            }
+            for l in &e.labels {
+                *entity_labels.entry(format!("{l:?}")).or_insert(0) += 1;
+            }
+        }
+
+        // Undirected adjacency, built once and reused for every component pass.
+        let index: std::collections::HashMap<uuid::Uuid, usize> = entities
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.uuid, i))
+            .collect();
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); entities.len()];
+        let mut typed_adj: Vec<Vec<usize>> = vec![Vec::new(); entities.len()];
+        let mut counted: std::collections::HashSet<uuid::Uuid> = Default::default();
+        for e in &entities {
+            for edge in g.get_entity_relationships(&e.uuid).unwrap_or_default() {
+                if !counted.insert(edge.uuid) {
+                    continue;
+                }
+                let (Some(&a), Some(&b)) =
+                    (index.get(&edge.from_entity), index.get(&edge.to_entity))
+                else {
+                    continue;
+                };
+                adj[a].push(b);
+                adj[b].push(a);
+                if !SYMMETRIC.contains(&format!("{:?}", edge.relation_type).as_str()) {
+                    typed_adj[a].push(b);
+                    typed_adj[b].push(a);
+                }
+            }
+        }
+
+        // Components by BFS over an adjacency list, with a set of deleted
+        // vertices. Iterative: a hub-heavy graph would blow a recursive stack.
+        let components = |adj: &Vec<Vec<usize>>, removed: &std::collections::HashSet<usize>| {
+            let n = adj.len();
+            let mut seen = vec![false; n];
+            let (mut count, mut largest) = (0usize, 0usize);
+            for start in 0..n {
+                if seen[start] || removed.contains(&start) {
+                    continue;
+                }
+                count += 1;
+                let mut size = 0usize;
+                let mut stack = vec![start];
+                seen[start] = true;
+                while let Some(v) = stack.pop() {
+                    size += 1;
+                    for &w in &adj[v] {
+                        if !seen[w] && !removed.contains(&w) {
+                            seen[w] = true;
+                            stack.push(w);
+                        }
+                    }
+                }
+                largest = largest.max(size);
+            }
+            (count, largest)
+        };
+
+        let n_ent = entities.len().max(1);
+        let none: std::collections::HashSet<usize> = Default::default();
+        let (c_all, l_all) = components(&adj, &none);
+        let components_all = (c_all, l_all as f64 / n_ent as f64);
+
+        // Delete the top-N by degree. A k-connected graph survives k-1
+        // deletions; if this shatters early, connectivity is hub-carried.
+        let mut by_degree: Vec<usize> = (0..entities.len()).collect();
+        by_degree.sort_unstable_by(|&a, &b| adj[b].len().cmp(&adj[a].len()).then(a.cmp(&b)));
+        let mut components_after_hub_removal = Vec::new();
+        for &k in &[1usize, 5, 10, 25] {
+            if k > by_degree.len() {
+                break;
+            }
+            let removed: std::collections::HashSet<usize> =
+                by_degree.iter().take(k).copied().collect();
+            let (c, l) = components(&adj, &removed);
+            let denom = (entities.len() - k).max(1);
+            components_after_hub_removal.push((k, c, l as f64 / denom as f64));
+        }
+
+        let (c_typed, l_typed) = components(&typed_adj, &none);
+        let isolated_typed = typed_adj.iter().filter(|a| a.is_empty()).count();
+        let typed_components = (c_typed, l_typed as f64 / n_ent as f64, isolated_typed);
+
         GraphStructure {
+            relation_types,
+            typed_edges,
+            symmetric_edges,
+            entity_labels,
+            components_all,
+            components_after_hub_removal,
+            typed_components,
             total_entities,
             total_edges: degree_sum / 2,
             max_degree: degrees.first().copied().unwrap_or(0),
