@@ -2460,8 +2460,57 @@ pub fn infer_relation_type_for_pair(from: &EntityLabel, to: &EntityLabel) -> Rel
         // sentence evidence (semantic typer / cues).
         (Technology, Technology) => CoOccurs,
 
-        // Location relationships (either direction)
-        (_, Location) | (Location, _) => LocatedIn,
+        // CONTAINMENT, and it is directed.
+        //
+        // Two defects here, both measured on run 33516784385 after the entity
+        // typing fix. First, this arm only matched `Location`, while the typer
+        // actually emits `Gpe` (33 entities) and `Facility` (28) — so on real
+        // data it never fired and every place pair fell through to `CoOccurs`.
+        // Second, it mapped BOTH directions to `LocatedIn`, which is wrong half
+        // the time: `LocatedIn(a, b)` asserts a is inside b, so a place in the
+        // FROM position contains, it is not contained.
+        //
+        // Direction is the point rather than a detail. Containment is the one
+        // relation in this ontology that forms a hierarchy — Facility in Gpe in
+        // Gpe — and a hierarchy is what makes hop-distance mean a scale instead
+        // of a coincidence. Measured, 94.8% of gold sat one hop away because
+        // nothing encoded level. A containment DAG also admits interval
+        // labelling, so "is a inside b" becomes a range check rather than a
+        // traversal. Symmetric edges give none of that: `Contains` and
+        // `LocatedIn` are inverses, and an inverse pair is only useful if the
+        // two directions are actually distinguished.
+        //
+        // Ordered before the generic arms so a place pair is typed by
+        // containment rather than by whatever else either endpoint is.
+        // Place inside place, and things sited at a place. Directed, and
+        // deliberately NOT a wildcard: `(Gpe, _) => Contains` would assert
+        // "India contains Andrew" for any person merely mentioned near a place,
+        // which is the visibly-wrong-type failure this file warns about
+        // elsewhere. Only pairs where containment is actually what the
+        // co-mention means.
+        (Facility, Gpe) | (Facility, Location) | (Gpe, Location) => LocatedIn,
+        (Gpe, Facility) | (Location, Facility) | (Location, Gpe) => Contains,
+        (Organization, Gpe) | (Organization, Location) => LocatedIn,
+        (Event, Gpe) | (Event, Location) | (Event, Facility) => LocatedIn,
+
+        // AUTHORSHIP. A creative work or product is made by an agent, and the
+        // arrow runs from the artefact to its maker.
+        (Work, Person) | (Work, Organization) => CreatedBy,
+        (Product, Person) => CreatedBy,
+        (Product, Organization) => DevelopedBy,
+
+        // MEMBERSHIP. Norp is nationality / religious / political group, so a
+        // person belongs to it rather than the reverse.
+        (Person, Norp) => PartOf,
+
+        // OWNERSHIP.
+        (Vehicle, Person) | (Vehicle, Organization) => OwnedBy,
+        (Facility, Organization) => OwnedBy,
+
+        // INSTRUMENT. An agent co-mentioned with a vehicle, weapon or product
+        // is overwhelmingly the party operating it.
+        (Person, Vehicle) | (Person, Weapon) | (Person, Product) => Uses,
+        (Organization, Vehicle) | (Organization, Weapon) => Uses,
 
         // Default: co-occurrence (neutral bridge weight in spreading activation)
         _ => CoOccurs,
@@ -14186,6 +14235,60 @@ mod tests {
             rep.selectivity <= rep_a.selectivity || rep.degree > rep_a.degree,
             "Hub should have lower selectivity or higher degree than spoke"
         );
+    }
+
+    #[test]
+    fn label_pair_rules_are_generalist_not_devops_only() {
+        // The rule set was a software-engineering ontology — Service, Module,
+        // Pipeline, Repository, Database, Configuration — applied to whatever
+        // corpus arrived. Measured on run 33516784385 after the entity-typing
+        // fix, the labels actually produced were Event 164, Person 47, Work 39,
+        // Gpe 33, Facility 28, Organization 26, Title 22: roughly 81% of
+        // entities carried a label with NO rule at all, so every pair involving
+        // them fell through to CoOccurs. Same defect as the tag labeller being
+        // a dev-ops keyword matcher, one layer up.
+        use EntityLabel::*;
+        use RelationType as R;
+
+        // Containment, and it must be DIRECTED. An inverse pair is only worth
+        // having if the two directions are distinguished; a spatial tree with
+        // arbitrary edge direction is not a tree, and containment is the one
+        // relation here that yields a hierarchy at all.
+        assert_eq!(infer_relation_type_for_pair(&Facility, &Gpe), R::LocatedIn);
+        assert_eq!(infer_relation_type_for_pair(&Gpe, &Facility), R::Contains);
+        assert_ne!(
+            infer_relation_type_for_pair(&Facility, &Gpe),
+            infer_relation_type_for_pair(&Gpe, &Facility),
+            "containment must not be symmetric — direction is the whole point"
+        );
+        assert_eq!(infer_relation_type_for_pair(&Event, &Gpe), R::LocatedIn);
+        assert_eq!(
+            infer_relation_type_for_pair(&Organization, &Gpe),
+            R::LocatedIn
+        );
+
+        // Authorship: artefact -> maker.
+        assert_eq!(infer_relation_type_for_pair(&Work, &Person), R::CreatedBy);
+        assert_eq!(
+            infer_relation_type_for_pair(&Product, &Organization),
+            R::DevelopedBy
+        );
+
+        // Membership, ownership, instrument.
+        assert_eq!(infer_relation_type_for_pair(&Person, &Norp), R::PartOf);
+        assert_eq!(infer_relation_type_for_pair(&Vehicle, &Person), R::OwnedBy);
+        assert_eq!(infer_relation_type_for_pair(&Person, &Weapon), R::Uses);
+
+        // AND THE GUARD THAT MATTERS: no wildcard containment. A person merely
+        // mentioned near a place must NOT become "the place contains the
+        // person" — a visibly wrong type is worse than a visibly absent one,
+        // because it is indistinguishable from a confident correct answer.
+        assert_eq!(
+            infer_relation_type_for_pair(&Gpe, &Person),
+            R::CoOccurs,
+            "wildcard containment would assert a place contains any co-mentioned person"
+        );
+        assert_eq!(infer_relation_type_for_pair(&Gpe, &Event), R::CoOccurs);
     }
 
     #[test]
