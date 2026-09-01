@@ -1996,7 +1996,11 @@ impl RelationshipEdge {
 /// (see `crate::serialization`), not MessagePack — encodes each variant as
 /// the varint of its DECLARATION INDEX. Reordering shifts every subsequent
 /// variant's on-disk discriminant and mis-decodes existing stored edges.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+// `Hash` so a relation-type SEQUENCE can key a map: a path's identity is the
+// ordered list of types it traversed, and carrying that is what makes a walk
+// non-commutative. Adding a derive does not touch the on-disk discriminant --
+// the warning above is about REORDERING variants, which this does not do.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum RelationType {
     /// Work relationships
     WorksWith,

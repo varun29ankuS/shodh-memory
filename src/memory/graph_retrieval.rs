@@ -1049,12 +1049,31 @@ fn reachable_inject(
 /// from a retrieval index (rank passages) into a reasoner (compose by traversal). Retrieval
 /// alone cannot answer multi-hop; traversal can. LLM-free; adapts the embedding-guided neural
 /// search recipe (arXiv 2511.19648) to our stack. Returns entity uuid → best path score.
+/// The ordered relation types traversed to reach an endpoint.
+///
+/// This is the point of the change. A walk that composes typed edges is
+/// non-commutative -- reaching X by `Precedes` then `LocatedIn` is not the same
+/// evidence as `LocatedIn` then `Precedes` -- but the walk recorded only which
+/// NODES it had visited, so order was discarded during traversal and again when
+/// `reached` merged paths by max. Two different routes to one entity became one
+/// number, and the composition the walk had just performed was destroyed before
+/// anything could use it.
+///
+/// Bounded by HOPS, so at most two elements.
+pub type PathSignature = Vec<crate::graph_memory::RelationType>;
+
+/// Beam traversal keyed by (endpoint, path signature) rather than endpoint.
+///
+/// Returning the signature lets the caller treat two distinct typed routes to
+/// the same entity as two pieces of evidence rather than one. With
+/// `SHODH_GRAPH_PATH_STATE` unset the caller collapses by max, which is
+/// bit-identical to the previous behaviour.
 fn traverse_beam(
     graph: &GraphMemory,
     seeds: &HashMap<Uuid, f32>,
     intent: Option<&OntologicalIntent>,
     predicate_weights: bool,
-) -> Result<HashMap<Uuid, f32>> {
+) -> Result<HashMap<(Uuid, PathSignature), f32>> {
     const HOPS: usize = 2;
     const BEAM: usize = 32;
     const MAX_EDGES: usize = 100;
@@ -1063,6 +1082,8 @@ fn traverse_beam(
         endpoint: Uuid,
         score: f32,
         visited: HashSet<Uuid>,
+        /// Relation types traversed so far, in order.
+        signature: PathSignature,
     }
     let mut beam: Vec<BeamPath> = seeds
         .iter()
@@ -1073,10 +1094,11 @@ fn traverse_beam(
                 endpoint: u,
                 score: w.max(1e-3),
                 visited,
+                signature: PathSignature::new(),
             }
         })
         .collect();
-    let mut reached: HashMap<Uuid, f32> = HashMap::new();
+    let mut reached: HashMap<(Uuid, PathSignature), f32> = HashMap::new();
     let mut label_cache: HashMap<Uuid, Option<Vec<EntityLabel>>> = HashMap::new();
 
     let dir_fix = edge_dir_fix_enabled();
@@ -1102,10 +1124,13 @@ fn traverse_beam(
                 }
                 let mut visited = p.visited.clone();
                 visited.insert(nb);
+                let mut signature = p.signature.clone();
+                signature.push(edge.relation_type.clone());
                 next.push(BeamPath {
                     endpoint: nb,
                     score: p.score * w,
                     visited,
+                    signature,
                 });
             }
         }
@@ -1120,10 +1145,18 @@ fn traverse_beam(
             b.score
                 .total_cmp(&a.score)
                 .then_with(|| a.endpoint.cmp(&b.endpoint))
+                // Two paths to one endpoint at one score are now distinct
+                // entries, so the beam cut needs a total order over them too.
+                .then_with(|| a.signature.len().cmp(&b.signature.len()))
         });
         next.truncate(BEAM);
         for p in &next {
-            let e = reached.entry(p.endpoint).or_insert(0.0);
+            // Keyed by (endpoint, signature): one entity reached by two typed
+            // routes stays two entries. Max WITHIN a signature is still correct
+            // -- that is the same path found twice, not two findings.
+            let e = reached
+                .entry((p.endpoint, p.signature.clone()))
+                .or_insert(0.0);
             if p.score > *e {
                 *e = p.score;
             }
@@ -1131,9 +1164,7 @@ fn traverse_beam(
         beam = next;
     }
     // The composed answer is a NEW entity reached by the walk, never a seed.
-    for s in seeds.keys() {
-        reached.remove(s);
-    }
+    reached.retain(|(endpoint, _), _| !seeds.contains_key(endpoint));
     Ok(reached)
 }
 
@@ -1774,10 +1805,46 @@ pub fn spreading_activation_retrieve_with_stats(
         let pred_w = std::env::var("SHODH_GRAPH_PREDICATE_WEIGHTS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        // SHODH_GRAPH_PATH_STATE: keep distinct typed routes distinct.
+        //
+        // Unset (default) reproduces the previous behaviour exactly -- collapse
+        // every path to an endpoint by max, then max that into activation_map.
+        //
+        // Set, the walk's composition survives to the point of use: two
+        // different relation-type sequences reaching one entity are two
+        // independent supports, so they ADD. Max is the right merge for the SAME
+        // path found twice and the wrong one for two different findings, and the
+        // old code could not tell them apart because it had already thrown the
+        // signature away.
+        //
+        // This is the operator half of the structure/operator pair. Typed edges
+        // without it measure inert: the substrate carries order and the
+        // accumulator cannot represent it, which is how a mechanism ends up
+        // present and causally dead.
+        let path_state = std::env::var("SHODH_GRAPH_PATH_STATE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         match traverse_beam(graph, &seed_activations, intent_ref, pred_w) {
             Ok(answers) => {
                 let n = answers.len();
-                for (ent, score) in answers {
+                let mut per_entity: HashMap<Uuid, f32> = HashMap::new();
+                if path_state {
+                    // Distinct signatures are distinct evidence: sum them.
+                    // Deterministic despite HashMap iteration because addition
+                    // over the SAME set is order-independent up to float
+                    // rounding, and the set is keyed, not ordered.
+                    for ((ent, _signature), score) in answers {
+                        *per_entity.entry(ent).or_insert(0.0) += score;
+                    }
+                } else {
+                    for ((ent, _signature), score) in answers {
+                        let e = per_entity.entry(ent).or_insert(0.0);
+                        if score > *e {
+                            *e = score;
+                        }
+                    }
+                }
+                for (ent, score) in per_entity {
                     let boosted = score * TRAVERSE_BOOST;
                     let e = activation_map.entry(ent).or_insert(0.0);
                     if boosted > *e {
@@ -2151,6 +2218,125 @@ fn calculate_lateral_inhibition(scored: &[ActivatedMemory]) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn traverse_beam_keeps_two_typed_routes_to_one_entity_apart() {
+        // The claim under test: a walk that composes typed edges must not merge
+        // two DIFFERENT relation-type sequences that happen to end at the same
+        // entity. Before this, `reached` was keyed by endpoint alone, so the
+        // second route overwrote or lost to the first and the composition the
+        // walk had just performed was gone before any caller saw it.
+        //
+        // Shape: seed -> mid_a -> target via (Precedes, LocatedIn)
+        //        seed -> mid_b -> target via (WorksAt, Manages)
+        // One endpoint, two signatures, so a signature-keyed map holds two
+        // entries and an endpoint-keyed one holds a single merged number.
+        use super::*;
+        use crate::graph_memory::{
+            EdgeTier, EntityLabel, EntityNode, GraphMemory, LtpStatus, RelationType,
+            RelationshipEdge,
+        };
+        use chrono::Utc;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let mk_entity = |name: &str| EntityNode {
+            uuid: Uuid::new_v4(),
+            name: name.to_string(),
+            labels: vec![EntityLabel::Concept],
+            created_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            mention_count: 1,
+            summary: String::new(),
+            attributes: std::collections::HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: false,
+            selectivity: None,
+            fine_type: None,
+            kb_id: None,
+        };
+        let seed = graph.add_entity(mk_entity("Seedword")).unwrap();
+        let mid_a = graph.add_entity(mk_entity("Midalpha")).unwrap();
+        let mid_b = graph.add_entity(mk_entity("Midbeta")).unwrap();
+        let target = graph.add_entity(mk_entity("Targetword")).unwrap();
+
+        let mk_edge = |from: Uuid, to: Uuid, rt: RelationType| RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: from,
+            to_entity: to,
+            relation_type: rt,
+            strength: 0.8,
+            created_at: Utc::now(),
+            valid_at: Utc::now(),
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: Utc::now(),
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+            provenance: Vec::new(),
+            promoted_at: None,
+        };
+        graph
+            .add_relationship(mk_edge(seed, mid_a, RelationType::Precedes))
+            .unwrap();
+        graph
+            .add_relationship(mk_edge(mid_a, target, RelationType::LocatedIn))
+            .unwrap();
+        graph
+            .add_relationship(mk_edge(seed, mid_b, RelationType::WorksAt))
+            .unwrap();
+        graph
+            .add_relationship(mk_edge(mid_b, target, RelationType::Manages))
+            .unwrap();
+
+        let seeds: HashMap<Uuid, f32> = [(seed, 1.0f32)].into_iter().collect();
+        let reached = traverse_beam(&graph, &seeds, None, false).unwrap();
+
+        let to_target: Vec<&PathSignature> = reached
+            .keys()
+            .filter(|(endpoint, _)| *endpoint == target)
+            .map(|(_, sig)| sig)
+            .collect();
+
+        assert_eq!(
+            to_target.len(),
+            2,
+            "two distinct typed routes to one entity must stay two entries, got {to_target:?}"
+        );
+
+        // And the signatures must be the ORDERED types actually traversed --
+        // the whole point is that these are different composed facts, not two
+        // copies of one.
+        let mut sigs: Vec<Vec<String>> = to_target
+            .iter()
+            .map(|s| s.iter().map(|r| format!("{r:?}")).collect())
+            .collect();
+        sigs.sort();
+        assert_eq!(
+            sigs,
+            vec![
+                vec!["Precedes".to_string(), "LocatedIn".to_string()],
+                vec!["WorksAt".to_string(), "Manages".to_string()],
+            ],
+            "signature must record the ordered relation types of the walk"
+        );
+
+        // Endpoint-keyed collapse — what the code used to do — loses one of them.
+        let collapsed: std::collections::HashSet<Uuid> = reached.keys().map(|(e, _)| *e).collect();
+        assert_eq!(
+            collapsed.iter().filter(|e| **e == target).count(),
+            1,
+            "collapsing by endpoint is exactly the information loss being fixed"
+        );
+    }
+
     use super::*;
 
     // =========================================================================
