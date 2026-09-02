@@ -1468,6 +1468,16 @@ pub fn spreading_activation_retrieve_with_stats(
     if activation_map.is_empty() {
         tracing::warn!("No entities found in graph, falling back to semantic search");
         stats.retrieval_time_us = start_time.elapsed().as_micros() as u64;
+        // Keep the `graph_pool` funnel denominator aligned with the `graph`
+        // stage (mod.rs records that one even when this leg returns empty):
+        // a no-seed query has an EMPTY pool, not a missing measurement —
+        // omitting it would silently inflate graph_pool.present%.
+        if crate::memory::gold_funnel::is_armed() {
+            crate::memory::gold_funnel::record(
+                "graph_pool",
+                std::iter::empty::<&crate::memory::types::MemoryId>(),
+            );
+        }
         return Ok((Vec::new(), stats)); // Caller should fall back to semantic search
     }
 
@@ -1924,14 +1934,57 @@ pub fn spreading_activation_retrieve_with_stats(
 
     let now = crate::memory::scoring_now();
 
+    // SHODH_GRAPH_ACT_NORM: max-normalise the per-episode graph activation to
+    // [0,1] PER QUERY before it meets `fuse_hybrid_score`. The activations
+    // summed above are RAW PPR stationary masses — an L1-conserved probability
+    // distribution over the expanded subgraph (only the PASSAGE map of
+    // `personalized_pagerank` is max-normalised, and that path is off by
+    // default) — so a non-seed-adjacent episode's graph term is O(1e-3)
+    // against a 0..1 cosine: `graph_weight` scales a term whose VALUE is three
+    // orders of magnitude below the semantic term, and the blend degenerates
+    // to semantic+linguistic for exactly the multi-hop candidates the graph
+    // leg exists to surface. This is a SCALE fix, not a weight change: the
+    // per-query max becomes 1.0 and relative activation ordering is preserved.
+    // Default off → byte-identical scores; measure before flipping.
+    let act_norm = std::env::var("SHODH_GRAPH_ACT_NORM")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let act_scale = if act_norm {
+        let max_act = activated_memories
+            .values()
+            .map(|(raw, seeds, _)| {
+                raw * (1.0 + SEED_COVERAGE_BONUS * (seeds.len().saturating_sub(1) as f32))
+            })
+            .fold(0.0_f32, f32::max);
+        if max_act > 0.0 {
+            1.0 / max_act
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    };
+
+    // SHODH_GRAPH_MAG_DIAG: per-query magnitude census of the two dominant
+    // fusion terms, for settling the scale question empirically at corpus
+    // scale. `1`/`true` prints to stderr (same pattern as TYPED_WALK_DEBUG);
+    // any other non-empty value is a file path the line is APPENDED to, which
+    // is what lets the unit test prove this diagnostic fires on the live path.
+    let mag_diag: Option<String> = std::env::var("SHODH_GRAPH_MAG_DIAG")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let mut mag_sem: Vec<f32> = Vec::new();
+    let mut mag_act: Vec<f32> = Vec::new();
+
     for (_episode_uuid, (raw_activation, covered_seeds, episode)) in activated_memories {
         // G5: scale activation by distinct query-seed coverage. An episode
         // reached by 2 distinct query seeds (e.g. speaker AND topic) is the
         // multi_hop signal; one reached by a single ubiquitous seed (a hub) is
         // not. coverage==1 → ×1.0, so single-seed queries are unaffected.
         let coverage = covered_seeds.len();
-        let graph_activation =
-            raw_activation * (1.0 + SEED_COVERAGE_BONUS * (coverage.saturating_sub(1) as f32));
+        let graph_activation = raw_activation
+            * (1.0 + SEED_COVERAGE_BONUS * (coverage.saturating_sub(1) as f32))
+            * act_scale;
         // Convert episode to memory
         if let Some(memory) = episode_to_memory_fn(&episode)? {
             // Calculate semantic similarity (still needed for ActivatedMemory debug fields)
@@ -1944,6 +1997,11 @@ pub fn spreading_activation_retrieve_with_stats(
             // Calculate linguistic match score (normalized to 0.0-1.0)
             let linguistic_raw = calculate_linguistic_match(&memory, &analysis);
             let linguistic_score = linguistic_raw; // Already normalized in calculate_linguistic_match
+
+            if mag_diag.is_some() {
+                mag_sem.push(semantic_score);
+                mag_act.push(graph_activation);
+            }
 
             // Unified scoring using density-dependent weights (calculated at
             // function start), with the memory-tier trust discount applied to the
@@ -2010,6 +2068,56 @@ pub fn spreading_activation_retrieve_with_stats(
         }
     }
 
+    // One greppable line per query: `GRAPH_MAG n=… sem=min/med/max act=min/med/max
+    // wsem=… wact=…` — the w* fields are the MEDIAN term contributions after
+    // weighting (semantic_weight·med(sem) vs graph_weight·med(act)), i.e. what
+    // each leg actually adds to the blended score for a typical pool candidate.
+    if let Some(diag_dest) = &mag_diag {
+        if !mag_sem.is_empty() {
+            let med = |v: &mut Vec<f32>| -> f32 {
+                v.sort_unstable_by(|a, b| a.total_cmp(b));
+                v[v.len() / 2]
+            };
+            let (sem_min, sem_max) = mag_sem
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &x| {
+                    (lo.min(x), hi.max(x))
+                });
+            let (act_min, act_max) = mag_act
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &x| {
+                    (lo.min(x), hi.max(x))
+                });
+            let sem_med = med(&mut mag_sem);
+            let act_med = med(&mut mag_act);
+            let line = format!(
+                "GRAPH_MAG n={} sem={sem_min:.4}/{sem_med:.4}/{sem_max:.4} \
+                 act={act_min:.6}/{act_med:.6}/{act_max:.6} \
+                 wsem={:.6} wact={:.6}",
+                mag_sem.len(),
+                semantic_weight * sem_med,
+                graph_weight * act_med,
+            );
+            if diag_dest == "1" || diag_dest.eq_ignore_ascii_case("true") {
+                eprintln!("{line}");
+            } else {
+                use std::io::Write;
+                match std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(diag_dest)
+                {
+                    Ok(mut f) => {
+                        if let Err(e) = writeln!(f, "{line}") {
+                            tracing::warn!("GRAPH_MAG append to {diag_dest} failed: {e}");
+                        }
+                    }
+                    Err(e) => tracing::warn!("GRAPH_MAG open {diag_dest} failed: {e}"),
+                }
+            }
+        }
+    }
+
     // Step 6: Sort by final score (descending).
     //
     // Content tie-break: without one, equal-score candidates keep the
@@ -2027,6 +2135,23 @@ pub fn spreading_activation_retrieve_with_stats(
                 .cmp(&b.memory.experience.content)
         })
     });
+
+    // Funnel stage `graph_pool`: the leg's COMPLETE scored pool, before any
+    // truncation. The existing `graph` stage (mod.rs) sees only the emitted
+    // top-`graph_leg_k` list, so it cannot distinguish "gold never entered the
+    // pool" (a membership problem — seeds, edge direction, expansion caps) from
+    // "gold entered the pool but the final_score ordering cut it at the exit
+    // gate" (an ordering problem the graph cannot fix — the pool ordering is
+    // semantic-dominated because PPR stationary masses are ~1e-3 against 0..1
+    // cosine scores). Recorded on the sorted-but-uncut list so the funnel's
+    // mean_rank_when_present locates WHERE in the pool ordering gold sits.
+    // No-op unless the recall harness armed the funnel for this query.
+    if crate::memory::gold_funnel::is_armed() {
+        crate::memory::gold_funnel::record(
+            "graph_pool",
+            scored_memories.iter().map(|am| &am.memory.id),
+        );
+    }
 
     // Bound the candidate set before the O(n²) lateral-inhibition pass below. The caller
     // keeps only the top ~200 graph candidates anyway, so this loses nothing — but without
@@ -2568,6 +2693,372 @@ mod tests {
             entities.get(&b).copied().unwrap_or(0.0) > 0.0,
             "entity→entity spreading must survive passage interning"
         );
+    }
+
+    /// The `graph_pool` funnel stage must see the COMPLETE scored pool —
+    /// recorded after the final-score sort but BEFORE the GRAPH_CANDIDATE_CAP
+    /// (200) and `graph_leg_k` truncations — on the live retrieval path.
+    ///
+    /// Construction: one seed entity with 202 attached episodes, all with
+    /// identical evidence (equal activation, no embeddings, no query-token
+    /// overlap), so the deterministic content tie-break is the total order.
+    /// The gold episode's content sorts LAST → pool rank 201, beyond both the
+    /// 200-cap and the emitted top-`max_results`. A mutation that removes the
+    /// record, or moves it after either truncation, changes the recorded rank
+    /// to absent/None and fails the exact-rank assertion.
+    #[test]
+    fn graph_pool_funnel_stage_records_the_pool_before_truncation() {
+        use crate::graph_memory::{EntityNode, EpisodeSource};
+        use crate::memory::types::{Experience, MemoryId};
+        use chrono::Utc;
+        use std::sync::Arc;
+
+        struct StubEmbedder;
+        impl crate::embeddings::Embedder for StubEmbedder {
+            fn encode(&self, _text: &str) -> Result<Vec<f32>> {
+                Ok(vec![0.1, 0.2, 0.3, 0.4])
+            }
+            fn dimension(&self) -> usize {
+                4
+            }
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let hub = graph
+            .add_entity(EntityNode {
+                uuid: Uuid::new_v4(),
+                name: "hub".to_string(),
+                labels: vec![EntityLabel::Concept],
+                created_at: Utc::now(),
+                last_seen_at: Utc::now(),
+                mention_count: 1,
+                summary: String::new(),
+                attributes: HashMap::new(),
+                name_embedding: None,
+                salience: 1.0,
+                is_proper_noun: false,
+                selectivity: None,
+                fine_type: None,
+                kb_id: None,
+            })
+            .unwrap();
+
+        // 201 distractors that sort BEFORE the gold by content, plus one gold
+        // that sorts last. All evidence is identical, so the content tie-break
+        // (total order) pins gold to pool rank 201 — outside the 200-cap.
+        let now = Utc::now();
+        let add_episode = |content: String| -> Uuid {
+            let ep = EpisodicNode {
+                uuid: Uuid::new_v4(),
+                name: content.clone(),
+                content,
+                valid_at: now,
+                created_at: now,
+                entity_refs: vec![hub],
+                source: EpisodeSource::Message,
+                metadata: HashMap::new(),
+            };
+            let id = ep.uuid;
+            graph.add_episode(ep).unwrap();
+            id
+        };
+        for i in 0..201 {
+            add_episode(format!("content_{i:03}"));
+        }
+        let gold_uuid = add_episode("zzz_gold".to_string());
+
+        let episode_to_memory = |ep: &EpisodicNode| -> Result<Option<SharedMemory>> {
+            Ok(Some(Arc::new(Memory::new(
+                MemoryId(ep.uuid),
+                Experience {
+                    content: ep.content.clone(),
+                    ..Default::default()
+                },
+                0.5,
+                None,
+                None,
+                None,
+                Some(now),
+            ))))
+        };
+
+        let query = Query {
+            query_text: Some("hub".to_string()),
+            ner_entities: Some(vec!["hub".to_string()]),
+            ..Query::default()
+        };
+
+        let mut gold_set = HashSet::new();
+        gold_set.insert(MemoryId(gold_uuid));
+        crate::memory::gold_funnel::begin(gold_set);
+
+        let (emitted, _stats) = spreading_activation_retrieve_with_stats(
+            "hub",
+            &query,
+            &graph,
+            &StubEmbedder,
+            None,
+            None,
+            None,
+            episode_to_memory,
+        )
+        .expect("graph-leg retrieval");
+
+        let stages = crate::memory::gold_funnel::take().expect("funnel was armed");
+        let pool_rank = stages
+            .iter()
+            .find(|(stage, _)| stage == "graph_pool")
+            .unwrap_or_else(|| panic!("graph_pool stage must be recorded; got {stages:?}"))
+            .1;
+        assert_eq!(
+            pool_rank,
+            Some(201),
+            "graph_pool must rank gold in the FULL sorted pool (202 candidates, \
+             gold last by content tie-break). None/absent means the record was \
+             dropped or moved after a truncation"
+        );
+
+        // And the emitted leg output must NOT contain the gold — the record
+        // observed candidates the exit gate cut, which is its entire purpose.
+        assert!(
+            emitted.len() <= query.max_results,
+            "leg emission must respect graph_leg_k (= max_results here)"
+        );
+        assert!(
+            emitted.iter().all(|am| am.memory.id != MemoryId(gold_uuid)),
+            "gold at pool rank 201 must be cut by the exit gate in this construction"
+        );
+    }
+
+    /// Pins the SCALE facts about the graph term of `fuse_hybrid_score`, on
+    /// the live retrieval path:
+    ///
+    /// 1. Default: per-episode graph activation is a RAW PPR stationary mass —
+    ///    an L1-conserved probability (sum over the pool ≤ 1, max well below
+    ///    1.0) — while the semantic term is a 0..1 cosine. `graph_weight`
+    ///    therefore scales a term whose VALUE is orders of magnitude smaller,
+    ///    and at corpus scale (thousands of nodes sharing unit mass) the graph
+    ///    term degenerates to ~1e-3.
+    /// 2. `SHODH_GRAPH_ACT_NORM=1` max-normalises activation per query: the
+    ///    pool max becomes exactly 1.0 and relative ratios are preserved (a
+    ///    scale fix, not a reweighting).
+    /// 3. `SHODH_GRAPH_MAG_DIAG=<path>` appends one `GRAPH_MAG` line per query
+    ///    whose fields match the values actually fused.
+    ///
+    /// Mutations that must fail this test: skipping the normalisation,
+    /// applying it unconditionally, or dropping the diagnostic write.
+    #[test]
+    fn act_norm_rescales_raw_ppr_masses_and_mag_diag_reports_them() {
+        use crate::graph_memory::{
+            EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode, GraphMemory,
+            LtpStatus, RelationType, RelationshipEdge,
+        };
+        use crate::memory::types::{Experience, MemoryId};
+        use chrono::Utc;
+        use std::sync::Arc;
+
+        const EMB: [f32; 4] = [0.1, 0.2, 0.3, 0.4];
+        struct StubEmbedder;
+        impl crate::embeddings::Embedder for StubEmbedder {
+            fn encode(&self, _text: &str) -> Result<Vec<f32>> {
+                Ok(EMB.to_vec())
+            }
+            fn dimension(&self) -> usize {
+                4
+            }
+        }
+
+        // Read-only recall for the whole test: each retrieval otherwise
+        // Hebbian-strengthens the traversed edges, so phase 1's PPR masses
+        // would differ from phase 0's and the ratio assertion below would
+        // compare two different graphs. Taking the shared env lock keeps this
+        // from racing `spreading_activation_readonly_gate_skips_hebbian_strengthening`,
+        // which asserts BOTH states of the same variable.
+        let _env_guard = RECALL_READONLY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SHODH_RECALL_READONLY", "1");
+        // Defensive: these are read at call time inside the leg.
+        std::env::remove_var("SHODH_GRAPH_ACT_NORM");
+        std::env::remove_var("SHODH_GRAPH_MAG_DIAG");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let mk_entity = |name: &str| EntityNode {
+            uuid: Uuid::new_v4(),
+            name: name.to_string(),
+            labels: vec![EntityLabel::Concept],
+            created_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 1.0,
+            is_proper_noun: false,
+            selectivity: None,
+            fine_type: None,
+            kb_id: None,
+        };
+        let alpha = graph.add_entity(mk_entity("alphaseed")).unwrap();
+        let beta = graph.add_entity(mk_entity("betamid")).unwrap();
+        let gamma = graph.add_entity(mk_entity("gammafar")).unwrap();
+        let now = Utc::now();
+        let add_edge = |from: Uuid, to: Uuid| {
+            graph
+                .add_relationship(RelationshipEdge {
+                    uuid: Uuid::new_v4(),
+                    from_entity: from,
+                    to_entity: to,
+                    relation_type: RelationType::RelatedTo,
+                    strength: 0.5,
+                    created_at: now,
+                    valid_at: now,
+                    invalidated_at: None,
+                    source_episode_id: None,
+                    context: String::new(),
+                    last_activated: now,
+                    activation_count: 1,
+                    ltp_status: LtpStatus::None,
+                    activation_timestamps: None,
+                    tier: EdgeTier::L2Episodic,
+                    entity_confidence: None,
+                    forman_curvature: None,
+                    endpoint_selectivity: None,
+                    provenance: Vec::new(),
+                    promoted_at: None,
+                })
+                .unwrap();
+        };
+        add_edge(alpha, beta);
+        add_edge(beta, gamma);
+
+        let mk_episode = |name: &str, refs: Vec<Uuid>| {
+            let ep = EpisodicNode {
+                uuid: Uuid::new_v4(),
+                name: name.to_string(),
+                content: name.to_string(),
+                valid_at: now,
+                created_at: now,
+                entity_refs: refs,
+                source: EpisodeSource::Message,
+                metadata: HashMap::new(),
+            };
+            let id = ep.uuid;
+            graph.add_episode(ep).unwrap();
+            id
+        };
+        let ep_seed = mk_episode("near the seed", vec![alpha]);
+        let ep_far = mk_episode("two hops out", vec![gamma]);
+
+        let episode_to_memory = |ep: &EpisodicNode| -> Result<Option<SharedMemory>> {
+            Ok(Some(Arc::new(Memory::new(
+                MemoryId(ep.uuid),
+                Experience {
+                    content: ep.content.clone(),
+                    embeddings: Some(EMB.to_vec()),
+                    ..Default::default()
+                },
+                0.5,
+                None,
+                None,
+                None,
+                Some(now),
+            ))))
+        };
+
+        let query = Query {
+            query_text: Some("alphaseed".to_string()),
+            ner_entities: Some(vec!["alphaseed".to_string()]),
+            ..Query::default()
+        };
+        let run = || -> HashMap<Uuid, (f32, f32)> {
+            let (emitted, _) = spreading_activation_retrieve_with_stats(
+                "alphaseed",
+                &query,
+                &graph,
+                &StubEmbedder,
+                None,
+                None,
+                None,
+                episode_to_memory,
+            )
+            .expect("graph-leg retrieval");
+            emitted
+                .into_iter()
+                .map(|am| (am.memory.id.0, (am.activation_score, am.semantic_score)))
+                .collect()
+        };
+
+        // --- Phase 0: default. Activations are RAW stationary masses. ---
+        let base = run();
+        let (act_seed, sem_seed) = base[&ep_seed];
+        let (act_far, sem_far) = base[&ep_far];
+        assert!(
+            sem_seed > 0.99 && sem_far > 0.99,
+            "identical embeddings must give ~1.0 cosine (got {sem_seed}, {sem_far})"
+        );
+        assert!(
+            act_far > 0.0 && act_far < act_seed,
+            "mass must decay with hops: far={act_far} seed={act_seed}"
+        );
+        assert!(
+            act_seed + act_far <= 1.01,
+            "raw PPR masses are L1-conserved; sum {} must not exceed unit mass",
+            act_seed + act_far
+        );
+        assert!(
+            act_seed < 0.9,
+            "default activation must be the RAW stationary mass (max well below \
+             1.0), not a normalised score — got {act_seed}"
+        );
+
+        // --- Phase 1: SHODH_GRAPH_ACT_NORM=1 rescales, preserving ratios. ---
+        std::env::set_var("SHODH_GRAPH_ACT_NORM", "1");
+        let normed = run();
+        std::env::remove_var("SHODH_GRAPH_ACT_NORM");
+        let (nact_seed, _) = normed[&ep_seed];
+        let (nact_far, _) = normed[&ep_far];
+        assert!(
+            (nact_seed - 1.0).abs() < 1e-4,
+            "normalised pool max must be exactly 1.0, got {nact_seed}"
+        );
+        let expected_ratio = act_far / act_seed;
+        assert!(
+            (nact_far - expected_ratio).abs() < 1e-4,
+            "normalisation must preserve relative activation ({nact_far} vs {expected_ratio})"
+        );
+
+        // --- Phase 2: SHODH_GRAPH_MAG_DIAG=<path> reports the fused values. ---
+        let diag_path = temp_dir.path().join("graph_mag.log");
+        std::env::set_var("SHODH_GRAPH_MAG_DIAG", &diag_path);
+        let _ = run();
+        std::env::remove_var("SHODH_GRAPH_MAG_DIAG");
+        let diag = std::fs::read_to_string(&diag_path)
+            .expect("SHODH_GRAPH_MAG_DIAG=<path> must append the census to the file");
+        let line = diag
+            .lines()
+            .find(|l| l.starts_with("GRAPH_MAG n=2 "))
+            .unwrap_or_else(|| panic!("expected a GRAPH_MAG line for this 2-episode pool: {diag}"));
+        // act max field must be the RAW seed mass fused in phase 0.
+        let act_field = line
+            .split_whitespace()
+            .find_map(|t| t.strip_prefix("act="))
+            .expect("GRAPH_MAG line carries an act= field");
+        let act_max: f32 = act_field
+            .split('/')
+            .nth(2)
+            .and_then(|s| s.parse().ok())
+            .expect("act=min/med/max parses");
+        assert!(
+            (act_max - act_seed).abs() < 1e-4,
+            "diagnostic act max ({act_max}) must equal the fused raw activation ({act_seed})"
+        );
+
+        std::env::remove_var("SHODH_RECALL_READONLY");
     }
 
     #[test]
