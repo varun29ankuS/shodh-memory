@@ -254,6 +254,7 @@ fn spread_single_direction(
     threshold: f32,
     ontological_intent: Option<&OntologicalIntent>,
     entity_label_cache: &mut HashMap<Uuid, Option<Vec<EntityLabel>>>,
+    limits: TraversalLimits,
 ) -> Result<(HashMap<Uuid, f32>, Vec<Uuid>)> {
     let mut activation_map: HashMap<Uuid, f32> = seeds.iter().cloned().collect();
     let mut traversed_edges: Vec<Uuid> = Vec::new();
@@ -275,7 +276,7 @@ fn spread_single_direction(
     // RELATIVE to sibling edges, so a weak edge competing with strong ones can be
     // starved harder than a floor would ever allow. A floored `ppr_edge_weight` has
     // never been tested. See the follow-up issue before re-deriving this from scratch.
-    let dir_fix = edge_dir_fix_enabled();
+    let dir_fix = limits.dir_fix;
 
     // Lever-1 prototype: weight each hop by the edge's relation type so activation
     // flows along meaningful predicates (causal/structural) rather than mere
@@ -299,9 +300,8 @@ fn spread_single_direction(
                 continue;
             }
 
-            const MAX_EDGES_PER_SPREAD: usize = 100;
             let edges =
-                graph.get_entity_relationships_limited(&entity_uuid, Some(MAX_EDGES_PER_SPREAD))?;
+                graph.get_entity_relationships_limited(&entity_uuid, Some(limits.max_edges))?;
 
             // Degree normalization: prevent hub nodes from flooding the network.
             // Divides outgoing activation by sqrt(1 + degree), matching the fan effect
@@ -443,6 +443,7 @@ fn bidirectional_spread(
     total_salience: f32,
     hops_per_direction: usize,
     ontological_intent: Option<&OntologicalIntent>,
+    limits: TraversalLimits,
 ) -> Result<(HashMap<Uuid, f32>, Vec<Uuid>, usize)> {
     // Split entities into forward/backward sets (alternating assignment)
     // This distributes entities evenly regardless of count
@@ -484,6 +485,7 @@ fn bidirectional_spread(
         threshold,
         ontological_intent,
         &mut entity_label_cache,
+        limits,
     )?;
 
     let (backward_map, backward_edges) = spread_single_direction(
@@ -493,6 +495,7 @@ fn bidirectional_spread(
         threshold,
         ontological_intent,
         &mut entity_label_cache,
+        limits,
     )?;
 
     // Combine maps with intersection boost
@@ -575,6 +578,19 @@ fn ppr_intern(
 /// `current` is always one endpoint (the edge came from its index), so when it is
 /// the `to`, the neighbour is `from`. With `dir_fix` off, the exact legacy
 /// behaviour is preserved so it can serve as the A/B control.
+///
+/// # How much connectivity the legacy behaviour costs
+///
+/// `add_relationship` stores ONE edge per (pair, relation type) under an
+/// order-independent pair key, and a co-occurrence edge's stored direction is
+/// just NER surface order at ingest (`handlers/state.rs`: `from = entity[i]`,
+/// `to = entity[j]` for `i < j`). Each edge is therefore walkable from exactly
+/// one of its two endpoints: |E| of the 2|E| endpoint incidences are dead, i.e.
+/// HALF the adjacency, and which half is an ingest artefact rather than a
+/// property of the data. The `analyze_graph_reachability` diagnostic that puts
+/// gold within 2 hops for 97.9% of held-out LoCoMo cases walks
+/// `[e.from_entity, e.to_entity]` — undirected — so its ceiling was measured
+/// over a graph the live leg cannot walk.
 /// Diagnostic counter: how many times the direction fix actually changed the
 /// traversal target (the current node was the `to` endpoint, so the true
 /// neighbour is `from`). Zero overhead when the fix is off, because the
@@ -602,14 +618,65 @@ fn edge_neighbor(
     }
 }
 
-/// Read the `SHODH_GRAPH_EDGE_DIR` A/B flag: when set, spreading/PPR/beam traversal
-/// follows edges to their true non-source endpoint instead of the legacy
-/// `to_entity`-only behaviour. Default off until the multi_hop comparison confirms
-/// it before flipping the production default.
-fn edge_dir_fix_enabled() -> bool {
-    std::env::var("SHODH_GRAPH_EDGE_DIR")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+/// Per-node edge budget used by every graph-leg walk when unconfigured.
+///
+/// The LoCoMo graph has 47 entities above degree 50 and a maximum degree of 301
+/// (the ingest-side `hub_max` of 300 binding), so this cap discards up to
+/// two-thirds of a hub's adjacency before traversal ever sees it — and
+/// `get_entity_relationships_limited` truncates by effective strength, so what
+/// is discarded is the WEAK tail, exactly where a PMI-suppressed hub edge to a
+/// rare gold entity lives.
+pub const DEFAULT_GRAPH_MAX_EDGES: usize = 100;
+
+/// Structural traversal budget shared by PPR expansion, reachability injection,
+/// beam traversal and the legacy BFS spread.
+///
+/// # Why this is a struct threaded as a parameter, not an env read per callee
+///
+/// `SHODH_SPREAD_FIX` was a flag whose branch sat BEHIND the default-on
+/// `SHODH_PPR` branch, so it could never execute; its ablation arms silently
+/// duplicated the baseline for months. Reading the environment exactly once, at
+/// the public entry point, and threading the result as a value makes that class
+/// of failure unrepresentable: a callee has no environment to consult, and a
+/// test can construct the non-default value directly instead of mutating
+/// process-global state (which would also race across Rust's multi-threaded
+/// test harness).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraversalLimits {
+    /// Follow an edge to its true non-source endpoint (`SHODH_GRAPH_EDGE_DIR`).
+    ///
+    /// See [`edge_neighbor`] for what the legacy `false` behaviour costs.
+    pub dir_fix: bool,
+    /// Per-node edge budget (`SHODH_GRAPH_MAX_EDGES`).
+    pub max_edges: usize,
+}
+
+impl Default for TraversalLimits {
+    /// The shipped behaviour: legacy `to_entity`-only traversal, 100 edges/node.
+    fn default() -> Self {
+        Self {
+            dir_fix: false,
+            max_edges: DEFAULT_GRAPH_MAX_EDGES,
+        }
+    }
+}
+
+impl TraversalLimits {
+    /// Read both flags from the environment. Called ONCE, from
+    /// [`spreading_activation_retrieve_with_stats`] — the single live entry
+    /// point of the graph leg. Unset environment yields [`Self::default`], i.e.
+    /// byte-identical behaviour to before the flags existed.
+    pub fn from_env() -> Self {
+        let dir_fix = std::env::var("SHODH_GRAPH_EDGE_DIR")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let max_edges = std::env::var("SHODH_GRAPH_MAX_EDGES")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&k| k > 0)
+            .unwrap_or(DEFAULT_GRAPH_MAX_EDGES);
+        Self { dir_fix, max_edges }
+    }
 }
 
 /// Intrinsic (decay-free, degree-free) transition weight of an edge for PPR: the
@@ -696,13 +763,13 @@ fn personalized_pagerank(
     predicate_weights: bool,
     specificity: bool,
     passage_weight: Option<f32>,
+    limits: TraversalLimits,
 ) -> Result<PprOutput> {
     const ALPHA: f32 = 0.5; // restart probability (PPR damping = 0.5)
     const ITERS: usize = 30;
     const TOL: f32 = 1e-6;
     const EXPAND_HOPS: usize = 3;
     const MAX_NODES: usize = 5000;
-    const MAX_EDGES_PER_NODE: usize = 100;
     const MAX_PASSAGES: usize = 4000;
     const MAX_EPISODES_PER_ENTITY: usize = 100;
 
@@ -753,10 +820,10 @@ fn personalized_pagerank(
             break;
         }
         let mut next: Vec<Uuid> = Vec::new();
-        let dir_fix = edge_dir_fix_enabled();
+        let dir_fix = limits.dir_fix;
         for &u in &frontier {
             let ui = ppr_intern(u, &mut nodes, &mut node_idx, &mut adj);
-            let edges = graph.get_entity_relationships_limited(&u, Some(MAX_EDGES_PER_NODE))?;
+            let edges = graph.get_entity_relationships_limited(&u, Some(limits.max_edges))?;
             for edge in edges {
                 let nb = edge_neighbor(&edge, &u, dir_fix);
                 let w = ppr_edge_weight(
@@ -960,10 +1027,10 @@ fn reachable_inject(
     seeds: &HashMap<Uuid, f32>,
     intent: Option<&OntologicalIntent>,
     predicate_weights: bool,
+    limits: TraversalLimits,
 ) -> Result<HashMap<Uuid, f32>> {
     const REACH_HOPS: usize = 2;
     const MAX_NODES: usize = 4000;
-    const MAX_EDGES_PER_NODE: usize = 100;
     const HOP_DECAY: f32 = 0.5;
     // Keep only the strongest-path reachable entities. Threshold-free expansion over a
     // hub (degree 225 on LoCoMo) otherwise floods the candidate set — every reachable
@@ -982,13 +1049,13 @@ fn reachable_inject(
             break;
         }
         let mut next: Vec<Uuid> = Vec::new();
-        let dir_fix = edge_dir_fix_enabled();
+        let dir_fix = limits.dir_fix;
         for &u in &frontier {
             let au = best.get(&u).copied().unwrap_or(0.0);
             if au <= 0.0 {
                 continue;
             }
-            let edges = graph.get_entity_relationships_limited(&u, Some(MAX_EDGES_PER_NODE))?;
+            let edges = graph.get_entity_relationships_limited(&u, Some(limits.max_edges))?;
             for edge in edges {
                 let nb = edge_neighbor(&edge, &u, dir_fix);
                 let w = ppr_edge_weight(
@@ -1040,10 +1107,10 @@ fn traverse_beam(
     seeds: &HashMap<Uuid, f32>,
     intent: Option<&OntologicalIntent>,
     predicate_weights: bool,
+    limits: TraversalLimits,
 ) -> Result<HashMap<Uuid, f32>> {
     const HOPS: usize = 2;
     const BEAM: usize = 32;
-    const MAX_EDGES: usize = 100;
 
     struct BeamPath {
         endpoint: Uuid,
@@ -1065,11 +1132,11 @@ fn traverse_beam(
     let mut reached: HashMap<Uuid, f32> = HashMap::new();
     let mut label_cache: HashMap<Uuid, Option<Vec<EntityLabel>>> = HashMap::new();
 
-    let dir_fix = edge_dir_fix_enabled();
+    let dir_fix = limits.dir_fix;
     for _ in 0..HOPS {
         let mut next: Vec<BeamPath> = Vec::new();
         for p in &beam {
-            let edges = graph.get_entity_relationships_limited(&p.endpoint, Some(MAX_EDGES))?;
+            let edges = graph.get_entity_relationships_limited(&p.endpoint, Some(limits.max_edges))?;
             for edge in edges {
                 let nb = edge_neighbor(&edge, &p.endpoint, dir_fix);
                 if p.visited.contains(&nb) {
@@ -1167,6 +1234,11 @@ pub fn spreading_activation_retrieve_with_stats(
 ) -> Result<(Vec<ActivatedMemory>, RetrievalStats)> {
     let start_time = Instant::now();
     let mut stats = RetrievalStats::default();
+
+    // The graph leg's structural traversal budget. Read ONCE here - this is the
+    // only `std::env::var` for these two flags in the whole leg; every walk
+    // below receives the value as a parameter. See `TraversalLimits` for why.
+    let limits = TraversalLimits::from_env();
 
     // A/B: unify this leg's recency/arousal/credibility boosts with the semantic leg.
     //
@@ -1463,6 +1535,7 @@ pub fn spreading_activation_retrieve_with_stats(
             pred_w,
             specificity,
             passage_weight,
+            limits,
         )?;
         activation_map = ppr_map;
         ppr_passage_map = passage_map;
@@ -1488,6 +1561,7 @@ pub fn spreading_activation_retrieve_with_stats(
             total_salience,
             adaptive_hops,
             intent_ref,
+            limits,
         )?;
 
         activation_map = bidirectional_map;
@@ -1517,7 +1591,7 @@ pub fn spreading_activation_retrieve_with_stats(
         let predicate_weights = std::env::var("SHODH_GRAPH_PREDICATE_WEIGHTS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        let dir_fix = edge_dir_fix_enabled();
+        let dir_fix = limits.dir_fix;
 
         for hop in 1..=SPREADING_MAX_HOPS {
             stats.graph_hops = hop;
@@ -1546,9 +1620,8 @@ pub fn spreading_activation_retrieve_with_stats(
                 }
 
                 // Get relationships from this entity (limited to prevent blowup)
-                const MAX_EDGES_PER_SPREAD: usize = 100;
                 let edges = graph
-                    .get_entity_relationships_limited(&entity_uuid, Some(MAX_EDGES_PER_SPREAD))?;
+                    .get_entity_relationships_limited(&entity_uuid, Some(limits.max_edges))?;
 
                 // Degree normalization: prevent hub nodes from flooding the network.
                 // Matches bidirectional path (Anderson & Reder 1999 ACT-R).
@@ -1721,7 +1794,7 @@ pub fn spreading_activation_retrieve_with_stats(
         let pred_w = std::env::var("SHODH_GRAPH_PREDICATE_WEIGHTS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        match reachable_inject(graph, &seed_activations, intent_ref, pred_w) {
+        match reachable_inject(graph, &seed_activations, intent_ref, pred_w, limits) {
             Ok(reach) => {
                 let before = activation_map.len();
                 for (u, a) in reach {
@@ -1752,7 +1825,7 @@ pub fn spreading_activation_retrieve_with_stats(
         let pred_w = std::env::var("SHODH_GRAPH_PREDICATE_WEIGHTS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        match traverse_beam(graph, &seed_activations, intent_ref, pred_w) {
+        match traverse_beam(graph, &seed_activations, intent_ref, pred_w, limits) {
             Ok(answers) => {
                 let n = answers.len();
                 for (ent, score) in answers {
@@ -2354,8 +2427,11 @@ mod tests {
         seeds.insert(hub, 1.0_f32);
         seeds.insert(rare, 1.0_f32);
 
-        let (off, _, _) = personalized_pagerank(&graph, &seeds, None, false, false, None).unwrap();
-        let (on, _, _) = personalized_pagerank(&graph, &seeds, None, false, true, None).unwrap();
+        let lim = TraversalLimits::default();
+        let (off, _, _) =
+            personalized_pagerank(&graph, &seeds, None, false, false, None, lim).unwrap();
+        let (on, _, _) =
+            personalized_pagerank(&graph, &seeds, None, false, true, None, lim).unwrap();
 
         let off_h = off.get(&target_h).copied().unwrap_or(0.0);
         let off_r = off.get(&target_r).copied().unwrap_or(0.0);
@@ -2459,11 +2535,21 @@ mod tests {
 
         // Flag off: no passage map.
         let (_, no_passages, _) =
-            personalized_pagerank(&graph, &seeds, None, false, false, None).unwrap();
+            personalized_pagerank(&graph, &seeds, None, false, false, None, TraversalLimits::default())
+                .unwrap();
         assert!(no_passages.is_empty(), "passages off must return empty map");
 
         let (entities, passages, _) =
-            personalized_pagerank(&graph, &seeds, None, false, false, Some(0.5)).unwrap();
+            personalized_pagerank(
+                &graph,
+                &seeds,
+                None,
+                false,
+                false,
+                Some(0.5),
+                TraversalLimits::default(),
+            )
+            .unwrap();
 
         let bridge_mass = passages.get(&bridge_id).copied().unwrap_or(0.0);
         let solo_mass = passages.get(&solo_id).copied().unwrap_or(0.0);
@@ -3041,5 +3127,389 @@ mod tests {
         );
 
         std::env::remove_var("SHODH_RECALL_READONLY");
+    }
+
+    // =========================================================================
+    // REACH: what the graph leg can even see.
+    //
+    // `analyze_graph_reachability` (recall_harness/runner.rs) reports gold as
+    // <=2-hop reachable for 97.9% of held-out LoCoMo cases, while the graph leg
+    // surfaces 89.3% at depth 100. The two numbers were measured over DIFFERENT
+    // graphs: the diagnostic walks `[e.from_entity, e.to_entity]` (undirected)
+    // with `get_entity_relationships` (no per-node cap); the leg walks
+    // `edge_neighbor` (which resolves to `edge.to_entity` unless
+    // `SHODH_GRAPH_EDGE_DIR` is set) with a 100-edge-per-node cap.
+    //
+    // These tests pin BOTH structural losses and both recoveries.
+    // =========================================================================
+
+    /// Serializes the tests that mutate `SHODH_GRAPH_EDGE_DIR` /
+    /// `SHODH_GRAPH_MAX_EDGES`. `TraversalLimits::from_env` reads the process
+    /// environment, and Rust runs tests multi-threaded in ONE process, so an
+    /// unguarded `set_var` leaks into every concurrent reader (same pattern as
+    /// `RECALL_READONLY_ENV_LOCK`). Tests that exercise the traversal itself
+    /// take `TraversalLimits` as a VALUE and need no lock at all — that is the
+    /// point of threading it as a parameter.
+    static TRAVERSAL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A bare `GraphMemory` plus entity/edge constructors, for the reach tests.
+    fn reach_fixture() -> (tempfile::TempDir, crate::graph_memory::GraphMemory) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = crate::graph_memory::GraphMemory::new(temp_dir.path(), None).unwrap();
+        (temp_dir, graph)
+    }
+
+    fn add_named_entity(graph: &crate::graph_memory::GraphMemory, name: &str) -> Uuid {
+        use crate::graph_memory::{EntityLabel, EntityNode};
+        use chrono::Utc;
+        graph
+            .add_entity(EntityNode {
+                uuid: Uuid::new_v4(),
+                name: name.to_string(),
+                labels: vec![EntityLabel::Concept],
+                created_at: Utc::now(),
+                last_seen_at: Utc::now(),
+                mention_count: 1,
+                summary: String::new(),
+                attributes: HashMap::new(),
+                name_embedding: None,
+                salience: 1.0,
+                is_proper_noun: false,
+                selectivity: None,
+                fine_type: None,
+                kb_id: None,
+            })
+            .unwrap()
+    }
+
+    fn add_directed_edge(
+        graph: &crate::graph_memory::GraphMemory,
+        from: Uuid,
+        to: Uuid,
+        strength: f32,
+    ) -> Uuid {
+        use crate::graph_memory::{EdgeTier, LtpStatus, RelationType, RelationshipEdge};
+        use chrono::Utc;
+        let now = Utc::now();
+        graph
+            .add_relationship(RelationshipEdge {
+                uuid: Uuid::new_v4(),
+                from_entity: from,
+                to_entity: to,
+                relation_type: RelationType::RelatedTo,
+                strength,
+                created_at: now,
+                valid_at: now,
+                invalidated_at: None,
+                source_episode_id: None,
+                context: String::new(),
+                last_activated: now,
+                activation_count: 1,
+                ltp_status: LtpStatus::None,
+                activation_timestamps: None,
+                tier: EdgeTier::L2Episodic,
+                entity_confidence: None,
+                forman_curvature: None,
+                endpoint_selectivity: None,
+                provenance: Vec::new(),
+                promoted_at: None,
+            })
+            .unwrap()
+    }
+
+    /// `GraphMemory::index_entity_edge` is called for BOTH endpoints
+    /// (graph_memory.rs), so an entity's edge list contains its INCOMING edges
+    /// too — but `edge_neighbor` with `dir_fix = false` returns `edge.to_entity`
+    /// unconditionally, which for an incoming edge is the source node itself. A
+    /// co-occurrence edge's stored direction is NER surface order (handlers/
+    /// state.rs sets `from = entity[i]`, `to = entity[j]`, `i < j`) and
+    /// `add_relationship` dedups on an order-independent pair key, so exactly
+    /// one of the two endpoints can ever walk any given edge: |E| of the 2|E|
+    /// endpoint incidences are dead in the default path.
+    ///
+    /// Here the ONLY edge into the seed is stored `gold -> seed`, so the legacy
+    /// walk cannot leave the seed at all.
+    #[test]
+    fn edge_direction_fix_recovers_incoming_only_neighbours() {
+        let (_dir, graph) = reach_fixture();
+        let seed = add_named_entity(&graph, "seedword");
+        let gold = add_named_entity(&graph, "goldword");
+        // Stored direction points AT the seed.
+        add_directed_edge(&graph, gold, seed, 0.8);
+
+        // Precondition: the edge IS in the seed's adjacency (indexed under both
+        // endpoints), so any miss below is the traversal's, not the index's.
+        assert_eq!(
+            graph
+                .get_entity_relationships_limited(&seed, Some(16))
+                .unwrap()
+                .len(),
+            1,
+            "the incoming edge must be indexed under the seed"
+        );
+
+        let mut seeds = HashMap::new();
+        seeds.insert(seed, 1.0_f32);
+
+        let legacy = TraversalLimits {
+            dir_fix: false,
+            max_edges: DEFAULT_GRAPH_MAX_EDGES,
+        };
+        let (activation_legacy, _, _) =
+            personalized_pagerank(&graph, &seeds, None, false, false, None, legacy).unwrap();
+        assert!(
+            !activation_legacy.contains_key(&gold),
+            "legacy to_entity-only traversal must NOT reach a node that is only \
+             reachable across an incoming edge (this is the shipped behaviour \
+             the flag exists to change); activated={activation_legacy:?}"
+        );
+
+        let fixed = TraversalLimits {
+            dir_fix: true,
+            max_edges: DEFAULT_GRAPH_MAX_EDGES,
+        };
+        let (activation_fixed, _, _) =
+            personalized_pagerank(&graph, &seeds, None, false, false, None, fixed).unwrap();
+        assert!(
+            activation_fixed.get(&gold).copied().unwrap_or(0.0) > 0.0,
+            "dir_fix must resolve the edge to its true non-source endpoint and \
+             give the gold entity stationary mass; activated={activation_fixed:?}"
+        );
+    }
+
+    /// The per-node edge budget is applied by
+    /// `get_entity_relationships_limited`, which sorts by effective strength
+    /// DESCENDING and truncates — so what a cap discards is the WEAK tail. On
+    /// LoCoMo the maximum degree is 301 against a budget of 100, and hub edges
+    /// are born weak (the PMI birth weighting floors an incidental pair at
+    /// `GRAPH_PMI_WEIGHT_FLOOR`), which is exactly where a rare gold entity
+    /// hangs off a speaker hub.
+    #[test]
+    fn per_node_edge_budget_truncates_the_weak_tail() {
+        let (_dir, graph) = reach_fixture();
+        let hub = add_named_entity(&graph, "hubword");
+        let gold = add_named_entity(&graph, "goldword");
+        for i in 0..3 {
+            let filler = add_named_entity(&graph, &format!("filler{i}"));
+            add_directed_edge(&graph, hub, filler, 0.9);
+        }
+        // Weakest edge on the hub — above L2_PRUNE_THRESHOLD (0.2) so the
+        // opportunistic read-time prune leaves it alone, below every filler.
+        add_directed_edge(&graph, hub, gold, 0.35);
+
+        // Preconditions: the cap really is what removes the gold edge.
+        let all = graph
+            .get_entity_relationships_limited(&hub, Some(16))
+            .unwrap();
+        assert_eq!(all.len(), 4, "hub must carry all four edges");
+        let capped = graph
+            .get_entity_relationships_limited(&hub, Some(3))
+            .unwrap();
+        assert!(
+            !capped.iter().any(|e| e.to_entity == gold),
+            "a 3-edge budget must drop the weakest (gold) edge"
+        );
+
+        let mut seeds = HashMap::new();
+        seeds.insert(hub, 1.0_f32);
+
+        let tight = TraversalLimits {
+            dir_fix: false,
+            max_edges: 3,
+        };
+        let (under_cap, _, _) =
+            personalized_pagerank(&graph, &seeds, None, false, false, None, tight).unwrap();
+        assert!(
+            !under_cap.contains_key(&gold),
+            "gold hanging off the hub's weakest edge must be invisible under a \
+             budget that truncates it; activated={under_cap:?}"
+        );
+
+        let wide = TraversalLimits {
+            dir_fix: false,
+            max_edges: 4,
+        };
+        let (over_cap, _, _) =
+            personalized_pagerank(&graph, &seeds, None, false, false, None, wide).unwrap();
+        assert!(
+            over_cap.get(&gold).copied().unwrap_or(0.0) > 0.0,
+            "raising the budget by one edge must recover it; activated={over_cap:?}"
+        );
+    }
+
+    /// The budget also bounds the beam walk and the reachability injection, so
+    /// raising it has to move those too — otherwise an ablation arm would
+    /// silently measure only the PPR half of the leg.
+    #[test]
+    fn per_node_edge_budget_binds_beam_and_reachability_walks() {
+        let (_dir, graph) = reach_fixture();
+        let hub = add_named_entity(&graph, "hubword");
+        let gold = add_named_entity(&graph, "goldword");
+        for i in 0..3 {
+            let filler = add_named_entity(&graph, &format!("filler{i}"));
+            add_directed_edge(&graph, hub, filler, 0.9);
+        }
+        add_directed_edge(&graph, hub, gold, 0.35);
+
+        let mut seeds = HashMap::new();
+        seeds.insert(hub, 1.0_f32);
+
+        let tight = TraversalLimits {
+            dir_fix: false,
+            max_edges: 3,
+        };
+        let wide = TraversalLimits {
+            dir_fix: false,
+            max_edges: 4,
+        };
+
+        let beam_tight = traverse_beam(&graph, &seeds, None, false, tight).unwrap();
+        let beam_wide = traverse_beam(&graph, &seeds, None, false, wide).unwrap();
+        assert!(
+            !beam_tight.contains_key(&gold) && beam_wide.contains_key(&gold),
+            "beam traversal must honour the budget: tight={beam_tight:?} wide={beam_wide:?}"
+        );
+
+        let reach_tight = reachable_inject(&graph, &seeds, None, false, tight).unwrap();
+        let reach_wide = reachable_inject(&graph, &seeds, None, false, wide).unwrap();
+        assert!(
+            !reach_tight.contains_key(&gold) && reach_wide.contains_key(&gold),
+            "reachability injection must honour the budget: \
+             tight={reach_tight:?} wide={reach_wide:?}"
+        );
+    }
+
+    #[test]
+    fn traversal_limits_default_is_the_shipped_behaviour() {
+        let d = TraversalLimits::default();
+        assert!(
+            !d.dir_fix,
+            "the direction fix must stay OFF by default — flipping a retrieval \
+             default without measurement is not allowed"
+        );
+        assert_eq!(
+            d.max_edges, DEFAULT_GRAPH_MAX_EDGES,
+            "the default budget must equal the constant the code shipped with"
+        );
+        assert_eq!(DEFAULT_GRAPH_MAX_EDGES, 100);
+    }
+
+    /// Both flags must actually REACH the live graph leg.
+    ///
+    /// This is the `SHODH_SPREAD_FIX` lesson: that flag's branch sat behind the
+    /// default-on `SHODH_PPR` branch, so it could never execute, and its
+    /// ablation arms silently duplicated the baseline for months. Asserting on
+    /// the private walk functions would not have caught it. This test drives the
+    /// PUBLIC entry point — the one `memory/mod.rs` calls — with nothing but the
+    /// environment changed, and asserts the leg's own `entities_activated`
+    /// statistic moves.
+    #[test]
+    fn traversal_flags_reach_the_live_graph_leg() {
+        let _env_guard = TRAVERSAL_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("SHODH_GRAPH_EDGE_DIR");
+        std::env::remove_var("SHODH_GRAPH_MAX_EDGES");
+
+        struct StubEmbedder;
+        impl crate::embeddings::Embedder for StubEmbedder {
+            fn encode(&self, _text: &str) -> Result<Vec<f32>> {
+                Ok(vec![0.1, 0.2, 0.3, 0.4])
+            }
+            fn dimension(&self) -> usize {
+                4
+            }
+        }
+        let embedder = StubEmbedder;
+        let episode_to_memory = |_ep: &EpisodicNode| -> Result<Option<SharedMemory>> { Ok(None) };
+        let query = Query {
+            query_text: Some("widget".to_string()),
+            ..Query::default()
+        };
+
+        // --- SHODH_GRAPH_EDGE_DIR: the only edge into the seed points AT it ---
+        let (_dir_a, graph_a) = reach_fixture();
+        let widget = add_named_entity(&graph_a, "widget");
+        let gadget = add_named_entity(&graph_a, "gadget");
+        add_directed_edge(&graph_a, gadget, widget, 0.8);
+
+        let run_a = || {
+            spreading_activation_retrieve_with_stats(
+                "widget",
+                &query,
+                &graph_a,
+                &embedder,
+                None,
+                None,
+                None,
+                episode_to_memory,
+            )
+            .expect("graph leg must run")
+            .1
+            .entities_activated
+        };
+
+        let dir_off = run_a();
+        assert_eq!(
+            dir_off, 1,
+            "with the flag unset the live leg must stay on the seed alone \
+             (the incoming edge is a self-loop), got {dir_off}"
+        );
+        std::env::set_var("SHODH_GRAPH_EDGE_DIR", "1");
+        let dir_on = run_a();
+        std::env::remove_var("SHODH_GRAPH_EDGE_DIR");
+        assert_eq!(
+            dir_on, 2,
+            "SHODH_GRAPH_EDGE_DIR=1 must reach the LIVE leg and recover the \
+             incoming-edge neighbour, got {dir_on}"
+        );
+
+        // --- SHODH_GRAPH_MAX_EDGES: two outgoing edges, budget of one ---
+        let (_dir_b, graph_b) = reach_fixture();
+        let widget_b = add_named_entity(&graph_b, "widget");
+        let strong = add_named_entity(&graph_b, "gadget");
+        let weak = add_named_entity(&graph_b, "sprocket");
+        add_directed_edge(&graph_b, widget_b, strong, 0.9);
+        add_directed_edge(&graph_b, widget_b, weak, 0.35);
+
+        let run_b = || {
+            spreading_activation_retrieve_with_stats(
+                "widget",
+                &query,
+                &graph_b,
+                &embedder,
+                None,
+                None,
+                None,
+                episode_to_memory,
+            )
+            .expect("graph leg must run")
+            .1
+            .entities_activated
+        };
+
+        let budget_default = run_b();
+        assert_eq!(
+            budget_default, 3,
+            "unset budget (100) must admit both edges, got {budget_default}"
+        );
+        std::env::set_var("SHODH_GRAPH_MAX_EDGES", "1");
+        let budget_one = run_b();
+        std::env::remove_var("SHODH_GRAPH_MAX_EDGES");
+        assert_eq!(
+            budget_one, 2,
+            "SHODH_GRAPH_MAX_EDGES=1 must reach the LIVE leg and truncate the \
+             weak edge, got {budget_one}"
+        );
+
+        // An unparseable or zero budget must fall back to the shipped default
+        // rather than silently disabling traversal.
+        std::env::set_var("SHODH_GRAPH_MAX_EDGES", "0");
+        let zero = TraversalLimits::from_env();
+        std::env::set_var("SHODH_GRAPH_MAX_EDGES", "not-a-number");
+        let junk = TraversalLimits::from_env();
+        std::env::remove_var("SHODH_GRAPH_MAX_EDGES");
+        assert_eq!(zero.max_edges, DEFAULT_GRAPH_MAX_EDGES);
+        assert_eq!(junk.max_edges, DEFAULT_GRAPH_MAX_EDGES);
     }
 }
