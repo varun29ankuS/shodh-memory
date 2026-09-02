@@ -26,7 +26,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: companion-rerank-lme
+  group: companion-rerank-lme-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'auto' }}
   cancel-in-progress: true
 
 jobs:
