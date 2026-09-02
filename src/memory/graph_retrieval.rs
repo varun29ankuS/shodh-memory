@@ -1807,6 +1807,18 @@ pub fn spreading_activation_retrieve_with_stats(
             .unwrap_or(false);
         // SHODH_GRAPH_PATH_STATE: keep distinct typed routes distinct.
         //
+        // ⚠ REQUIRES `SHODH_GRAPH_TRAVERSE=1`. This block is nested inside it,
+        // because `traverse_beam` is only called there -- so setting PATH_STATE
+        // alone changes NOTHING and an arm that sets only PATH_STATE silently
+        // measures baseline against baseline. That has already happened once
+        // (run 33603657064, cancelled), and it is the same shape as the
+        // `SHODH_SPREAD_FIX` precedent where both arms duplicated the default.
+        //
+        // The control for this flag is therefore `TRAVERSE=1` ALONE, never the
+        // default configuration: comparing against no-traversal confounds the
+        // operator with traversal itself, and traversal alone is known to COST
+        // recall (0.5349 -> ~0.5146 at n=1531).
+        //
         // Unset (default) reproduces the previous behaviour exactly -- collapse
         // every path to an endpoint by max, then max that into activation_map.
         //
