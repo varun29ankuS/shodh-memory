@@ -2097,6 +2097,26 @@ pub enum RelationType {
     /// discriminant and mis-decode every existing stored edge (see the
     /// "additive only" contract in this enum's doc comment above).
     Precedes,
+
+    /// An event and the agent taking part in it.
+    ///
+    /// `Event` is the LARGEST entity label this typer produces (164 of 434 on
+    /// the locomo probe, run 33536833198) and had no relation available to it
+    /// beyond being sited at a place, so every (Event, Person) and
+    /// (Event, Organization) pair fell through to `CoOccurs`. Nothing in the
+    /// existing 37 variants means participation: `PartOf` is mereological, an
+    /// arm is part of a body, and stretching it to "a person is part of a
+    /// conference" is the kind of visibly-wrong type this file argues against
+    /// elsewhere.
+    ///
+    /// Directed, and its inverse is `PartOf` in the participant->event
+    /// direction, so the two readings stay distinguishable rather than
+    /// collapsing to one symmetric association.
+    ///
+    /// Declared LAST for the same reason `Precedes` was: postcard encodes a
+    /// variant as the varint of its DECLARATION INDEX, so appending is the only
+    /// safe edit. Every existing stored edge keeps its discriminant.
+    Involves,
 }
 
 impl RelationType {
@@ -2104,6 +2124,7 @@ impl RelationType {
     #[allow(unused)] // Public API for serialization/display
     pub fn as_str(&self) -> &str {
         match self {
+            Self::Involves => "Involves",
             Self::WorksWith => "WorksWith",
             Self::WorksAt => "WorksAt",
             Self::EmployedBy => "EmployedBy",
@@ -2189,9 +2210,12 @@ impl RelationType {
         match self {
             // Causal relations — the lineage / multi-hop backbone.
             Causes | ResultsIn | Triggers | SupersededBy => 1.3,
-            // Strong typed relations between distinct entities.
+            // Strong typed relations between distinct entities. `Involves` sits
+            // here rather than with the structural group: an event and its
+            // participant is evidence of the same strength as a person and their
+            // employer, and weaker than causation.
             WorksAt | EmployedBy | Manages | AssignedTo | Approves | OwnedBy | CreatedBy
-            | DevelopedBy | Teaches => 1.1,
+            | DevelopedBy | Teaches | Involves => 1.1,
             // Structural / functional relations.
             PartOf | Contains | LocatedIn | LocatedAt | DependsOn | Requires | Uses
             | Implements | Configures | DeploysTo | Monitors | Documents | WorksWith | Knows
@@ -2515,6 +2539,12 @@ pub fn infer_relation_type_for_pair(from: &EntityLabel, to: &EntityLabel) -> Rel
         (Work, Person) | (Work, Organization) => CreatedBy,
         (Product, Person) => CreatedBy,
         (Product, Organization) => DevelopedBy,
+
+        // PARTICIPATION. Event is the largest label produced and had nothing
+        // available to it but place. Directed, with distinct readings each way:
+        // the event involves the agent, the agent takes part in the event.
+        (Event, Person) | (Event, Organization) | (Event, Norp) => Involves,
+        (Person, Event) | (Organization, Event) | (Norp, Event) => PartOf,
 
         // MEMBERSHIP. Norp is nationality / religious / political group, so a
         // person belongs to it rather than the reverse.
@@ -14282,6 +14312,22 @@ mod tests {
         assert_eq!(
             infer_relation_type_for_pair(&Organization, &Gpe),
             R::LocatedIn
+        );
+
+        // Participation. Event is the largest label produced (164 of 434) and
+        // had nothing available to it but place, so every (Event, Person) pair
+        // fell to CoOccurs. `Involves` and `PartOf` are the two readings of one
+        // fact and must stay distinguishable.
+        assert_eq!(infer_relation_type_for_pair(&Event, &Person), R::Involves);
+        assert_eq!(infer_relation_type_for_pair(&Person, &Event), R::PartOf);
+        assert_ne!(
+            infer_relation_type_for_pair(&Event, &Person),
+            infer_relation_type_for_pair(&Person, &Event),
+            "participation must read differently in each direction"
+        );
+        assert_eq!(
+            infer_relation_type_for_pair(&Event, &Organization),
+            R::Involves
         );
 
         // Authorship: artefact -> maker.

@@ -535,6 +535,7 @@ fn source_type_to_string(s: &SourceType) -> String {
 fn relation_type_to_string(r: &crate::graph_memory::RelationType) -> String {
     use crate::graph_memory::RelationType;
     match r {
+        RelationType::Involves => "involves",
         RelationType::WorksWith => "works_with",
         RelationType::WorksAt => "works_at",
         RelationType::EmployedBy => "employed_by",
