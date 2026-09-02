@@ -878,6 +878,41 @@ fn summarise_reachability(report: &ReachabilityReport) {
             .collect();
         eprintln!("  entity labels: {}", shown.join("  "));
 
+        // Which labels carry the connectivity. `entity labels` above says what
+        // EXISTS; a label that is a small share of nodes and a large share of
+        // incidences is a node type doing an attribute's job, and that is a
+        // construction decision rather than an extraction result.
+        //
+        // Denominator is total incidences (2x edges). Multi-label entities are
+        // counted under each label, so these shares can sum past 100% -- read
+        // each against that label's ENTITY share, not against the others.
+        let incidences = gs.total_edges * 2;
+        if incidences > 0 && !gs.label_degrees.is_empty() {
+            let mut census: Vec<(&String, &(usize, usize, usize))> =
+                gs.label_degrees.iter().collect();
+            census.sort_by(|a, b| b.1 .1.cmp(&a.1 .1).then_with(|| a.0.cmp(b.0)));
+            eprintln!("  degree census by label (entity share -> incidence share):");
+            for (name, (n, sum, max)) in census.iter().take(10) {
+                let ent_share = 100.0 * *n as f64 / gs.total_entities.max(1) as f64;
+                let inc_share = 100.0 * *sum as f64 / incidences as f64;
+                eprintln!(
+                    "    {name:<14} {n:>4} ent ({ent_share:>5.1}%) -> {sum:>6} inc ({inc_share:>5.1}%)                       mean {:>5.1}  max {max}",
+                    *sum as f64 / (*n).max(1) as f64,
+                );
+            }
+        }
+
+        // Identities. Aggregates hide hubs, and per-label mean degree
+        // understates them because degrees are post-cap. A degree sitting
+        // exactly on the cap is the tell: its overflow was discarded at ingest.
+        if !gs.top_hubs.is_empty() {
+            eprintln!("  top hubs by degree (post-cap; a degree at the cap means edges were dropped):");
+            for (name, labels, degree) in gs.top_hubs.iter().take(15) {
+                let short: String = name.chars().take(38).collect();
+                eprintln!("    {degree:>5}  {short:<38}  {labels}");
+            }
+        }
+
         // Connectivity. A k-connected graph survives k-1 vertex deletions; if
         // this shatters after a handful, connectivity is HUB-CARRIED and a high
         // edge count was never high connectivity.
