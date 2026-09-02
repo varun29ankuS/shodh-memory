@@ -1,0 +1,30 @@
+India national boundary — attribution and provenance
+====================================================
+
+Source      bharatlas.com  (https://bharatlas.com/view/india_boundary)
+Derived from  Local Government Directory (LGD), Government of India
+              https://lgdirectory.gov.in/
+              Dissolved from the 36 LGD state and Union Territory polygons.
+Licence     CC0-1.0 / CC-BY-4.0
+Retrieved   2026-08-14  (LGD 2024 snapshot, published 2026-05-24)
+
+Why this file exists
+--------------------
+The vendored world basemap (world-countries-110m.json, Natural Earth 110m)
+draws national boundaries on lines of de-facto control. For India that omits
+Aksai Chin and parts of Jammu & Kashmir, and treats Arunachal Pradesh as
+disputed. LGD is India's own authoritative administrative source, so a boundary
+dissolved from it is correct by construction.
+
+Verified before use against the official extent:
+    this file   68.178..97.413 E   6.753..37.088 N
+    official    68.117..97.417 E   8.067..37.100 N
+(The southern figure reaches past the mainland because Andaman & Nicobar are
+included.)
+
+Simplified with Douglas-Peucker at 0.035 degrees, from 756 polygons /
+317,369 points to 7 / 1,036. That tolerance is far finer than any zoom level
+this map offers resolves, and the simplification does not move the boundary
+outward anywhere.
+
+Natural Earth remains in use for every other country and for the landmass.
