@@ -743,6 +743,34 @@ pub struct GraphStructure {
     /// knowing BEFORE building the walker rather than after.
     #[serde(default)]
     pub typed_components: (usize, f64, usize),
+
+    /// Per-label degree census: label -> (entities, incidence sum, max degree).
+    ///
+    /// `entity_labels` says which labels EXIST; this says which ones carry the
+    /// graph's connectivity. The two come apart badly. A label can be 7% of
+    /// nodes and a third of all incidences, which is what a node type that
+    /// should have been an ATTRIBUTE looks like: "last weekend" is mentioned by
+    /// everything, so minting it as a node wires every memory that says it into
+    /// one star, and the star is not a relation anyone would query.
+    ///
+    /// An entity with two labels is counted under both, so the sums exceed the
+    /// entity and incidence totals. Read shares as per-label, not as a
+    /// partition.
+    #[serde(default)]
+    pub label_degrees: BTreeMap<String, (usize, usize, usize)>,
+
+    /// The 25 highest-degree entities: (name, labels, degree).
+    ///
+    /// Aggregates hide hubs. Per-label MEAN degree in particular understates
+    /// them, because degrees here are post-cap: an entity that saturated
+    /// `MAX_ENTITY_DEGREE` reports the cap while its overflow edges were
+    /// silently discarded at ingest, so the mean is an average over a censored
+    /// variable. The identities are what make a result legible -- "the top hub
+    /// is a date" and "the top hub is the user" are the same number and
+    /// opposite conclusions -- and degrees PINNED AT THE CAP in this list are
+    /// the actual tell for saturation.
+    #[serde(default)]
+    pub top_hubs: Vec<(String, String, usize)>,
 }
 
 /// Reachability tallies for one category (cumulative within-N-hops counts).
