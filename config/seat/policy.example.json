@@ -1,0 +1,20 @@
+{
+  "default": "withhold",
+  "rules": [
+    { "match": "mcp__corpus__list_documents",   "effect": "allow",    "reason": "Reading the analyst's own documents is the job." },
+    { "match": "mcp__corpus__read_document",    "effect": "allow",    "reason": "Read-only by construction; there is no write tool to withhold." },
+    { "match": "mcp__corpus__search_documents", "effect": "allow",    "reason": "Search is read-only." },
+    { "match": "ui_*",                          "effect": "allow",    "reason": "Moving the operator's screen. Withhold this to stop the agent navigating for them." },
+    { "match": "mcp__shodh__recall*",        "effect": "allow",    "reason": "Reading memory is the seat's purpose." },
+    { "match": "mcp__shodh__list_*",         "effect": "allow",    "reason": "Listing is read-only." },
+    { "match": "mcp__shodh__search_*",       "effect": "allow",    "reason": "Search is read-only." },
+    { "match": "mcp__shodh__explore_entity", "effect": "allow",    "reason": "Graph exploration is read-only." },
+    { "match": "mcp__shodh__trace_lineage",  "effect": "allow",    "reason": "Provenance is the thing we want it to show." },
+    { "match": "mcp__shodh__remember",       "effect": "allow",    "reason": "Writes are ledgered and revertible." },
+    { "match": "mcp__shodh__forget",         "effect": "withhold", "reason": "Deletion is an operator action, not an agent action." },
+    { "match": "mcp__shodh__purge_*",        "effect": "withhold", "reason": "Bulk deletion is never delegated." },
+    { "match": "mcp__shodh__backup_*",       "effect": "withhold", "reason": "Backup and restore move the whole store." },
+    { "match": "mcp__shodh__repair_index",   "effect": "withhold", "reason": "Index surgery is an operator action." },
+    { "match": "mcp__shodh__reset_*",        "effect": "withhold", "reason": "Resets are irreversible from the agent's side." }
+  ]
+}

@@ -141,7 +141,30 @@ export type SeatEvent =
   | { type: "usage"; model: ModelRef; usage: UsagePayload }
   | { type: "turn_end"; turn: number; stop_reason: string; error_message?: string }
   | { type: "agent_end" }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  /** The agent moving the operator's screen. Carries an intent, never a
+   *  selector: the client applies it through the same router and stores its own
+   *  controls use, so an agent-driven navigation and a clicked one reach
+   *  identical state. */
+  | { type: "ui_command"; command: UiCommand; reason: string };
+
+/** Destinations the agent may open. Mirrors DESTINATIONS in the rail and
+ *  UiView in seat/src/events.ts; the seat validates against the same set, so a
+ *  name that is not here never reaches the client. */
+export type UiView =
+  | "briefing"
+  | "chat"
+  | "recall"
+  | "graph"
+  | "geo"
+  | "anomalies"
+  | "tasks"
+  | "providers";
+
+export type UiCommand =
+  | { kind: "open"; view: UiView }
+  | { kind: "select_memory"; memory_id: string }
+  | { kind: "select_profile"; profile: string };
 
 /** seat/src/models-registry.ts `ModelInfo`. `billing` is what a token MEANS
  *  under the model's effective credential — the seat computes it from pi's

@@ -1,0 +1,361 @@
+# Graph lever × PMI-gate confound matrix.
+#
+# THE PROBLEM THIS EXISTS TO SETTLE. Seven graph levers have been measured inert
+# here — predicate weights, typed-only, edge direction, the 100-edge cap,
+# traversal, taxonomy edges, activation normalisation. Every one of those
+# measurements was taken with SHODH_GRAPH_PMI_GATE at its default, and that
+# default flipped to ON on 2026-07-03 (src/handlers/state.rs). The gate drops
+# incidental co-occurrence edges AT BIRTH and its own A/B measured −97.4% edges.
+#
+# So every "this lever does nothing" verdict was measured on a graph missing
+# most of its edges. A lever that reweights, filters or directs edges cannot
+# show an effect on edges that were never stored. The 100-edge-cap null is the
+# clearest case: a cap cannot bind on a graph that small.
+#
+# That does not mean the levers work. It means we do not know, and seven
+# negative results are currently being treated as knowledge. This workflow
+# produces the comparison that decides it:
+#
+#   for gate in {0, 1}:
+#     baseline, then each lever alone
+#
+# and reports each lever's delta against its OWN gate-matched baseline. The
+# question is not "is the lever positive" but "does its measured effect change
+# when the edges it acts on actually exist". If the gate=0 column matches the
+# gate=1 column, the inert verdicts stand and we stop re-litigating them. If it
+# does not, seven conclusions need retracting.
+#
+# WHY EACH ARM RE-INGESTS. SHODH_GRAPH_PMI_GATE applies at edge birth, so it
+# cannot be varied over a shared store the way a query-time flag can. Every arm
+# gets its own ingest and its own storage directory. That is what makes this
+# expensive and why it is dispatch-only.
+#
+# NOT INCLUDED, deliberately:
+#   - SHODH_GRAPH_TRAVERSE — measured to collapse recall 0.5686 → 0.1070. It
+#     would dominate every other arm and tells us nothing about the confound.
+#   - Taxonomy edges and activation normalisation — those flags do not exist on
+#     main; they live on unmerged branches. Adding them here would test nothing.
+#
+# READ recall@10, NOT p@1. recall@10 averages a continuous per-case value, so it
+# can move arbitrarily little. p@1 counts whole cases and on a 100-case suite
+# moves only in steps of 0.01 — see scripts/recall_diff.py's resolution note.
+name: Graph Lever Confound
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'locomo-gate (100 cases, fast) or locomo (1,531 held-out, slow)'
+        required: false
+        default: 'locomo-gate'
+        type: choice
+        options: ['locomo-gate', 'locomo']
+      levers:
+        description: 'Comma-separated graph flags to test one at a time, each set to 1.'
+        required: false
+        default: 'SHODH_GRAPH_EDGE_DIR,SHODH_GRAPH_PREDICATE_WEIGHTS,SHODH_GRAPH_TYPED_ONLY,SHODH_GRAPH_REACH_INJECT'
+      disable:
+        description: >-
+          Comma-separated flags to set to 0, one arm each. `levers` turns things
+          ON; this turns things OFF, which is the only way to ablate a
+          default-ON behaviour. Nine default-ON behavioural flags exist that
+          nothing checked in ever flips -- their A/B evidence lives in commit
+          prose and CI run ids, at baselines from another era, with no
+          committed arm to re-run. SHODH_PPR is the sharp case: its
+          justification cites a funnel figure that was produced without the
+          neural NER.
+        required: false
+        default: ''
+      max_cases:
+        description: 'SHODH_MAX_CASES cap (blank = all)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: graph-lever-confound-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  matrix:
+    name: lever x gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+
+      - name: Install LLVM (ONNX runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+
+      - name: Cache embedder model
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+
+      - name: Pre-fetch MiniLM embedder
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+
+      # WITHOUT THIS THE MATRIX MEASURES NOTHING. The neural NER is GLiNER, and
+      # it is loaded from SHODH_GLINER_MODEL_PATH (default ./models/gliner-bi-edge).
+      # With no model the recogniser silently degrades to the rule-based
+      # fallback -- a different extractor than production ships, building a
+      # different graph. The first dispatch of this workflow omitted these steps
+      # and had to be cancelled; recall.yml has fetched and verified them all
+      # along, which is exactly why its numbers are the trustworthy ones.
+      - name: Cache GLiNER typer assets
+        id: gliner-cache
+        uses: actions/cache@v6
+        with:
+          path: models/gliner-bi-edge
+          key: gliner-bi-edge-onnx-v1
+
+      - name: Fetch GLiNER typer assets
+        if: steps.gliner-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p models/gliner-bi-edge
+          gh release download gliner-bi-edge-onnx-v1 --repo "$GITHUB_REPOSITORY" --dir models/gliner-bi-edge
+          ls -la models/gliner-bi-edge
+
+      - name: Verify model assets (hard gate)
+        run: |
+          GL="${{ github.workspace }}/models/gliner-bi-edge"
+          MM="$HOME/.cache/shodh-memory/models/minilm-l6"
+          test -s "$MM/model_quantized.onnx" || { echo "::error::MiniLM weights missing"; exit 1; }
+          test -s "$GL/model.onnx" || { echo "::error::GLiNER model missing - refusing to measure fallback NER"; exit 1; }
+          test -s "$GL/tokenizer.json" || { echo "::error::GLiNER tokenizer missing"; exit 1; }
+          test -s "$GL/label_embeddings.bin" || { echo "::error::GLiNER label embeddings missing"; exit 1; }
+
+      - name: Run the matrix
+        env:
+          SUITE: ${{ github.event.inputs.suite || 'locomo-gate' }}
+          LEVERS: ${{ github.event.inputs.levers || 'SHODH_GRAPH_EDGE_DIR,SHODH_GRAPH_PREDICATE_WEIGHTS,SHODH_GRAPH_TYPED_ONLY,SHODH_GRAPH_REACH_INJECT' }}
+          DISABLE: ${{ github.event.inputs.disable }}
+          SHODH_MAX_CASES: ${{ github.event.inputs.max_cases }}
+          # The substrate scoreboard. state.rs logs "edge typing provenance" per
+          # memory at info; without this the counters never reach the log and the
+          # generic share stays an audit note of unknown vintage rather than a
+          # number from today's graph. Omitting it is what made the first run of
+          # this workflow unable to answer the question it was closest to.
+          RUST_LOG: shodh_memory::handlers::state=info
+          SHODH_MODEL_PATH: $HOME/.cache/shodh-memory/models/minilm-l6
+          SHODH_GLINER_MODEL_PATH: ${{ github.workspace }}/models/gliner-bi-edge
+        run: |
+          set -u
+          IFS=',' read -ra LEVER_LIST <<< "$LEVERS"
+          IFS=',' read -ra OFF_LIST <<< "${DISABLE:-}"
+
+          # Every arm is (gate, lever) with its own ingest and its own store.
+          # `none` is the gate-matched baseline each lever is measured against —
+          # comparing a gate=0 lever to a gate=1 baseline would reintroduce the
+          # very confound this is here to remove.
+          for GATE in 0 1; do
+            for LEVER in none "${LEVER_LIST[@]}"; do
+              TAG="gate${GATE}-${LEVER}"
+              echo "::group::arm ${TAG}"
+              # A non-zero exit is an arm failing, not the matrix failing: the
+              # remaining arms still carry information and the table marks the
+              # hole. Losing five good arms to one bad one wastes the whole run.
+              if [ "$LEVER" = "none" ]; then
+                env SHODH_GRAPH_PMI_GATE="$GATE" \
+                  ./target/release/recall-eval \
+                    --suite "$SUITE" \
+                    --output "arm-${TAG}.json" \
+                    --storage "./s-${TAG}" 2>"${TAG}.log" | tail -4 || echo "ARM ${TAG} FAILED"
+              else
+                env SHODH_GRAPH_PMI_GATE="$GATE" "${LEVER}=1" \
+                  ./target/release/recall-eval \
+                    --suite "$SUITE" \
+                    --output "arm-${TAG}.json" \
+                    --storage "./s-${TAG}" 2>"${TAG}.log" | tail -4 || echo "ARM ${TAG} FAILED"
+              fi
+              # Surface the recogniser in the JOB log, not only in the per-arm
+              # file. The first dispatch was cancelled on inference because
+              # stderr was invisible here and the artifacts had not uploaded yet
+              # -- a diagnostic whose own fidelity cannot be read from its log is
+              # the failure mode this workflow exists to expose.
+              grep -m1 '^NER_BACKEND=' "${TAG}.log" || echo "NER_BACKEND=<not reported> for ${TAG}"
+              # Storage is per-arm and large; drop it once the report is written.
+              rm -rf "./s-${TAG}"
+              echo "::endgroup::"
+            done
+
+            # Ablation arms: set a default-ON flag to 0. Same gate-matched
+            # baseline, so the delta is the cost of removing the behaviour.
+            for OFF in ${OFF_LIST[@]+"${OFF_LIST[@]}"}; do
+              [ -z "$OFF" ] && continue
+              TAG="gate${GATE}-off-${OFF}"
+              echo "::group::arm ${TAG}"
+              env SHODH_GRAPH_PMI_GATE="$GATE" "${OFF}=0"                 ./target/release/recall-eval                   --suite "$SUITE"                   --output "arm-${TAG}.json"                   --storage "./s-${TAG}" 2>"${TAG}.log" | tail -4 || echo "ARM ${TAG} FAILED"
+              grep -m1 '^NER_BACKEND=' "${TAG}.log" || echo "NER_BACKEND=<not reported> for ${TAG}"
+              rm -rf "./s-${TAG}"
+              echo "::endgroup::"
+            done
+          done
+
+      # WHAT SHARE OF THE GRAPH IS THE HAIRBALL?
+      #
+      # Co-occurrence is symmetric and fully determined by entity->episode
+      # incidence, which is already indexed (entity_episodes_cf). Materialising
+      # it turns n entities in one memory into n(n-1)/2 edges -- issue #90 saw
+      # 240k edges from 3k memories. Every generic edge stored is a fact the
+      # store could derive.
+      #
+      # It also decides whether typed path composition has substrate: a path
+      # grammar over CoOccurs is the abelian case in costume, and if generic is
+      # ~80% of edges then a fully-typed 2-hop path is ~4% of pairs.
+      - name: Edge-type census
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import re, glob, collections
+          ANSI = re.compile(chr(27) + re.escape(chr(91)) + "[0-9;]*m")
+          KEYS = ("semantic", "cue", "pair_table", "learned", "generic",
+                  "fragment_blocked", "pmi_gated")
+          print("## Edge-type census - what share of the graph is derivable?")
+          print()
+          print("| arm | typed | generic | pmi_gated | generic share of stored |")
+          print("| --- | --- | --- | --- | --- |")
+          for log in sorted(glob.glob("gate*.log")):
+              tot = collections.Counter()
+              for line in open(log, errors="ignore"):
+                  if "edge typing provenance" not in line:
+                      continue
+                  for k, v in re.findall(r"(\w+)=(\d+)", ANSI.sub("", line)):
+                      if k in KEYS:
+                          tot[k] += int(v)
+              typed = tot["semantic"] + tot["cue"] + tot["pair_table"] + tot["learned"]
+              stored = typed + tot["generic"]
+              if stored == 0:
+                  continue
+              share = 100.0 * tot["generic"] / stored
+              print(f"| `{log[:-4]}` | {typed} | {tot['generic']} | {tot['pmi_gated']} | **{share:.1f}%** |")
+          print()
+          print("generic = untyped co-occurrence, symmetric, derivable from incidence.")
+          print("A high share means most stored edges carry no relation, so typed")
+          print("path composition has almost no substrate to walk.")
+          PY
+
+      - name: Confound table
+        if: always()
+        env:
+          LEVERS: ${{ github.event.inputs.levers || 'SHODH_GRAPH_EDGE_DIR,SHODH_GRAPH_PREDICATE_WEIGHTS,SHODH_GRAPH_TYPED_ONLY,SHODH_GRAPH_REACH_INJECT' }}
+          DISABLE: ${{ github.event.inputs.disable }}
+          SUITE: ${{ github.event.inputs.suite || 'locomo-gate' }}
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, os, pathlib
+
+          levers = [l for l in os.environ["LEVERS"].split(",") if l]
+          disabled = [l for l in os.environ.get("DISABLE", "").split(",") if l]
+          suite = os.environ["SUITE"]
+
+          def arm(gate, lever):
+              p = pathlib.Path(f"arm-gate{gate}-{lever}.json")
+              if not p.exists():
+                  return None
+              d = json.loads(p.read_text())
+              full = d["layers"].get("full") or next(iter(d["layers"].values()))
+              return d, full
+
+          print(f"## Graph lever x PMI-gate confound — suite `{suite}`\n")
+          print("Each lever is compared against the baseline **at its own gate setting**.")
+          print("`gate=1` is how every previous measurement was taken (default since")
+          print("2026-07-03, -97.4% edges). `gate=0` is the same lever on a graph that")
+          print("kept its edges.\n")
+
+          base = {g: arm(g, "none") for g in (0, 1)}
+          for g in (0, 1):
+              if base[g] is None:
+                  print(f"> **Baseline gate={g} did not produce a report — its column is unusable.**\n")
+
+          if base[0] and base[1]:
+              b0, b1 = base[0][1], base[1][1]
+              print("### Does un-culling alone move anything?\n")
+              print("| metric | gate=1 (default) | gate=0 (un-culled) | delta |")
+              print("| --- | --- | --- | --- |")
+              for m in ("recall@10", "ndcg@10", "mrr", "p@1"):
+                  print(f"| {m} | {b1[m]:.4f} | {b0[m]:.4f} | {b0[m]-b1[m]:+.4f} |")
+              print()
+
+          print("### Lever effect, measured both ways\n")
+          print("| lever | delta @ gate=1 | delta @ gate=0 | verdict changes? |")
+          print("| --- | --- | --- | --- |")
+          METRIC = "recall@10"
+          for lever in levers:
+              cells = []
+              for g in (1, 0):
+                  a, b = arm(g, lever), base[g]
+                  cells.append(None if (a is None or b is None) else a[1][METRIC] - b[1][METRIC])
+              d1, d0 = cells
+              fmt = lambda d: "n/a" if d is None else f"{d:+.4f}"
+              if d1 is None or d0 is None:
+                  flag = "incomplete"
+              else:
+                  # "Inert" here means below the smallest delta anyone has argued
+                  # is real in this repo. Sign flips and order-of-magnitude
+                  # changes are what would retract a verdict.
+                  inert = 0.0050
+                  was, now = abs(d1) < inert, abs(d0) < inert
+                  if was and not now:
+                      flag = "**YES — was inert, is not**"
+                  elif (d1 < 0) != (d0 < 0) and not (was and now):
+                      flag = "**YES — sign flips**"
+                  elif was and now:
+                      flag = "no — inert either way"
+                  else:
+                      flag = "no"
+              print(f"| `{lever}` | {fmt(d1)} | {fmt(d0)} | {flag} |")
+
+          if disabled:
+              print()
+              print("### Cost of REMOVING a default-ON behaviour")
+              print()
+              print("| flag set to 0 | delta @ gate=1 | delta @ gate=0 |")
+              print("| --- | --- | --- |")
+              for flag in disabled:
+                  cells = []
+                  for g in (1, 0):
+                      a = arm(g, f"off-{flag}")
+                      b = base[g]
+                      cells.append(None if (a is None or b is None) else a[1][METRIC] - b[1][METRIC])
+                  fmt = lambda d: "n/a" if d is None else f"{d:+.4f}"
+                  print(f"| `{flag}=0` | {fmt(cells[0])} | {fmt(cells[1])} |")
+              print()
+              print("A delta near zero means the behaviour is not earning its default.")
+              print("A large negative means it is load-bearing and the escape hatch is")
+              print("expensive. An arm that FAILED means the escape hatch does not run.")
+
+          print()
+          print(f"_Delta is {METRIC} against the gate-matched baseline. Read recall@10 rather")
+          print("than p@1: p@1 counts whole cases and cannot resolve small moves on a")
+          print("100-case suite._")
+          PY
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: graph-lever-confound
+          path: |
+            arm-*.json
+            *.log

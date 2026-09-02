@@ -30,15 +30,16 @@ pub fn dot_product_inline(a: &[f32], b: &[f32]) -> f32 {
 
     #[cfg(target_arch = "x86_64")]
     {
-        #[cfg(target_feature = "avx2")]
-        unsafe {
-            return dot_product_avx2_inline(a, b);
+        // RUNTIME detection, not `cfg(target_feature)`. We ship one portable binary
+        // built for the baseline x86-64 target, where `target_feature = "avx2"` is
+        // false — so a compile-time gate deletes the AVX2 kernel from the build and
+        // every distance silently takes the scalar path. `is_x86_feature_detected!`
+        // caches the CPUID result after the first call, so this is a predictable
+        // load-and-test per call, not a CPUID per vector.
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            return unsafe { dot_product_avx2_inline(a, b) };
         }
-
-        #[cfg(not(target_feature = "avx2"))]
-        {
-            dot_product_scalar_inline(a, b)
-        }
+        return dot_product_scalar_inline(a, b);
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -186,15 +187,11 @@ pub fn euclidean_squared_inline(a: &[f32], b: &[f32]) -> f32 {
 
     #[cfg(target_arch = "x86_64")]
     {
-        #[cfg(target_feature = "avx2")]
-        unsafe {
-            return euclidean_squared_avx2_inline(a, b);
+        // Runtime detection — see the note on `dot_product_inline`.
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            return unsafe { euclidean_squared_avx2_inline(a, b) };
         }
-
-        #[cfg(not(target_feature = "avx2"))]
-        {
-            euclidean_squared_scalar_inline(a, b)
-        }
+        return euclidean_squared_scalar_inline(a, b);
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -323,15 +320,11 @@ pub fn l2_norm_inline(a: &[f32]) -> f32 {
 pub fn l2_norm_squared_inline(a: &[f32]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
-        #[cfg(target_feature = "avx2")]
-        unsafe {
-            return l2_norm_squared_avx2_inline(a);
+        // Runtime detection — see the note on `dot_product_inline`.
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            return unsafe { l2_norm_squared_avx2_inline(a) };
         }
-
-        #[cfg(not(target_feature = "avx2"))]
-        {
-            l2_norm_squared_scalar_inline(a)
-        }
+        return l2_norm_squared_scalar_inline(a);
     }
 
     #[cfg(target_arch = "aarch64")]

@@ -202,6 +202,29 @@ pub static ONTOLOGICAL_DENSITY_SKIP_TOTAL: LazyLock<IntCounter> = LazyLock::new(
     .expect("ONTOLOGICAL_DENSITY_SKIP_TOTAL metric must be valid at compile time")
 });
 
+/// Co-occurrence edges never minted because an endpoint had already saturated
+/// `SHODH_HUB_DEGREE_MAX`.
+///
+/// The cap is a hard SKIP, not an eviction: past the threshold an entity accretes
+/// no further edges, so which associations exist is decided by ingest ARRIVAL
+/// ORDER. The condition is `||`, so one saturated endpoint kills the edge even
+/// when the other is a rare, highly discriminative entity — and rare entities are
+/// exactly the ones that arrive late. The cap therefore culls on a criterion
+/// uncorrelated with information, while the PMI-squared gate alongside it culls
+/// on precisely that criterion.
+///
+/// This counter exists because the skip was previously `tracing::debug!` only:
+/// the graph could be losing an arbitrary fraction of its associations and
+/// nothing would report it. Same blind spot that hid the Vamana index building a
+/// greedy kNN graph instead of an alpha-RNG one.
+pub static HUB_SATURATION_EDGE_SKIP_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    IntCounter::new(
+        "shodh_hub_saturation_edge_skip_total",
+        "Co-occurrence edges skipped because an endpoint exceeded SHODH_HUB_DEGREE_MAX",
+    )
+    .expect("HUB_SATURATION_EDGE_SKIP_TOTAL metric must be valid at compile time")
+});
+
 // ============================================================================
 // Embedding Metrics (P1.2: Instrument embed operations)
 // ============================================================================

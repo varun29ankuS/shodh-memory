@@ -45,6 +45,8 @@ import type { LearningLedger } from "./ledger.js";
 import { MEMORY_GUIDANCE } from "./memory-guidance.js";
 import { createMemoryTools } from "./memory-tools.js";
 import type { ModelRegistry } from "./models-registry.js";
+import type { ToolPolicy } from "./policy.js";
+import { createUiTools } from "./ui-tools.js";
 
 const HARNESS_SUFFIX = ".seat-harness";
 /** Backend limit: src/validation.rs MAX_USER_ID_LENGTH = 128. */
@@ -141,6 +143,23 @@ function withoutRedundantMcpTools(tools: AgentTool<any>[], enabled: boolean): Ag
 	});
 }
 
+/**
+ * Narrow the bridged tools to what policy permits.
+ *
+ * Withheld tools are removed from the list the model is offered rather than
+ * refused at call time: a capability the model can still see is one it can be
+ * argued into attempting, and every denial becomes a negotiation inside the
+ * context window.
+ *
+ * Applied at both assembly sites for the same reason `withoutRedundantMcpTools`
+ * is — `mcpTools` is re-read every turn, so a server that reconnects with new
+ * tools mid-conversation would otherwise arrive unfiltered.
+ */
+function permitted(deps: { policy?: ToolPolicy }, tools: AgentTool<any>[]): AgentTool<any>[] {
+	if (!deps.policy) return tools;
+	return deps.policy.apply(tools).allowed;
+}
+
 /** Hard cap on verification passes per turn: one revision, never a loop. */
 const MAX_VERIFY_PASSES = 1;
 
@@ -216,6 +235,17 @@ export interface ConversationDeps {
 	 * rehydrated from the store rather than recreated per request.
 	 */
 	mcpTools: () => AgentTool<any>[];
+	/**
+	 * What the seat is allowed to reach. Optional, and absent means
+	 * unrestricted — opting IN to constraint has to be deliberate or upgrading
+	 * the seat silently breaks every deployment that never had a policy.
+	 *
+	 * Applied to the bridged MCP tools only. Native memory tools are exempt by
+	 * design: recall and remember are what the seat IS, and a policy that can
+	 * switch them off turns the product into a chat box while looking like a
+	 * model that has gone quiet.
+	 */
+	policy?: ToolPolicy;
 }
 
 export interface ConversationOptions {
@@ -311,6 +341,8 @@ export class Conversation {
 	 *  changed set of MCP tools without recreating them (they close over this
 	 *  conversation's ids and event sink). */
 	private readonly memoryTools: AgentTool<any>[];
+	/** Screen control. Built once; policed per turn with the bridged tools. */
+	private readonly uiTools: AgentTool<any>[];
 
 	private turn = 0;
 	private currentSink?: SeatEventSink;
@@ -366,6 +398,8 @@ export class Conversation {
 		if (options.systemPrompt?.trim()) promptBlocks.push(options.systemPrompt.trim());
 		this.baseSystemPrompt = promptBlocks.join("\n\n");
 
+		this.uiTools = createUiTools({ emit: (event) => this.currentSink?.(event) });
+
 		this.memoryTools = createMemoryTools({
 			backend: deps.backend,
 			userId: this.userId,
@@ -392,7 +426,10 @@ export class Conversation {
 				thinkingLevel: "off",
 				tools: [
 					...this.memoryTools,
-					...withoutRedundantMcpTools(deps.mcpTools(), this.mechanisms.mcpMemoryToolFilter),
+					...permitted(deps, [
+						...this.uiTools,
+						...withoutRedundantMcpTools(deps.mcpTools(), this.mechanisms.mcpMemoryToolFilter),
+					]),
 				],
 				// Restored transcripts were produced by this same agent and
 				// persisted verbatim (store.ts) — the cast re-labels what the
@@ -501,10 +538,29 @@ export class Conversation {
 		// change what the agent can reach between runs — and it is the only
 		// place a server that reconnected, dropped, or changed its tool list
 		// since the last turn actually takes effect.
-		this.agent.state.tools = [
-			...this.memoryTools,
+		// UI tools are policed alongside the bridged ones, and that asymmetry
+		// with memoryTools is deliberate: recall and remember are what the seat
+		// IS, but moving an operator's screen is exactly the capability someone
+		// approving a deployment may want to withhold.
+		const policeable = [
+			...this.uiTools,
 			...withoutRedundantMcpTools(this.deps.mcpTools(), this.mechanisms.mcpMemoryToolFilter),
 		];
+		const { allowed, withheld } = this.deps.policy
+			? this.deps.policy.apply(policeable)
+			: { allowed: policeable, withheld: [] };
+		this.agent.state.tools = [...this.memoryTools, ...allowed];
+
+		// Recorded BEFORE the turn runs, and deliberately not caught: an
+		// unrecorded constraint is indistinguishable from no constraint, so if
+		// the ledger cannot be written the honest outcome is that the turn does
+		// not happen. Same rule as a named policy file that cannot be read.
+		if (withheld.length > 0) {
+			await this.deps.ledger.append("policy_withheld", "user", this.userId, this.id, this.turn, {
+				withheld: withheld.map((d) => ({ tool: d.tool, by: d.by, reason: d.reason })),
+				offered: this.memoryTools.length + allowed.length,
+			});
+		}
 
 		// Reset per-run state.
 		this.surfaced = new Map();

@@ -119,8 +119,52 @@ jobs:
           # not once per run (which earned us a 429 rate-limit after this session's runs).
           dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
           [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          # fp32 weights, so the cost of int8 quantisation on retrieval can be
+          # measured (SHODH_USE_QUANTIZED_MODEL=0). Semantic similarity is the
+          # strongest ranking signal in the pipeline and it has only ever been
+          # produced by the quantised model - the price of that has never been
+          # measured. Fetched unconditionally so the arm is always runnable.
+          [ -s "$MODEL_DIR/model.onnx" ]           || dl "$MODEL_DIR/model.onnx" "$BASE/onnx/model.onnx"
           [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
           ls -la "$MODEL_DIR"
+
+      # EVERY DIAGNOSTIC BELOW RAN WITHOUT THE NEURAL NER UNTIL NOW.
+      #
+      # The neural recogniser is GLiNER, loaded from SHODH_GLINER_MODEL_PATH
+      # (default ./models/gliner-bi-edge). This workflow never fetched it, and
+      # until the guard moved into `ingest_corpus` the analysis paths it drives
+      # -- reachability, entity-linking, the funnel, the learning curve, the
+      # ablation matrix, multi-hop, ontology, lineage, forgetting, temporal --
+      # carried no NER gate. So they degraded to the rule-based fallback in
+      # silence and reported the result as if it were the shipped system, while
+      # recall.yml fetched and verified the same assets all along.
+      #
+      # That is not a small fidelity difference. The extractor decides which
+      # entities exist, which decides which edges exist, which is the substrate
+      # every one of these diagnostics measures.
+      - name: Cache GLiNER typer assets
+        id: gliner-cache
+        uses: actions/cache@v6
+        with:
+          path: models/gliner-bi-edge
+          key: gliner-bi-edge-onnx-v1
+
+      - name: Fetch GLiNER typer assets
+        if: steps.gliner-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p models/gliner-bi-edge
+          gh release download gliner-bi-edge-onnx-v1 --repo "$GITHUB_REPOSITORY" --dir models/gliner-bi-edge
+          ls -la models/gliner-bi-edge
+
+      - name: Verify GLiNER assets (hard gate)
+        run: |
+          GL="${{ github.workspace }}/models/gliner-bi-edge"
+          test -s "$GL/model.onnx" || { echo "::error::GLiNER model missing - refusing to measure fallback NER"; exit 1; }
+          test -s "$GL/tokenizer.json" || { echo "::error::GLiNER tokenizer missing"; exit 1; }
+          test -s "$GL/label_embeddings.bin" || { echo "::error::GLiNER label embeddings missing"; exit 1; }
+          echo "SHODH_GLINER_MODEL_PATH=$GL" >> "$GITHUB_ENV"
 
       - name: Graph reachability diagnostic
         if: ${{ github.event.inputs.mode == 'reachability' }}
@@ -146,6 +190,7 @@ jobs:
           print(f"### Graph structure (anti-hub scoreboard)")
           print(f"- entities: {gs.get('total_entities',0)}  edges(est): {gs.get('total_edges',0)}  mean degree: {gs.get('mean_degree',0):.1f}")
           print(f"- **max degree: {gs.get('max_degree',0)}**  hubs (degree>{gs.get('hub_threshold',50)}): **{gs.get('hub_count',0)}**  top degrees: {gs.get('top_degrees',[])}")
+          print(f"- **edges SKIPPED by hub saturation: {gs.get('hub_saturation_skipped_edges',0)}** (hard skip, decided by ingest ARRIVAL ORDER not by information)")
           print(f"  (max degree + hub count should FALL with IDF edges / lower hub_max)\n")
           print(f"- max_hops: {d['max_hops']}  (≤2hop% = canonical double-hop signal)")
           print("\n| category | cases | gold | ≤1hop% | ≤2hop% | unreach% | no-seed% | cases≥2seed% | gold≥2seed% |")
@@ -384,5 +429,6 @@ jobs:
             locomo-recall.log
             locomo-reachability.json
             locomo-reachability.log
+            pool.jsonl
             learning-curve.json
             learning-curve.log

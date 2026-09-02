@@ -3521,17 +3521,54 @@ impl GraphMemory {
                 .map(|(_, u)| *u)
         };
 
+        // Drop attribution for the OpenIE arm. Three filters sit between an
+        // extracted triple and a minted edge, and until now only the survivors
+        // were counted — so the recall ceiling was unmeasured. In particular
+        // `match_entity` requires BOTH arguments to resolve to an entity that
+        // already exists, which silently discards a well-formed causal triple
+        // about anything not yet promoted to an entity. On a corpus where the
+        // causal backbone looks thin, this tells you whether extraction is weak
+        // or whether the arguments simply are not entities yet.
+        let mut oie_total = 0usize;
+        let mut oie_dropped_not_causal = 0usize;
+        let mut oie_dropped_low_precision = 0usize;
+        // Per-TRIPLE, mutually exclusive — these sum with the others to oie_total.
+        let mut oie_dropped_unmatched = 0usize;
+        let mut oie_dropped_self_loop = 0usize;
+        let mut oie_dropped_write_failed = 0usize;
+        // Per-ARGUMENT diagnostics — a triple with both ends unmatched increments
+        // BOTH, so these deliberately do NOT reconcile against oie_total. They
+        // separate the two fixes: subject misses point at entity coverage,
+        // object misses at argument-span quality.
+        let mut oie_unmatched_subject_arg = 0usize;
+        let mut oie_unmatched_object_arg = 0usize;
+
         // OpenIE — entity→entity typed causal edges (grammar supplies the predicate).
         if let Some(triples) = crate::openie::extract_triples(content) {
             for tr in triples {
-                if !tr.causal || tr.low_precision {
+                oie_total += 1;
+                if !tr.causal {
+                    oie_dropped_not_causal += 1;
                     continue;
                 }
-                let (Some(from), Some(to)) = (match_entity(&tr.subject), match_entity(&tr.object))
-                else {
+                if tr.low_precision {
+                    oie_dropped_low_precision += 1;
+                    continue;
+                }
+                let subj = match_entity(&tr.subject);
+                let obj = match_entity(&tr.object);
+                if subj.is_none() {
+                    oie_unmatched_subject_arg += 1;
+                }
+                if obj.is_none() {
+                    oie_unmatched_object_arg += 1;
+                }
+                let (Some(from), Some(to)) = (subj, obj) else {
+                    oie_dropped_unmatched += 1;
                     continue;
                 };
                 if from == to {
+                    oie_dropped_self_loop += 1;
                     continue;
                 }
                 let rt = Self::relation_type_from_label(tr.relation);
@@ -3546,6 +3583,8 @@ impl GraphMemory {
                 );
                 if self.add_relationship(edge).is_ok() {
                     minted += 1;
+                } else {
+                    oie_dropped_write_failed += 1;
                 }
             }
         }
@@ -3553,15 +3592,26 @@ impl GraphMemory {
         // CATENA — event→event edges (the inchoative pivots no entity arm sees):
         // causal signals mint `Causes`, temporal signals mint `Precedes` — sequence
         // is never reported as causation.
+        let mut cat_total = 0usize;
+        let mut cat_dropped_event_create_failed = 0usize;
+        let mut cat_dropped_self_loop = 0usize;
+
         if let Some(links) = crate::catena::extract_event_links(content) {
             for link in links {
+                cat_total += 1;
                 let (Some(from), Some(to)) = (
                     self.get_or_create_event(&link.source, now),
                     self.get_or_create_event(&link.target, now),
                 ) else {
+                    // CATENA mints its own event nodes rather than requiring a
+                    // pre-existing entity, so unlike the OpenIE arm this should
+                    // be rare — a non-zero count here means node creation is
+                    // failing, not that the corpus lacks entities.
+                    cat_dropped_event_create_failed += 1;
                     continue;
                 };
                 if from == to {
+                    cat_dropped_self_loop += 1;
                     continue;
                 }
                 let rt = Self::relation_type_from_link(link.relation);
@@ -3580,8 +3630,34 @@ impl GraphMemory {
             }
         }
 
-        if minted > 0 {
-            tracing::info!(edges = minted, "causal spine: minted OpenIE + CATENA edges");
+        // Emit whenever either arm EXTRACTED something, not only when an edge
+        // survived. A run that extracts 40 triples and mints 0 is the finding;
+        // logging only on success is what let that state look like "the corpus
+        // has no causal structure" instead of "every triple was filtered".
+        // Greppable as `causal_spine_attribution` and aggregable across an
+        // ingest: sum the fields to get the corpus-level recall ceiling.
+        if oie_total > 0 || cat_total > 0 {
+            tracing::info!(
+                target: "causal_spine_attribution",
+                minted,
+                oie_total,
+                // These five are per-triple and mutually exclusive, so
+                // minted_openie + the five = oie_total. If they do not, the
+                // attribution has a bug and the numbers should not be trusted.
+                oie_dropped_not_causal,
+                oie_dropped_low_precision,
+                oie_dropped_unmatched,
+                oie_dropped_self_loop,
+                oie_dropped_write_failed,
+                // Per-argument diagnostics — intentionally do NOT reconcile.
+                oie_unmatched_subject_arg,
+                oie_unmatched_object_arg,
+                cat_total,
+                cat_dropped_event_create_failed,
+                cat_dropped_self_loop,
+                entities_available = entity_uuids.len(),
+                "causal spine attribution"
+            );
         }
         minted
     }
@@ -6552,6 +6628,30 @@ impl GraphMemory {
             .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
             .unwrap_or(true);
         self.record_memory_coactivation_impl(memory_ids, strengthen_only)
+    }
+
+    /// OUTCOME-gated Hebbian update: mint and strengthen edges across memories
+    /// that were confirmed useful, not merely co-retrieved.
+    ///
+    /// The distinction is the whole point. `record_memory_coactivation` fires on
+    /// every recall over the full retrieved set, which is association without a
+    /// reward signal — frequently co-retrieved hubs strengthen fastest and climb
+    /// the ranking regardless of whether they helped. Measured, that cost 6.7pp
+    /// of p@1 (0.4100 -> 0.4767 with the L5 boost disabled) while recall@10 stayed
+    /// bit-identical: it was not finding worse memories, it was ordering them
+    /// worse. Rich-get-richer, unsupervised by usefulness.
+    ///
+    /// This entry point is called only with a set the caller has evidence for —
+    /// memories an answer actually cited. Minting is safe here for the same
+    /// reason it was unsafe there: an answer cites a handful of memories, so
+    /// all-pairs over a citation set is single-digit edges, where all-pairs over
+    /// a top-50 retrieval is ~1,225 per query. That unbounded minting was ~80%
+    /// of the graph and the OOM driver, which is why the retrieval path is
+    /// strengthen-only and this one is not.
+    ///
+    /// Returns the number of edges created or strengthened.
+    pub fn record_memory_coactivation_outcome(&self, memory_ids: &[Uuid]) -> Result<usize> {
+        self.record_memory_coactivation_impl(memory_ids, false)
     }
 
     /// Co-retrieval Hebbian update. `strengthen_only = true`: reinforce edges that
@@ -10548,6 +10648,67 @@ mod tests {
         assert_eq!(raw.connections.len(), 2, "both edges render unfiltered");
         assert_eq!(raw.filter.hidden_redundant_generic, 0);
         assert_eq!(raw.filter.hidden_weak_generic, 0);
+    }
+
+    #[test]
+    fn outcome_gated_coactivation_mints_where_the_retrieval_path_does_not() {
+        // The contract that makes the outcome-gated path worth having: SAME
+        // inputs, SAME empty starting graph, opposite result. The retrieval
+        // entry point is strengthen-only, so on a graph with no `mem_edge:`
+        // entries it has nothing to strengthen and mints nothing — which is
+        // precisely why the mem<->mem layer has been inert since f6b730ee.
+        // The outcome entry point mints, because the caller has evidence the
+        // set was useful.
+        //
+        // This test fails if someone "simplifies" the two entry points into
+        // one, which would either re-open the all-pairs flood or re-kill the
+        // layer.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect(); // 3 pairs
+
+        // Retrieval path on a cold graph: nothing exists, so nothing happens.
+        let retrieval = graph.record_memory_coactivation(&ids).unwrap();
+        assert_eq!(
+            retrieval, 0,
+            "retrieval-gated coactivation must mint nothing on a cold graph"
+        );
+        assert_eq!(
+            graph.get_stats().unwrap().relationship_count,
+            0,
+            "retrieval path must leave the graph empty"
+        );
+
+        // Outcome path on the same cold graph: all pairs are minted.
+        let minted = graph.record_memory_coactivation_outcome(&ids).unwrap();
+        assert_eq!(
+            minted, 3,
+            "outcome-gated coactivation must mint all 3 pairs"
+        );
+        assert_eq!(
+            graph.get_stats().unwrap().relationship_count,
+            3,
+            "outcome path must persist the minted edges"
+        );
+
+        // And a second confirmation strengthens rather than duplicating — the
+        // Hebbian part. Repeated evidence must not inflate edge count.
+        let again = graph.record_memory_coactivation_outcome(&ids).unwrap();
+        assert_eq!(again, 3, "second pass touches the same 3 pairs");
+        assert_eq!(
+            graph.get_stats().unwrap().relationship_count,
+            3,
+            "repeated confirmation must strengthen, never duplicate"
+        );
+        let edge = graph
+            .find_edge_between_entities(&ids[0], &ids[1])
+            .unwrap()
+            .expect("edge exists after minting");
+        assert!(
+            edge.activation_count >= 2,
+            "repeated confirmation must increment activation, got {}",
+            edge.activation_count
+        );
     }
 
     #[test]

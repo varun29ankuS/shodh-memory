@@ -229,6 +229,17 @@ pub struct AblationRow {
     /// Per-category recall@10 (category name → value), so a config that helps one
     /// capability but hurts another is visible, not hidden in the average.
     pub by_category_recall: std::collections::BTreeMap<String, f64>,
+    /// Order-sensitive fingerprint of every id this arm retrieved, across every
+    /// case. Two arms with the same fingerprint returned byte-identical results.
+    #[serde(default)]
+    pub retrieval_fingerprint: u64,
+    /// True when this arm's fingerprint equals the baseline arm's, i.e. the
+    /// config provably changed nothing and its metrics are attributable to
+    /// nothing. The `+spread-fix` arms were vacuous this way for months: the flag
+    /// they set could not reach the live code path, so the rows silently
+    /// duplicated baseline while reading as evidence.
+    #[serde(default)]
+    pub vacuous_vs_baseline: bool,
 }
 
 /// Unified ablation report: one ingest, N query-time configs, one comparison
@@ -287,6 +298,16 @@ pub struct LayerReport {
     pub ndcg_at_10: f64,
     #[serde(rename = "recall@10")]
     pub recall_at_10: f64,
+    /// Hit-rate at 10: fraction of CASES with at least one gold in the top-10.
+    ///
+    /// Sits next to `recall_at_10`, which is the mean FRACTION of each case's
+    /// gold found. The two diverge sharply where gold is dense: 3.13 gold per
+    /// multi_hop case means two-of-three scores 0.67 on recall and 1.00 here,
+    /// while single_hop (1.06 gold/case) has them nearly coincide. Most published
+    /// memory/RAG "recall@k" numbers are this hit-rate form, so any external
+    /// comparison has to name which of the two it means.
+    #[serde(rename = "hit@10", default)]
+    pub hit_at_10: f64,
     #[serde(rename = "precision@10")]
     pub precision_at_10: f64,
     pub mrr: f64,
@@ -320,6 +341,16 @@ pub struct CategoryReport {
     pub ndcg_at_10: f64,
     #[serde(rename = "recall@10")]
     pub recall_at_10: f64,
+    /// Hit-rate at 10: fraction of CASES with at least one gold in the top-10.
+    ///
+    /// Sits next to `recall_at_10`, which is the mean FRACTION of each case's
+    /// gold found. The two diverge sharply where gold is dense: 3.13 gold per
+    /// multi_hop case means two-of-three scores 0.67 on recall and 1.00 here,
+    /// while single_hop (1.06 gold/case) has them nearly coincide. Most published
+    /// memory/RAG "recall@k" numbers are this hit-rate form, so any external
+    /// comparison has to name which of the two it means.
+    #[serde(rename = "hit@10", default)]
+    pub hit_at_10: f64,
     #[serde(rename = "precision@10")]
     pub precision_at_10: f64,
     pub mrr: f64,
@@ -427,6 +458,7 @@ pub fn aggregate_layer(per_case: &[Metrics], latencies_ms: &[f64]) -> LayerRepor
     LayerReport {
         ndcg_at_10: mean(|m| m.ndcg_at_k),
         recall_at_10: mean(|m| m.recall_at_k),
+        hit_at_10: mean(|m| m.hit_at_k),
         precision_at_10: mean(|m| m.precision_at_k),
         mrr: mean(|m| m.mrr),
         p_at_1: mean(|m| m.p_at_1),
@@ -454,6 +486,7 @@ pub fn aggregate_category(per_case: &[Metrics]) -> CategoryReport {
     CategoryReport {
         ndcg_at_10: mean(|m| m.ndcg_at_k),
         recall_at_10: mean(|m| m.recall_at_k),
+        hit_at_10: mean(|m| m.hit_at_k),
         precision_at_10: mean(|m| m.precision_at_k),
         mrr: mean(|m| m.mrr),
         p_at_1: mean(|m| m.p_at_1),
@@ -628,6 +661,88 @@ pub struct GraphStructure {
     pub hub_threshold: usize,
     /// Top entity degrees, descending (the hub tail).
     pub top_degrees: Vec<usize>,
+    /// Co-occurrence edges never minted because an endpoint had already
+    /// saturated `SHODH_HUB_DEGREE_MAX`.
+    ///
+    /// The cap is a hard SKIP, not an eviction, and the condition is `||`: one
+    /// saturated endpoint kills the edge even when the other is rare and highly
+    /// discriminative. So which associations exist is decided by ingest ARRIVAL
+    /// ORDER, on a criterion uncorrelated with information — while the PMI-squared
+    /// gate beside it culls on exactly that criterion. A large number here means
+    /// the graph's shape is an artefact of ingest sequence.
+    #[serde(default)]
+    pub hub_saturation_skipped_edges: u64,
+
+    /// Stored edges by relation type, descending.
+    ///
+    /// The substrate scoreboard for typed path composition. A walk that carries
+    /// relation ORDER needs every hop of a path to name a real relation; a hop
+    /// through `CoOccurs` carries none, because co-occurrence is symmetric and
+    /// composing it with itself is the commutative case. So the typed share is
+    /// not bookkeeping, it bounds what a path grammar can express: at a typed
+    /// fraction p, a fully-typed k-hop path is about p^k of paths.
+    ///
+    /// Measured on the LoCoMo gate corpus this was 1.89% typed -- 215 edges of
+    /// 11,370, against 11,155 CoOccurs -- which makes a typed 2-hop path
+    /// roughly 0.04% and leaves composition nothing to walk. But LoCoMo is
+    /// casual dialogue, where "Hey, that hike sounds great" genuinely contains
+    /// no typed relation, so that number may say more about the corpus than
+    /// about the extractor. This field exists so the same question can be asked
+    /// of a DOCUMENT corpus, where the answer is likely different and where the
+    /// product actually runs.
+    #[serde(default)]
+    pub relation_types: BTreeMap<String, usize>,
+
+    /// Edges whose relation type carries direction and meaning, i.e. everything
+    /// except the symmetric association types. Counted here rather than derived
+    /// by the reader so the definition lives in one place.
+    #[serde(default)]
+    pub typed_edges: usize,
+
+    /// `CoOccurs`, `RelatedTo`, `AssociatedWith`, `CoRetrieved`, `WorksWith`,
+    /// `Knows`, `AlternativeTo` -- symmetric, so order across them is not
+    /// information. Derivable from entity->episode incidence rather than stored.
+    #[serde(default)]
+    pub symmetric_edges: usize,
+
+    /// Entity nodes by label, descending.
+    ///
+    /// Label-pair typing rules key off these, so a rule can be correct, enabled,
+    /// and still never fire because the labels it matches are not being
+    /// produced. Measured: `SHODH_PERSON_PERSON_KNOWS=1` yielded a
+    /// BYTE-IDENTICAL graph -- typed 215, generic 4815, pair_table 40, every
+    /// metric +0.0000 -- which is what a rule that never matches looks like.
+    /// Without this field there was no way to tell "the rule does nothing" from
+    /// "the rule never fired".
+    #[serde(default)]
+    pub entity_labels: BTreeMap<String, usize>,
+
+    /// Connected components of the FULL edge set: (count, largest as a fraction
+    /// of entities).
+    #[serde(default)]
+    pub components_all: (usize, f64),
+
+    /// Same, after deleting the top-N highest-degree entities, for N in
+    /// {1, 5, 10, 25}.
+    ///
+    /// A k-connected graph survives removal of k-1 vertices. If the graph
+    /// shatters once a handful of hubs go, its connectivity is HUB-CARRIED --
+    /// high edge count is not high connectivity. That matters twice: it is the
+    /// precondition for the Gyori-Lovasz partition theorem, and it says whether
+    /// the 94.8%-of-gold-within-one-hop figure is structure or a few
+    /// degree-301 nodes standing in the middle of everything.
+    #[serde(default)]
+    pub components_after_hub_removal: Vec<(usize, usize, f64)>,
+
+    /// Components of the TYPED-ONLY subgraph, plus how many entities are
+    /// isolated in it.
+    ///
+    /// The typed layer is the substrate any path automaton would walk. At mean
+    /// typed degree below 1 most entities may be isolated there, in which case
+    /// a grammar-guided walk has nothing to traverse for most queries -- worth
+    /// knowing BEFORE building the walker rather than after.
+    #[serde(default)]
+    pub typed_components: (usize, f64, usize),
 }
 
 /// Reachability tallies for one category (cumulative within-N-hops counts).
@@ -713,6 +828,7 @@ mod tests {
             mrr: values,
             p_at_1: values,
             map: values,
+            hit_at_k: values,
         }
     }
 
@@ -767,6 +883,7 @@ mod tests {
             LayerReport {
                 ndcg_at_10: ndcg,
                 recall_at_10: recall,
+                hit_at_10: recall,
                 precision_at_10: 0.2,
                 mrr,
                 p_at_1: p1,
@@ -839,6 +956,7 @@ mod tests {
         CategoryReport {
             ndcg_at_10: recall,
             recall_at_10: recall,
+            hit_at_10: recall,
             precision_at_10: recall,
             mrr: recall,
             p_at_1: p1,

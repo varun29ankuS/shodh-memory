@@ -6,6 +6,7 @@
 //! - Multi-modal retrieval (similarity, temporal, causal)
 //! - Automatic memory consolidation
 
+pub mod ablation;
 pub mod compression;
 pub mod context;
 pub mod facts;
@@ -2757,8 +2758,23 @@ impl MemorySystem {
                 } else {
                     g.entities_average_density(&seed_uuids).ok().flatten()
                 };
-                let use_rerank =
-                    !density.is_some_and(|d| d >= crate::constants::ONTOLOGICAL_DENSITY_THRESHOLD);
+                // The ontological re-rank is disabled above a seed-density
+                // threshold, on the theory that a hub-dense neighbourhood makes
+                // type filtering noisy. On this corpus that theory silently
+                // disables the layer: `ONTOLOGICAL_DENSITY_THRESHOLD` is 8.0 and
+                // mean seed-entity degree is 7.7, with hubs to 301 — so whether
+                // the ontology runs is decided by hub structure rather than by
+                // anything ontological, and the E5 diagnostic measures its
+                // contribution as exactly +0.0000.
+                //
+                // `SHODH_ONTOLOGY_DENSITY_MAX` overrides the threshold so the
+                // layer can be measured at all; `inf` disables the gate entirely
+                // and lets the re-rank always run. Unset = shipped behaviour.
+                let density_max = std::env::var("SHODH_ONTOLOGY_DENSITY_MAX")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<f32>().ok())
+                    .unwrap_or(crate::constants::ONTOLOGICAL_DENSITY_THRESHOLD);
+                let use_rerank = !density.is_some_and(|d| d >= density_max);
                 (density, use_rerank)
             } else {
                 (None, false)
@@ -2771,9 +2787,13 @@ impl MemorySystem {
         {
             crate::metrics::ONTOLOGICAL_FALLBACK_TOTAL.inc();
         }
-        if graph_density_for_rerank
-            .is_some_and(|d| d >= crate::constants::ONTOLOGICAL_DENSITY_THRESHOLD)
-        {
+        // Count skips against the EFFECTIVE threshold, not the constant, so the
+        // counter still reports honestly when the override is in use.
+        let effective_density_max = std::env::var("SHODH_ONTOLOGY_DENSITY_MAX")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(crate::constants::ONTOLOGICAL_DENSITY_THRESHOLD);
+        if graph_density_for_rerank.is_some_and(|d| d >= effective_density_max) {
             crate::metrics::ONTOLOGICAL_DENSITY_SKIP_TOTAL.inc();
         }
 
@@ -3866,60 +3886,12 @@ impl MemorySystem {
 
         // ===========================================================================
         // LAYER 4: BM25 + RRF FUSION
-        // SHODH_DISABLE_BOOSTS=<family,...> — ablation kill-switch for the post-fusion
-        // boost stack. Each token disables one boost family at recall time so its
-        // marginal contribution can be measured against the calibrated FLAT baseline
-        // (the stack predates calibrated fusion and was never ablated against it).
-        // Layer 4.45-4.9 families: attribute, temporal_prefilter, temporal_fact,
-        // interference, prospective, fact_source, ontological. Layer 5-5.7 families:
-        // hebbian, recency, arousal, credibility, temporal_match, feedback, importance,
-        // tag_penalty, quality, linguistic, competition. "all" disables every family.
-        // Default unset → all boosts active (shipped behavior unchanged).
-        const BOOST_FAMILIES: [&str; 18] = [
-            "attribute",
-            "temporal_prefilter",
-            "temporal_fact",
-            "interference",
-            "prospective",
-            "fact_source",
-            "ontological",
-            "hebbian",
-            "recency",
-            "arousal",
-            "credibility",
-            "temporal_match",
-            "feedback",
-            "importance",
-            "tag_penalty",
-            "quality",
-            "linguistic",
-            "competition",
-        ];
-        // DEFAULT: the Layer-5 hebbian RANK BOOST is disabled. The L5 bisect (run
-        // 27251798933) measured it as a strict ordering saboteur: disabling only
-        // hebbian lifted p@1 ALL 0.4100→0.4767 (+6.7pp), single_hop +11pp,
-        // open_domain 2x, multi_hop up, temporal HELD, MRR +0.042 — with recall@10
-        // bit-identical (L5 is post-truncation). Mechanism: heb scores come from
-        // graph co-activation and edges strengthen on EVERY retrieval (not on
-        // outcome), so frequently co-retrieved hub memories climb within the
-        // top-10 and displace gold at rank 1 — retrieval-gated rich-get-richer.
-        // Hebbian LEARNING (edge strengthening, spreading activation) is untouched;
-        // only the L5 score multiplier is off. Setting SHODH_DISABLE_BOOSTS
-        // explicitly (even to "") replaces this default — the escape hatch.
-        let disabled_boosts: std::collections::HashSet<String> =
-            std::env::var("SHODH_DISABLE_BOOSTS")
-                .map(|v| {
-                    v.split(',')
-                        .map(|t| t.trim().to_ascii_lowercase())
-                        .filter(|t| !t.is_empty())
-                        .collect()
-                })
-                .unwrap_or_else(|_| std::iter::once("hebbian".to_string()).collect());
-        for tok in &disabled_boosts {
-            if tok != "all" && !BOOST_FAMILIES.contains(&tok.as_str()) {
-                tracing::warn!("SHODH_DISABLE_BOOSTS: unknown boost family '{tok}' (ignored)");
-            }
-        }
+        // Ablation kill-switch. The family list, the default-disabled set, the
+        // parsing and the unknown-token warning all live in `memory::ablation`,
+        // which is the single source of truth shared with the graph leg — see
+        // that module for `SHODH_DISABLE_BOOSTS` semantics and for why `hebbian`
+        // is disabled by default.
+        let disabled_boosts = crate::memory::ablation::disabled_families();
         let boost_on = |family: &str| -> bool {
             !(disabled_boosts.contains("all") || disabled_boosts.contains(family))
         };
@@ -5756,24 +5728,24 @@ impl MemorySystem {
         // RH-8 gate: quality multiplier only applies in `Full` mode — lower modes
         // expose the raw fused score so per-layer attribution isn't masked.
         if layer_full && boost_quality {
-            let v2_no_verbosity = std::env::var("SHODH_FUSION_V2")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
             for mem in &mut memories {
                 let has_entities = !mem.experience.entities.is_empty();
                 let has_context = mem.experience.context.is_some();
                 let elaboration = 1.0
                     + if has_entities { 0.1 } else { 0.0 }
                     + if has_context { 0.1 } else { 0.0 };
-                let quality = if v2_no_verbosity {
-                    // Conscious restructure: drop the raw content-length factor — a
-                    // verbosity bias that multiplied short correct answers (a person
-                    // name) down below longer ones (org names), crashing ontology
-                    // 0.88→0.083 at `full`. Keep only the structural elaboration.
-                    elaboration
-                } else {
+                // The raw content-LENGTH factor is a verbosity bias: it multiplies a
+                // short correct answer (a person name) below a longer wrong one (an
+                // org name), and was measured crashing ontology 0.88→0.083 at
+                // `full`. Dropping it was reachable only via SHODH_FUSION_V2, which
+                // ALSO switched fusion to weighted-Borda — so the factor could never
+                // be measured on its own. It is now the `quality_verbosity` ablation
+                // family, default ENABLED (shipped behaviour unchanged).
+                let quality = if crate::memory::ablation::is_enabled("quality_verbosity") {
                     let content_len = mem.experience.content.len() as f32;
                     (content_len / 200.0).min(1.0) * elaboration
+                } else {
+                    elaboration
                 };
                 let quality_factor = quality.max(crate::constants::ELABORATION_QUALITY_MIN);
                 if let Some(score) = mem.score {
@@ -5795,10 +5767,11 @@ impl MemorySystem {
         // Linguistic analysis: additive boost (5% of IC weight), not a full re-sort
         // RH-8 gate: linguistic re-sort only runs in `Full` mode.
         if layer_full && boost_linguistic && !query_analysis.focal_entities.is_empty() {
-            let v2_single = std::env::var("SHODH_FUSION_V2")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            if v2_single {
+            // `linguistic_resort` ENABLED (current) = separate sort-only re-rank,
+            // which the final sort silently discards when len <= max_results.
+            // DISABLED = fold the signal into the single `.score` instead. Parked
+            // behind SHODH_FUSION_V2 until now, so it could never be attributed.
+            if !crate::memory::ablation::is_enabled("linguistic_resort") {
                 // Conscious restructure: FOLD the linguistic signal into the single
                 // .score (additive) instead of a separate sort-only re-rank that the
                 // final sort silently discards when len>max. One score, one sort.
@@ -6058,10 +6031,12 @@ impl MemorySystem {
         // linguistic signal is already folded into .score above — so sort by .score
         // UNCONDITIONALLY, not only when len>max. That branch is what let result-set
         // SIZE decide whether the lexical re-sort or .score won the final order.
-        let v2_single_sort = std::env::var("SHODH_FUSION_V2")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        if v2_single_sort || memories.len() > query.max_results {
+        // `size_gated_final_sort` ENABLED (current) means this sort runs ONLY when
+        // the result set is larger than the window - so result-set SIZE decides
+        // whether the preceding lexical re-rank or `.score` wins the final order.
+        // Disabling removes the gate and always sorts by score.
+        let size_gated = crate::memory::ablation::is_enabled("size_gated_final_sort");
+        if !size_gated || memories.len() > query.max_results {
             // Score desc → recency desc → MemoryId asc — deterministic competition cutoff.
             // Quantize the score to 1e-6 before comparing: fused scores are accumulated
             // by `+=` over a HashMap in non-deterministic iteration order, so f32
