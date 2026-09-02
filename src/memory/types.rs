@@ -3234,7 +3234,7 @@ impl SessionMemory {
             .map(|(id, entry)| (id.clone(), entry.memory.importance()))
             .collect();
 
-        sorted.sort_by(|a, b| a.1.total_cmp(&b.1));
+        sorted.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
 
         for (id, _) in sorted {
             if self.current_size_bytes + needed_bytes <= self.max_size_mb * 1024 * 1024 {
@@ -3261,7 +3261,11 @@ impl SessionMemory {
             .cloned() // Arc::clone is cheap
             .collect();
 
-        results.sort_by(|a, b| b.importance().total_cmp(&a.importance()));
+        results.sort_by(|a, b| {
+            b.importance()
+                .total_cmp(&a.importance())
+                .then_with(|| a.id.cmp(&b.id))
+        });
         results.truncate(limit);
         Ok(results)
     }
