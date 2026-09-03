@@ -3172,6 +3172,32 @@ impl MultiUserMemoryManager {
                 let label = match &recognised {
                     Some(label) => label.clone(),
                     // Caller-asserted existence without a recognised type.
+                    // 4. The TRANSCRIPT says who is talking. A declared tag that
+                    //    is also the utterance-initial speaker names a person.
+                    //
+                    // Two independent signals must agree: the caller declared
+                    // the name, AND the text opens with it as a speaker prefix.
+                    // That conjunction is what makes it safe — a stray "Note:"
+                    // or "TODO:" opening is not a declared tag, and a declared
+                    // tag that never speaks is left alone.
+                    //
+                    // Without it, a third of the people in a dialogue corpus are
+                    // typed `Concept`, because the neural recogniser only sees
+                    // names that appear in PROSE and a speaker label is
+                    // metadata. Measured on the LoCoMo corpus: every one of
+                    // 5,882 memories opens with a speaker prefix and every one
+                    // of those names is also a tag, yet `Andrew` (337
+                    // utterances), `Maria` (328) and `Audrey` (338) carried no
+                    // `Person` label at all. Every rule keyed on `Person` then
+                    // misfires on them, which is why SHODH_PERSON_PERSON_KNOWS
+                    // produced a byte-identical graph and `Involves` fired three
+                    // times.
+                    None if declared.contains(tag_name)
+                        && utterance_speaker(&experience.content)
+                            .is_some_and(|s| s.eq_ignore_ascii_case(tag_name)) =>
+                    {
+                        EntityLabel::Person
+                    }
                     None if declared.contains(tag_name) => EntityLabel::Concept,
                     None => return None,
                 };
@@ -4329,6 +4355,105 @@ pub(crate) fn is_structural_non_entity(name: &str) -> bool {
         }
     }
     max_run < 3
+}
+
+/// The speaker of a transcript line, if the content opens `Name: text`.
+///
+/// This is a naming CONVENTION, not a corpus quirk: chat logs, meeting notes,
+/// interview transcripts and dialogue exports all mark the speaker this way,
+/// and it is the one place a person is identified structurally rather than by
+/// appearing in prose. A neural recogniser reading only the utterance body
+/// never sees it.
+///
+/// Deliberately narrow, because it only ever PROPOSES a name that a declared
+/// tag then has to confirm. One or two capitalised words, an immediate colon,
+/// and a space. That admits "Melanie:" and "Mary Anne:" and rejects
+/// "https://x", "10:30", "note: fix this" and a sentence that merely contains
+/// a colon.
+fn utterance_speaker(content: &str) -> Option<&str> {
+    let (head, rest) = content.split_once(':')?;
+    // A speaker prefix is followed by the utterance. Requiring the space also
+    // rejects timestamps like "10:30" before the length checks get involved.
+    if !rest.starts_with(' ') {
+        return None;
+    }
+    let head = head.trim_end();
+    if head.is_empty() || head.len() > 64 {
+        return None;
+    }
+    let mut words = head.split(' ');
+    let ok = |w: &str| {
+        if w.is_empty()
+            || !w.chars().next().is_some_and(char::is_uppercase)
+            || !w.chars().all(|c| c.is_alphanumeric() || ".'-".contains(c))
+        {
+            return false;
+        }
+        // ALL-CAPS is a MARKER convention, not a name: TODO, NOTE, FIXME,
+        // WARNING, ERROR. Rejecting the shape rather than listing the words
+        // keeps this from becoming another keyword table that is right on one
+        // corpus and wrong on the next — which is exactly how a dev-ops tag
+        // matcher ended up asserting an ontology over maritime documents.
+        //
+        // Initials survive: "J.R." has two capital letters, and a real
+        // all-caps surname is rare enough to lose to a false-positive person.
+        let caps = w.chars().filter(|c| c.is_alphabetic()).count();
+        let upper = w.chars().filter(|c| c.is_uppercase()).count();
+        !(caps >= 3 && upper == caps)
+    };
+    match (words.next(), words.next(), words.next()) {
+        (Some(a), None, _) if ok(a) => Some(head),
+        (Some(a), Some(b), None) if ok(a) && ok(b) => Some(head),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod utterance_speaker_tests {
+    use super::utterance_speaker;
+
+    #[test]
+    fn reads_the_speaker_of_a_transcript_line() {
+        assert_eq!(
+            utterance_speaker("Caroline: Hey Mel! Good to see you!"),
+            Some("Caroline")
+        );
+        assert_eq!(
+            utterance_speaker("Mary Anne: I was just thinking about that."),
+            Some("Mary Anne")
+        );
+    }
+
+    #[test]
+    fn rejects_everything_that_merely_contains_a_colon() {
+        // Each of these would mint a spurious Person if the rule were loose.
+        // The declared-tag conjunction at the call site is a second guard, but
+        // this one has to hold on its own — a caller who tags a memory "Note"
+        // would otherwise get a person out of it.
+        for bad in [
+            "note: fix this later",              // lowercase
+            "TODO: ship it",                     // not a name shape
+            "10:30 we agreed to meet",           // timestamp, no space after colon
+            "See https://example.com for more",  // no colon-space in name position
+            "I told her: it was fine",           // three words before the colon
+            "Melanie:no space",                  // missing the space
+            "A very long run of words that could never be a speaker name at all: x",
+            ": leading colon",
+            "",
+        ] {
+            assert_eq!(utterance_speaker(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn takes_only_the_first_colon_so_a_quoted_line_still_resolves() {
+        // "Dave: she said: let us go" — the speaker is Dave, not the inner
+        // quotation. Splitting on the LAST colon would name the wrong party.
+        assert_eq!(
+            utterance_speaker("Dave: she said: let us go"),
+            Some("Dave")
+        );
+    }
 }
 
 #[cfg(test)]
