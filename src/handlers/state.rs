@@ -3168,37 +3168,12 @@ impl MultiUserMemoryManager {
                 if !seen_tag_surface.insert(tag_name) {
                     return None;
                 }
-                let recognised = recognised_tag_label(tag_name);
-                let label = match &recognised {
-                    Some(label) => label.clone(),
-                    // Caller-asserted existence without a recognised type.
-                    // 4. The TRANSCRIPT says who is talking. A declared tag that
-                    //    is also the utterance-initial speaker names a person.
-                    //
-                    // Two independent signals must agree: the caller declared
-                    // the name, AND the text opens with it as a speaker prefix.
-                    // That conjunction is what makes it safe — a stray "Note:"
-                    // or "TODO:" opening is not a declared tag, and a declared
-                    // tag that never speaks is left alone.
-                    //
-                    // Without it, a third of the people in a dialogue corpus are
-                    // typed `Concept`, because the neural recogniser only sees
-                    // names that appear in PROSE and a speaker label is
-                    // metadata. Measured on the LoCoMo corpus: every one of
-                    // 5,882 memories opens with a speaker prefix and every one
-                    // of those names is also a tag, yet `Andrew` (337
-                    // utterances), `Maria` (328) and `Audrey` (338) carried no
-                    // `Person` label at all. Every rule keyed on `Person` then
-                    // misfires on them, which is why SHODH_PERSON_PERSON_KNOWS
-                    // produced a byte-identical graph and `Involves` fired three
-                    // times.
-                    None if declared.contains(tag_name)
-                        && utterance_speaker(&experience.content)
-                            .is_some_and(|s| s.eq_ignore_ascii_case(tag_name)) =>
-                    {
-                        EntityLabel::Person
-                    }
-                    None if declared.contains(tag_name) => EntityLabel::Concept,
+                let (label, provenance) = match tag_entity_label(
+                    tag_name,
+                    declared.contains(tag_name),
+                    &experience.content,
+                ) {
+                    Some(pair) => pair,
                     None => return None,
                 };
                 if !tag_surface_claimed_by_ner(tag_name, &ner_claimed)
@@ -3229,14 +3204,12 @@ impl MultiUserMemoryManager {
                             // -quality audit asks.
                             attributes: {
                                 let mut a = HashMap::new();
-                                a.insert(
-                                    "source".into(),
-                                    if recognised.is_some() {
-                                        "tag-identifier".into()
-                                    } else {
-                                        "tag-declared".into()
-                                    },
-                                );
+                                // Three tag provenances, not two: a curated
+                                // identifier, a speaker the transcript named,
+                                // and a bare caller assertion. They are
+                                // different evidence and an entity-quality
+                                // audit has to be able to tell them apart.
+                                a.insert("source".into(), provenance.to_string());
                                 a
                             },
                             name_embedding: entity_name_embeddings
@@ -4357,6 +4330,49 @@ pub(crate) fn is_structural_non_entity(name: &str) -> bool {
     max_run < 3
 }
 
+/// Which label a caller-supplied tag earns as a graph node, if any.
+///
+/// A node is a claim that something exists, so admission is by AUTHORITY. Four
+/// can say a surface denotes a thing, and this is the only place that decides:
+///
+///   1. `recognised_tag_label` matched a curated naming convention that only
+///      artifacts follow. The only authority that also supplies a TYPE.
+///   2. The TRANSCRIPT opens with this tag as the speaker, and the caller
+///      declared it. Two independent signals agreeing — a person.
+///   3. The CALLER declared it and nothing else is known. `Concept`, which is
+///      the honest reading of "someone told us this exists".
+///   4. Nothing recognised it. Not a node; it stays a searchable keyword.
+///
+/// Extracted from the admission loop so the four are testable in one place
+/// rather than only reachable through a full `AppState`.
+fn tag_entity_label(
+    tag_name: &str,
+    is_declared: bool,
+    content: &str,
+) -> Option<(EntityLabel, &'static str)> {
+    if let Some(label) = recognised_tag_label(tag_name) {
+        return Some((label, "tag-identifier"));
+    }
+    if !is_declared {
+        return None;
+    }
+    // The neural recogniser only sees names that appear in PROSE, and a speaker
+    // label is metadata — so a person who talks constantly and is never talked
+    // ABOUT is invisible to it. Measured on LoCoMo: all 5,882 memories open with
+    // a speaker prefix and all 5,882 of those names are also tags, yet `Andrew`
+    // (337 utterances), `Maria` (328) and `Audrey` (338) carried no `Person`
+    // label while `John` and `Tim` did — the difference being only whether
+    // GLiNER happened to catch the name mid-sentence.
+    //
+    // Every rule keyed on `Person` silently skips the ones it missed, which is
+    // why SHODH_PERSON_PERSON_KNOWS produced a byte-identical graph and
+    // `Involves` fired three times.
+    if utterance_speaker(content).is_some_and(|s| s.eq_ignore_ascii_case(tag_name)) {
+        return Some((EntityLabel::Person, "tag-speaker"));
+    }
+    Some((EntityLabel::Concept, "tag-declared"))
+}
+
 /// The speaker of a transcript line, if the content opens `Name: text`.
 ///
 /// This is a naming CONVENTION, not a corpus quirk: chat logs, meeting notes,
@@ -4405,6 +4421,63 @@ fn utterance_speaker(content: &str) -> Option<&str> {
         (Some(a), None, _) if ok(a) => Some(head),
         (Some(a), Some(b), None) if ok(a) && ok(b) => Some(head),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tag_entity_label_tests {
+    use super::tag_entity_label;
+    use crate::graph_memory::EntityLabel;
+
+    const LINE: &str = "Andrew: I finally got around to fixing the bike.";
+
+    #[test]
+    fn the_speaker_of_the_line_is_a_person_not_a_concept() {
+        // The defect this exists to fix. Before it, this returned Concept, and
+        // every rule keyed on Person skipped a third of the people in the
+        // corpus.
+        assert_eq!(
+            tag_entity_label("Andrew", true, LINE),
+            Some((EntityLabel::Person, "tag-speaker"))
+        );
+    }
+
+    #[test]
+    fn a_declared_tag_that_never_speaks_stays_a_concept() {
+        // The caller asserted existence, which is evidence a thing exists and
+        // NOT evidence of its type. Promoting these would be inventing an
+        // ontology from a tag.
+        assert_eq!(
+            tag_entity_label("bicycle", true, LINE),
+            Some((EntityLabel::Concept, "tag-declared"))
+        );
+        assert_eq!(
+            tag_entity_label("conv-42", true, LINE),
+            Some((EntityLabel::Concept, "tag-declared"))
+        );
+    }
+
+    #[test]
+    fn a_speaker_the_caller_never_declared_is_not_admitted() {
+        // BOTH signals are required. Speaking alone cannot mint a node, or any
+        // text opening `Word: ` would create one.
+        assert_eq!(tag_entity_label("Andrew", false, LINE), None);
+    }
+
+    #[test]
+    fn an_unrecognised_undeclared_tag_stays_a_keyword() {
+        assert_eq!(tag_entity_label("thoughts", false, LINE), None);
+    }
+
+    #[test]
+    fn a_recognised_artifact_keeps_its_own_type_even_when_it_speaks() {
+        // Authority 1 supplies a TYPE and outranks the speaker heuristic; a
+        // line beginning "Rocksdb: ..." must not make the database a person.
+        let label = tag_entity_label("rocksdb", true, "Rocksdb: compaction stalled").map(|(l, _)| l);
+        assert!(
+            label.is_some() && label != Some(EntityLabel::Person),
+            "a curated artifact type must outrank the speaker rule, got {label:?}"
+        );
     }
 }
 
