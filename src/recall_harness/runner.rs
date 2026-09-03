@@ -423,7 +423,13 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
                 .expect("repeat 0 must have mode");
             (
                 mode.report_key().to_string(),
-                build_per_case_records(&cases, &mp.per_case, &mp.ranks, &mp.deep_ranks),
+                build_per_case_records(
+                    &cases,
+                    &mp.per_case,
+                    &mp.ranks,
+                    &mp.deep_ranks,
+                    &mp.scores_by_case,
+                ),
             )
         })
         .collect();
@@ -461,6 +467,7 @@ fn build_per_case_records(
     metrics: &[Metrics],
     ranks: &[CaseRankList],
     deep_ranks: &[CaseRankList],
+    scores_by_case: &HashMap<String, Vec<f64>>,
 ) -> Vec<PerCaseRecord> {
     cases
         .iter()
@@ -516,6 +523,7 @@ fn build_per_case_records(
                 missed,
                 recall_at_50: recall_at(50),
                 recall_at_100: recall_at(100),
+                scores: scores_by_case.get(&case.id).cloned().unwrap_or_default(),
             }
         })
         .collect()
@@ -526,6 +534,9 @@ struct ModePassResult {
     per_case: Vec<Metrics>,
     by_category_cases: HashMap<SmokeCategory, Vec<Metrics>>,
     latencies_ms: Vec<f64>,
+    /// Final fused scores per case, top-k descending. Empty unless
+    /// .
+    scores_by_case: HashMap<String, Vec<f64>>,
     ranks: Vec<CaseRankList>,
     /// `RECALL_DIAG_K`-deep rank lists, aligned with `ranks`. Sourced from a
     /// SECOND recall per case at `max_results = diag_k` so the production
@@ -687,6 +698,13 @@ fn run_one_pass(
     for mode in layer_modes {
         let mut per_case = Vec::with_capacity(cases.len());
         let mut latencies_ms = Vec::with_capacity(cases.len());
+        // Query-level score distributions, keyed by case id. A side channel
+        // rather than a field on CaseRankList, which derives Eq and is compared
+        // verbatim by the determinism guard.
+        let mut scores_by_case: HashMap<String, Vec<f64>> = HashMap::new();
+        let per_case_scores = std::env::var("SHODH_PER_CASE_SCORES")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         let mut by_category_cases: HashMap<SmokeCategory, Vec<Metrics>> = HashMap::new();
         let mut ranks: Vec<CaseRankList> = Vec::with_capacity(cases.len());
         let mut deep_ranks: Vec<CaseRankList> = Vec::with_capacity(cases.len());
@@ -714,7 +732,30 @@ fn run_one_pass(
             }
 
             let started = Instant::now();
-            let result = system.read().recall(&query);
+            // SHODH_PER_CASE_SCORES=1 takes the diagnostic path so the final
+            // fused scores can be recorded. Default OFF: it is strictly extra
+            // bookkeeping, but it is bookkeeping on the hot path, and the
+            // latency recorded just below is a reported number.
+            let result = if per_case_scores {
+                system.read().recall_with_diagnostics(&query).map(|r| {
+                    if let Some(attrs) = r.stats.as_ref().and_then(|s| s.score_attributions.as_ref())
+                    {
+                        // Already sorted by final_score descending, with a
+                        // memory_id tie-break, so this is a stable read.
+                        scores_by_case.insert(
+                            case.id.clone(),
+                            attrs
+                                .iter()
+                                .take(SMOKE_K)
+                                .map(|a| a.final_score as f64)
+                                .collect(),
+                        );
+                    }
+                    r.memories
+                })
+            } else {
+                system.read().recall(&query)
+            };
             let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
             latencies_ms.push(elapsed_ms);
 
@@ -873,6 +914,7 @@ fn run_one_pass(
                 per_case,
                 by_category_cases,
                 latencies_ms,
+                scores_by_case,
                 ranks,
                 deep_ranks,
             },
@@ -3331,6 +3373,55 @@ mod tests {
     }
 
     #[test]
+    fn per_case_scores_travel_by_case_id_not_by_position() {
+        // The side channel is keyed by case id while the metric arrays are
+        // keyed by POSITION. If those two ever disagree, every score lands on
+        // the wrong query and the report still looks well-formed -- there is
+        // no shape error to notice, only silently mismatched numbers. So the
+        // mapping is pinned: case B gets B's scores, and a case absent from
+        // the map gets an empty vec rather than a neighbour's.
+        let cases = vec![
+            SmokeCase {
+                id: "case-a".into(),
+                category: SmokeCategory::Entity,
+                query: "a".into(),
+                fixture_corpus_id: "shodh-smoke".into(),
+                relevant: vec![],
+            },
+            SmokeCase {
+                id: "case-b".into(),
+                category: SmokeCategory::Entity,
+                query: "b".into(),
+                fixture_corpus_id: "shodh-smoke".into(),
+                relevant: vec![],
+            },
+        ];
+        let metrics = vec![Metrics::default(), Metrics::default()];
+        let ranks = vec![
+            CaseRankList {
+                case_id: "case-a".into(),
+                retrieved: vec![],
+            },
+            CaseRankList {
+                case_id: "case-b".into(),
+                retrieved: vec![],
+            },
+        ];
+        let mut scores = HashMap::new();
+        scores.insert("case-b".to_string(), vec![0.9_f64, 0.4, 0.1]);
+
+        let recs = build_per_case_records(&cases, &metrics, &ranks, &ranks, &scores);
+
+        assert_eq!(recs[0].case_id, "case-a");
+        assert!(
+            recs[0].scores.is_empty(),
+            "a case with no captured scores must not inherit another case's"
+        );
+        assert_eq!(recs[1].case_id, "case-b");
+        assert_eq!(recs[1].scores, vec![0.9, 0.4, 0.1]);
+    }
+
+    #[test]
     fn per_case_records_flag_missed_relevant_items() {
         let cases = vec![
             SmokeCase {
@@ -3391,7 +3482,7 @@ mod tests {
 
         // Diagnostic off: the deep list is a copy of the production list, so
         // the depth fields degrade to plain wider cutoffs of the same list.
-        let recs = build_per_case_records(&cases, &metrics, &ranks, &ranks);
+        let recs = build_per_case_records(&cases, &metrics, &ranks, &ranks, &HashMap::new());
         assert_eq!(recs.len(), 2);
 
         let r0 = &recs[0];
@@ -3430,7 +3521,7 @@ mod tests {
                 retrieved: vec!["ssm-010".into()],
             },
         ];
-        let recs = build_per_case_records(&cases, &metrics, &ranks, &deep_ranks);
+        let recs = build_per_case_records(&cases, &metrics, &ranks, &deep_ranks, &HashMap::new());
         let r0 = &recs[0];
         assert_eq!(r0.missed, vec!["ssm-002".to_string()]);
         assert_eq!(r0.relevant_found, 1);

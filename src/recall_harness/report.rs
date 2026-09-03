@@ -85,6 +85,27 @@ pub struct PerCaseRecord {
     pub recall_at_50: f64,
     #[serde(default)]
     pub recall_at_100: f64,
+
+    /// Final fused scores of the top-k production results, descending.
+    ///
+    /// Empty unless `SHODH_PER_CASE_SCORES=1`, because it needs the diagnostic
+    /// recall path.
+    ///
+    /// Exists to make QUERY-LEVEL prediction testable offline. Measured
+    /// 2026-09-03: tripling the rerank budget changed **90.1%** of queries not
+    /// at all, improved 7.8% and made 2.1% WORSE, so a per-query router beats
+    /// any fixed depth — an oracle reaches recall@10 0.6728 at 1.18x the
+    /// cross-encoder cost where always-depth-100 pays 3.33x for 0.6599. The
+    /// best honest router available then (multi-hop intent) captured only ~21%
+    /// of that, so the missing input is a query-time signal, and the shape of
+    /// this distribution — peaked or flat — is the standard one. Entropy over
+    /// it needs no training data or corpus statistics.
+    ///
+    /// Kept OUT of `CaseRankList`: that type derives `Eq` and is compared
+    /// verbatim by the cross-repeat determinism guard, so putting floats in it
+    /// would put float equality inside the guard.
+    #[serde(default)]
+    pub scores: Vec<f64>,
 }
 
 /// One age point in the E6 decay/stability curve.
