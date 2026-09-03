@@ -335,11 +335,57 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
                     let cur_rank = &cur_pass.ranks[k];
                     debug_assert_eq!(ref_rank.case_id, cur_rank.case_id);
                     if ref_rank.retrieved != cur_rank.retrieved {
+                        // WHICH KIND of non-determinism is this?
+                        //
+                        // Two different bugs produce an identical message here,
+                        // and telling them apart IS the diagnosis:
+                        //
+                        //   scores EQUAL     -> the ORDER among ties is
+                        //                       unstable; a tie-break fixes it.
+                        //   scores DIFFER    -> the ARITHMETIC is unstable, f32
+                        //                       summation order wobbling the low
+                        //                       bits; a tie-break CANNOT fix it,
+                        //                       because nothing is tied.
+                        //
+                        // conv-42_q19 has been red on main for weeks and drew
+                        // two wrong fixes -- a tie-break, then an ordering key --
+                        // precisely because this message never said which one it
+                        // was. Needs SHODH_PER_CASE_SCORES=1 for the scores.
+                        let at = ref_rank
+                            .retrieved
+                            .iter()
+                            .zip(cur_rank.retrieved.iter())
+                            .position(|(a, b)| a != b);
+                        let verdict = match (
+                            ref_pass.scores_by_case.get(&ref_rank.case_id),
+                            cur_pass.scores_by_case.get(&cur_rank.case_id),
+                            at,
+                        ) {
+                            (Some(a), Some(b), Some(idx))
+                                if idx < a.len() && idx < b.len() =>
+                            {
+                                let lo = idx.saturating_sub(1);
+                                let hi = (idx + 2).min(a.len()).min(b.len());
+                                let tied = a[idx].to_bits() == b[idx].to_bits();
+                                format!(
+                                    " | first differs at rank {idx}; scores[{lo}..{hi}] r0={:?} r{i}={:?}; at {idx} the scores {}",
+                                    &a[lo..hi],
+                                    &b[lo..hi],
+                                    if tied {
+                                        "are IDENTICAL -- order among ties is unstable, a tie-break is the fix"
+                                    } else {
+                                        "DIFFER -- the arithmetic is unstable, a tie-break cannot fix this"
+                                    }
+                                )
+                            }
+                            _ => " | set SHODH_PER_CASE_SCORES=1 to see which scores decided this"
+                                .to_string(),
+                        };
                         failures.push(Failure {
                             kind: "infrastructure".to_string(),
                             detail: format!(
                                 "non-determinism [mode={}]: case {} rank list diverged between repeat 0 and repeat {i} \
-                                 — repeat 0 = {:?}, repeat {i} = {:?}",
+                                 — repeat 0 = {:?}, repeat {i} = {:?}{verdict}",
                                 mode.report_key(), ref_rank.case_id, ref_rank.retrieved, cur_rank.retrieved
                             ),
                         });
