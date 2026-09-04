@@ -42,6 +42,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tracing::debug;
 use uuid::Uuid;
 
@@ -96,6 +97,97 @@ fn companion_gate_enabled() -> bool {
 /// graph-leg Hebbian strengthening fix this function's introduction shipped
 /// alongside: spreading activation was calling `batch_strengthen_synapses`
 /// unconditionally, bypassing the gate entirely).
+/// Whether to rerank the head of the fused ranking with the cross-encoder.
+/// Default OFF: this is an unmeasured lever on the LIVE pipeline until the
+/// paired arms land. The pilot's numbers came from pools exported in an older
+/// pipeline era (its baseline was 0.5466 against today's 0.5312), so they are
+/// a prior, not a promise.
+fn ce_rerank_enabled() -> bool {
+    std::env::var("SHODH_CE_RERANK")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// How many candidates to rescore. Depth is a latency knob and barely a p@1
+/// knob — the pilot measured depth 30 keeping ~98% of depth 100's p@1 gain for
+/// 40% of the cost — so raising it buys recall@10, not precision@1.
+fn ce_depth() -> usize {
+    std::env::var("SHODH_CE_DEPTH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|d| *d > 0)
+        .unwrap_or(crate::embeddings::cross_encoder::CE_DEFAULT_DEPTH)
+}
+
+/// The process-wide cross-encoder session, loaded at most once.
+///
+/// `None` when the model is absent, which is the ordinary case for a build
+/// nobody has provisioned. The failure is cached, so a missing model costs one
+/// log line rather than a load attempt per query.
+fn cross_encoder() -> Option<&'static crate::embeddings::cross_encoder::CrossEncoder> {
+    static CE: OnceLock<Option<crate::embeddings::cross_encoder::CrossEncoder>> = OnceLock::new();
+    CE.get_or_init(|| {
+        use crate::embeddings::cross_encoder::CrossEncoder;
+        match CrossEncoder::load(&CrossEncoder::model_dir()) {
+            Ok(ce) => Some(ce),
+            Err(e) => {
+                tracing::info!("cross-encoder unavailable, reranking disabled: {e}");
+                None
+            }
+        }
+    })
+    .as_ref()
+}
+
+/// Reorder the first `scores.len()` items by score, descending, and carry the
+/// rest through untouched.
+///
+/// Two properties this exists to guarantee, both of which have been shipped
+/// wrong here before:
+///
+/// - **Total order.** Ties break by PRIOR RANK. A truncating sort through an
+///   equal-score plateau is not a ranking — without a tie-break, which items
+///   survive the later cut to `k` is decided by the sort implementation rather
+///   than by evidence (a546fddb, 9c9ed34a).
+/// - **Accumulate, never truncate.** Items past the reranked head keep their
+///   order and stay in the output. A reranker may only REORDER what retrieval
+///   found; dropping the tail here would silently cap recall at the rerank
+///   depth, and the caller's own `take(k)` is the only place anything is lost.
+fn rerank_head_by_scores<T>(items: Vec<T>, scores: &[f32]) -> Vec<T> {
+    let head = scores.len().min(items.len());
+    let mut order: Vec<usize> = (0..head).collect();
+    // STABLE sort, and no index tie-break — deliberately, after measuring.
+    //
+    // The obvious defensive move here is `.then(a.cmp(&b))`, matching the
+    // tie-break bugs this repo has shipped (a546fddb, 9c9ed34a). It is dead
+    // code in this function: `order` starts as `0..head`, so the equal-score
+    // plateau is ALREADY in prior-rank order, and a stable sort preserves it
+    // without help. Mutation-checked twice — deleting the clause changed
+    // nothing under `sort_by`, and nothing under `sort_unstable_by` either,
+    // because pdqsort leaves an already-ordered equal run alone.
+    //
+    // Those earlier bugs are a different shape: their input came from a HASHMAP,
+    // so "prior order" was per-process random and stability preserved noise.
+    // Here the input order IS the fused ranking, which is exactly the signal to
+    // fall back on. Stability is the mechanism; a tie-break clause would be
+    // decoration no test could defend.
+    order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
+
+    let mut slots: Vec<Option<T>> = items.into_iter().map(Some).collect();
+    let mut out: Vec<T> = Vec::with_capacity(slots.len());
+    for i in order {
+        if let Some(item) = slots[i].take() {
+            out.push(item);
+        }
+    }
+    for slot in slots.iter_mut().skip(head) {
+        if let Some(item) = slot.take() {
+            out.push(item);
+        }
+    }
+    out
+}
+
 pub(crate) fn recall_readonly() -> bool {
     std::env::var("SHODH_RECALL_READONLY")
         .map(|v| v == "1")
@@ -1793,7 +1885,65 @@ impl MemorySystem {
         companions
     }
 
+    /// Recall, with optional cross-encoder reranking of the head.
+    ///
+    /// `SHODH_CE_RERANK=1` (default off) fetches `SHODH_CE_DEPTH` candidates
+    /// instead of `k`, rescores that head with a query-candidate interaction
+    /// model, and cuts to `k`. Everything below the depth is carried through
+    /// untouched — accumulate, never truncate — so the rerank can only reorder
+    /// what the pipeline already found, never lose it.
+    ///
+    /// This flag is deliberately TOP-LEVEL rather than nested inside
+    /// `SHODH_COMPANION_RERANK` or an intent gate. A flag readable only when
+    /// another flag is set makes an arm that sets just this one measure
+    /// baseline against baseline, which is how `SHODH_SPREAD_FIX` and
+    /// `SHODH_GRAPH_PATH_STATE` both produced zeros that looked like verdicts.
+    /// `scripts/audit.py --class nested` now fails on that shape.
     pub fn recall(&self, query: &Query) -> Result<Vec<SharedMemory>> {
+        if !ce_rerank_enabled() {
+            return self.recall_fused(query);
+        }
+        let Some(query_text) = query.query_text.clone() else {
+            return self.recall_fused(query);
+        };
+        let Some(ce) = cross_encoder() else {
+            // Model absent: the ranking the pipeline produced is still a valid
+            // ranking. An optional reranker must never take a query down.
+            return self.recall_fused(query);
+        };
+
+        let k = query.max_results.max(1);
+        let depth = ce_depth().max(k);
+        let mut deep_query = query.clone();
+        deep_query.max_results = depth;
+        let deep = self.recall_fused(&deep_query)?;
+
+        let started = std::time::Instant::now();
+        let head = depth.min(deep.len());
+        let texts: Vec<&str> = deep[..head]
+            .iter()
+            .map(|m| m.experience.content.as_str())
+            .collect();
+        let scores = match ce.score_pairs(&query_text, &texts) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("cross-encoder rerank skipped: {e}");
+                return Ok(deep.into_iter().take(k).collect());
+            }
+        };
+
+        let out = rerank_head_by_scores(deep, &scores);
+
+        tracing::info!(
+            target: "ce_rerank",
+            depth = head,
+            elapsed_us = started.elapsed().as_micros() as u64,
+            "cross-encoder rerank fired"
+        );
+        Ok(out.into_iter().take(k).collect())
+    }
+
+    fn recall_fused(&self, query: &Query) -> Result<Vec<SharedMemory>> {
         // Companion-coverage re-rank (SHODH_COMPANION_RERANK, default off), gated
         // on multi-hop INTENT. The multi_hop wall is present-but-buried: gold
         // companions sit at rank 11-50 of the pool (present 86% vs recall 56%),
@@ -11165,6 +11315,54 @@ mod companion_rerank_tests {
             head,
             "no connectivity -> original ranking survives"
         );
+    }
+}
+
+#[cfg(test)]
+mod ce_rerank_order_tests {
+    use super::rerank_head_by_scores;
+
+    #[test]
+    fn head_is_reordered_by_score_and_tail_is_carried_through() {
+        // Six candidates; only the first four are rescored.
+        let items = vec!["a", "b", "c", "d", "e", "f"];
+        let scores = [0.1_f32, 0.9, 0.3, 0.5];
+
+        let out = rerank_head_by_scores(items, &scores);
+
+        // Head sorted descending by score: b(0.9) d(0.5) c(0.3) a(0.1).
+        assert_eq!(&out[..4], &["b", "d", "c", "a"]);
+        // Tail past the rerank depth keeps its order and is NOT dropped. If a
+        // reranker truncated here, recall would be silently capped at the
+        // rerank depth while every metric still looked plausible.
+        assert_eq!(&out[4..], &["e", "f"]);
+        assert_eq!(out.len(), 6, "reranking must not lose candidates");
+    }
+
+    #[test]
+    fn equal_scores_keep_prior_rank() {
+        // A CONTRACT test, and labelled as one rather than dressed up as a
+        // mutation-detecting one: when the reranker cannot separate candidates,
+        // the fused ranking must survive intact, so the later cut to k keeps
+        // the top of the fused order.
+        //
+        // Honest limitation: no local mutation breaks this. Stable and unstable
+        // sorts both preserve an already-ordered equal run, so it does not
+        // detect a deleted tie-break — it pins the OUTPUT the caller depends on
+        // against a future rewrite that reorders on ties for its own reasons.
+        let items: Vec<usize> = (0..64).collect();
+        let scores = [0.7_f32; 64];
+
+        let out = rerank_head_by_scores(items.clone(), &scores);
+
+        assert_eq!(out, items, "an equal-score plateau must keep prior rank");
+    }
+
+    #[test]
+    fn more_scores_than_items_does_not_panic() {
+        // A short pool with a deep rerank setting: head clamps to the pool.
+        let out = rerank_head_by_scores(vec![1_u8, 2], &[0.1, 0.9, 0.5, 0.4]);
+        assert_eq!(out, vec![2, 1]);
     }
 }
 

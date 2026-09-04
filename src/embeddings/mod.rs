@@ -15,6 +15,7 @@
 
 pub mod chunking;
 pub mod circuit_breaker;
+pub mod cross_encoder;
 pub mod downloader;
 pub mod gliner;
 pub mod keywords;

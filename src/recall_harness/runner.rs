@@ -1047,11 +1047,55 @@ pub(crate) fn guard_ner_backend(manager: &MultiUserMemoryManager) -> Result<()> 
     Ok(())
 }
 
+/// Refuse to run a cross-encoder arm without the cross-encoder.
+///
+/// `recall()` degrades to the unreranked ranking when the model is missing,
+/// which is right for a server and catastrophic for a measurement: the arm
+/// completes, reports a delta of 0.0000, and that zero reads as "the reranker
+/// does nothing" rather than "the reranker never ran". This session has already
+/// produced one such zero (`SHODH_GRAPH_PATH_STATE` set without its
+/// prerequisite, run 33603657064) and eight archived A/B workflows provisioned
+/// GLiNER zero times.
+///
+/// So the flag that turns the lever ON also makes its absence fatal HERE, at
+/// the harness, while leaving the server's graceful degradation intact.
+pub(crate) fn guard_cross_encoder() -> Result<()> {
+    let enabled = std::env::var("SHODH_CE_RERANK")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let dir = crate::embeddings::cross_encoder::CrossEncoder::model_dir();
+    guard_cross_encoder_at(enabled, &dir)
+}
+
+/// The decision, split from the env read so it is testable without mutating
+/// process env — `set_var` is not thread-safe against concurrent readers on
+/// other test threads, and this crate already carries one global lock because
+/// of that.
+pub(crate) fn guard_cross_encoder_at(enabled: bool, dir: &std::path::Path) -> Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    match crate::embeddings::cross_encoder::CrossEncoder::load(dir) {
+        Ok(_) => {
+            eprintln!("CE_RERANK=on model={}", dir.display());
+            Ok(())
+        }
+        Err(e) => anyhow::bail!(
+            "SHODH_CE_RERANK=1 but the cross-encoder failed to load from {}: {e}. \
+             Refusing to run: recall() would silently fall back to the unreranked \
+             ranking and this arm would report a zero that looks like a verdict. \
+             Provision the model or unset SHODH_CE_RERANK.",
+            dir.display()
+        ),
+    }
+}
+
 pub fn ingest_corpus(
     manager: &MultiUserMemoryManager,
     corpus: &[CorpusItem],
 ) -> Result<HashMap<String, Uuid>> {
     guard_ner_backend(manager)?;
+    guard_cross_encoder()?;
     let mut map = HashMap::with_capacity(corpus.len());
     let ner = manager.get_neural_ner();
     let user_mem = manager.get_user_memory(EVAL_USER)?;
@@ -2683,6 +2727,34 @@ fn category_name(c: SmokeCategory) -> &'static str {
         SmokeCategory::Negation => "negation",
         SmokeCategory::SingleHop => "single_hop",
         SmokeCategory::OpenDomain => "open_domain",
+    }
+}
+
+#[cfg(test)]
+mod ce_guard_tests {
+    use super::guard_cross_encoder_at;
+    use std::path::Path;
+
+    #[test]
+    fn a_missing_model_fails_the_arm_instead_of_measuring_baseline() {
+        // The whole point of the guard. recall() degrades to the unreranked
+        // ranking when the model is absent, so without this the arm COMPLETES,
+        // reports 0.0000, and that zero gets written down as "the reranker does
+        // nothing" instead of "the reranker never ran".
+        let err = guard_cross_encoder_at(true, Path::new("./models/does-not-exist"))
+            .expect_err("a CE arm without a CE model must refuse to run");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("silently fall back"),
+            "the error must say WHY a zero here would be a lie, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_missing_model_is_fine_when_no_arm_asked_for_it() {
+        // Ordinary runs must not be forced to provision 23 MB they never load.
+        guard_cross_encoder_at(false, Path::new("./models/does-not-exist"))
+            .expect("guard must be inert when the lever is off");
     }
 }
 

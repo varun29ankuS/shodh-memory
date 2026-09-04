@@ -166,6 +166,52 @@ jobs:
           test -s "$GL/label_embeddings.bin" || { echo "::error::GLiNER label embeddings missing"; exit 1; }
           echo "SHODH_GLINER_MODEL_PATH=$GL" >> "$GITHUB_ENV"
 
+      # Only fetched when an arm actually asks for the reranker, so ordinary
+      # runs do not pay 23 MB for a model they will not load.
+      #
+      # WITHOUT THIS A CE ARM MEASURES NOTHING. recall() falls back to the
+      # unreranked ranking when the model is absent -- correct for a server,
+      # fatal for a measurement, because the arm completes and reports 0.0000
+      # and that zero reads as "the reranker does nothing" rather than "the
+      # reranker never ran". guard_cross_encoder() now hard-fails the harness on
+      # that state; this step is what stops it being reached.
+      - name: Cache cross-encoder assets
+        if: contains(github.event.inputs.extra_env, 'SHODH_CE_RERANK=1')
+        id: ce-cache
+        uses: actions/cache@v6
+        with:
+          path: models/cross-encoder-ms-marco-minilm-l6
+          key: ce-ms-marco-minilm-l6-233902d2-v1
+
+      - name: Fetch cross-encoder assets
+        if: contains(github.event.inputs.extra_env, 'SHODH_CE_RERANK=1') && steps.ce-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          CE="${{ github.workspace }}/models/cross-encoder-ms-marco-minilm-l6"
+          mkdir -p "$CE"
+          # Pinned revision, not main: the pilot that produced the +18.2pp p@1
+          # prior scored with these exact weights. Note the canonical repo id is
+          # ms-marco-MiniLM-L6-v2 -- the pilot script's L-6-v2 is a 307 redirect.
+          REV=233902d25c440f23af6f7d6e94d2946bac0bee0a
+          BASE="https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2/resolve/$REV"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          dl "$CE/model_quint8_avx2.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          dl "$CE/model.onnx"             "$BASE/onnx/model.onnx"
+          dl "$CE/tokenizer.json"         "$BASE/tokenizer.json"
+          ls -la "$CE"
+
+      - name: Verify cross-encoder assets (hard gate)
+        if: contains(github.event.inputs.extra_env, 'SHODH_CE_RERANK=1')
+        run: |
+          CE="${{ github.workspace }}/models/cross-encoder-ms-marco-minilm-l6"
+          # sha256 pinned at provisioning time. A silently different export would
+          # rank differently while every metric still looked plausible.
+          echo "5d3e70fd0c9ff14b9b5169a51e957b7a9c74897afd0a35ce4bd318150c1d4d4a  $CE/model.onnx" > /tmp/ce.sha
+          echo "c80a8b34256ea453093d612e3ac48d3d965a0c0a48c7906709af8b8e28461bf9  $CE/model_quint8_avx2.onnx" >> /tmp/ce.sha
+          echo "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66  $CE/tokenizer.json" >> /tmp/ce.sha
+          sha256sum -c /tmp/ce.sha || { echo "::error::cross-encoder assets do not match the pinned sha256"; exit 1; }
+          echo "SHODH_CE_MODEL_PATH=$CE" >> "$GITHUB_ENV"
+
       - name: Graph reachability diagnostic
         if: ${{ github.event.inputs.mode == 'reachability' }}
         env:
