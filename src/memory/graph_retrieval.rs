@@ -1136,7 +1136,8 @@ fn traverse_beam(
     for _ in 0..HOPS {
         let mut next: Vec<BeamPath> = Vec::new();
         for p in &beam {
-            let edges = graph.get_entity_relationships_limited(&p.endpoint, Some(limits.max_edges))?;
+            let edges =
+                graph.get_entity_relationships_limited(&p.endpoint, Some(limits.max_edges))?;
             for edge in edges {
                 let nb = edge_neighbor(&edge, &p.endpoint, dir_fix);
                 if p.visited.contains(&nb) {
@@ -1630,8 +1631,8 @@ pub fn spreading_activation_retrieve_with_stats(
                 }
 
                 // Get relationships from this entity (limited to prevent blowup)
-                let edges = graph
-                    .get_entity_relationships_limited(&entity_uuid, Some(limits.max_edges))?;
+                let edges =
+                    graph.get_entity_relationships_limited(&entity_uuid, Some(limits.max_edges))?;
 
                 // Degree normalization: prevent hub nodes from flooding the network.
                 // Matches bidirectional path (Anderson & Reder 1999 ACT-R).
@@ -2659,22 +2660,28 @@ mod tests {
         seeds.insert(a, 1.0_f32);
 
         // Flag off: no passage map.
-        let (_, no_passages, _) =
-            personalized_pagerank(&graph, &seeds, None, false, false, None, TraversalLimits::default())
-                .unwrap();
+        let (_, no_passages, _) = personalized_pagerank(
+            &graph,
+            &seeds,
+            None,
+            false,
+            false,
+            None,
+            TraversalLimits::default(),
+        )
+        .unwrap();
         assert!(no_passages.is_empty(), "passages off must return empty map");
 
-        let (entities, passages, _) =
-            personalized_pagerank(
-                &graph,
-                &seeds,
-                None,
-                false,
-                false,
-                Some(0.5),
-                TraversalLimits::default(),
-            )
-            .unwrap();
+        let (entities, passages, _) = personalized_pagerank(
+            &graph,
+            &seeds,
+            None,
+            false,
+            false,
+            Some(0.5),
+            TraversalLimits::default(),
+        )
+        .unwrap();
 
         let bridge_mass = passages.get(&bridge_id).copied().unwrap_or(0.0);
         let solo_mass = passages.get(&solo_id).copied().unwrap_or(0.0);
@@ -2852,8 +2859,8 @@ mod tests {
     #[test]
     fn act_norm_rescales_raw_ppr_masses_and_mag_diag_reports_them() {
         use crate::graph_memory::{
-            EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode, GraphMemory,
-            LtpStatus, RelationType, RelationshipEdge,
+            EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode, GraphMemory, LtpStatus,
+            RelationType, RelationshipEdge,
         };
         use crate::memory::types::{Experience, MemoryId};
         use chrono::Utc;
@@ -3896,9 +3903,7 @@ mod tests {
     /// statistic moves.
     #[test]
     fn traversal_flags_reach_the_live_graph_leg() {
-        let _env_guard = TRAVERSAL_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _env_guard = TRAVERSAL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("SHODH_GRAPH_EDGE_DIR");
         std::env::remove_var("SHODH_GRAPH_MAX_EDGES");
 
