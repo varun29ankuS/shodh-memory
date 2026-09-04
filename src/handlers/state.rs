@@ -431,18 +431,12 @@ fn tag_surface_claimed_by_ner(tag: &str, ner_claimed: &HashSet<String>) -> bool 
     ner_claimed.contains(&tag.trim().to_lowercase())
 }
 
-/// Classify a tag into a specific EntityLabel based on naming patterns.
-///
-/// Tags enter the graph as entities. Instead of defaulting everything to
-/// `Technology`, this uses suffix/keyword matching to assign the correct
-/// ontological type — enabling type-aware spreading activation and
-/// `matches_with_hierarchy()` in retrieval.
 use crate::ab_testing;
 use crate::backup;
 use crate::config::ServerConfig;
 use crate::embeddings::{ner::NerEntityType, KeywordExtractor, NerConfig, NeuralNer};
 use crate::graph_memory::{
-    classify_tag_label, EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode,
+    recognised_tag_label, EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode,
     GraphMemory, GraphStats, LtpStatus, RelationshipEdge,
 };
 use crate::memory::{
@@ -2734,24 +2728,27 @@ impl MultiUserMemoryManager {
                     fine_label: record.fine_label.clone(),
                 })
                 .collect()
-        } else if !experience.entities.is_empty() {
-            tracing::debug!(
-                "Using {} pre-extracted entity names (no NER types available)",
-                experience.entities.len()
-            );
-            experience
-                .entities
-                .iter()
-                .map(|name| crate::embeddings::ner::NerEntity {
-                    text: name.clone(),
-                    entity_type: NerEntityType::Misc,
-                    confidence: 0.8,
-                    start: 0,
-                    end: name.len(),
-                    fine_label: None,
-                })
-                .collect()
         } else {
+            // REMOVED, deliberately: a branch here used to fall back to
+            // `experience.entities` — a plain `Vec<String>` with no spans and no
+            // types — and synthesise a `NerEntity` per name at `Misc` / 0.8
+            // confidence.
+            //
+            // Those names are not an extraction. `remember` builds that vector
+            // as `req.tags + NER surfaces + YAKE keyphrases` and stores it into
+            // both `entities` and `tags`, so on a document corpus it is mostly
+            // keyphrases and the source filename. Presenting it to this pipeline
+            // as if it were NER output gave every one of those strings the
+            // authority of a committed span: 46 `.txt` filenames became graph
+            // nodes on `defence-live`, each typed `Misc` → `Concept` with no
+            // `fine_type`, and no rebuild could ever re-type them because the
+            // branch fired before the typer did.
+            //
+            // Falling through to the typer costs a NER pass on memories written
+            // before `ner_entities` existed (or by an ingest where NER failed).
+            // That is the correct price: an entity node needs a committed span
+            // from something that decides what text denotes, and nothing else in
+            // this function can supply one.
             match self.neural_ner.extract(&experience.content) {
                 Ok(entities) => {
                     tracing::debug!(
@@ -3108,22 +3105,95 @@ impl MultiUserMemoryManager {
         // surfaces rejected as entities re-entered the graph as tags.
         let ner_claimed = ner_claimed_surfaces(&ner_entities);
 
-        // Build tag entity nodes
+        // Build tag entity nodes.
+        //
+        // A GRAPH NODE IS A CLAIM THAT SOMETHING EXISTS. The knowledge graph is a
+        // model of things — organisations, places, vehicles, weapons — and every
+        // node asserts that its name denotes one of them. A tag is not evidence
+        // of that. `experience.tags` is the memory's search metadata: `remember`
+        // fills it with `req.tags` (whatever the ingest passed — for a document
+        // corpus, the source filename), the NER surfaces, and YAKE keyphrases.
+        // Keyphrases are *categories* ("empty weight", "control system",
+        // "submarine"), not referents; taxonomy codes ("Wb 137 Water") name a
+        // classification scheme, not a thing; a filename names the container the
+        // text arrived in.
+        //
+        // This phase used to write a node for each of them, and it dominated the
+        // graph: on `defence-live` 638 of 1192 entities came from here and none
+        // carried a `fine_type`, because no typer had ever looked at them.
+        // Filtering that by *string shape* cannot work — a corpus of headlines
+        // and metadata fields is entirely title-cased, so capitalisation carries
+        // no information, and on prose it admits any keyphrase whose second word
+        // happens to be a name ("named BrahMos", "including ADA").
+        //
+        // So admission is by AUTHORITY, not by shape. Three authorities can say a
+        // surface denotes a thing:
+        //
+        //   1. The schema-driven typer committed a span for it — the `ner_*`
+        //      phases above, which is where most real entities come from.
+        //   2. The CALLER asserted it: `experience.declared_entities` is the
+        //      `tags` of the write request, kept unmerged for exactly this. A
+        //      person or an integration naming an entity is evidence; that is
+        //      what a tag on a `remember` call has always meant, and it is how a
+        //      caller supplies a name the typer's schema does not cover. What it
+        //      is NOT is evidence of a *type* — so unless rule 3 also fires the
+        //      node is `Concept` with no `fine_type`, which is the honest
+        //      reading of "someone told us this exists".
+        //   3. `recognised_tag_label` matched a curated naming convention that
+        //      only artifacts follow: a named product (`rocksdb`), a file
+        //      (`config.toml`), a service (`auth-service`). This is what keeps a
+        //      developer's own tags in their graph, and it is the only authority
+        //      that also supplies a type.
+        //
+        // A surface no authority recognises stays a keyword. It is still
+        // indexed, still searchable and still reachable through `recall_by_tags`;
+        // it just does not become a thing.
+        //
+        // Note that rule 2 is why the maximal-mention mask further down still
+        // works. That mask blocks causal edges to a name that is a fragment of a
+        // CO-MENTIONED entity ("Vornak2" inside "the Vornak2 incident"), and it
+        // can only see entities this function creates. The full mention is
+        // exactly the kind of name a caller declares and a span-based typer
+        // clips, so without rule 2 the mask silently stops firing and
+        // cross-document causal bridges return.
+        let declared: HashSet<&str> = experience
+            .declared_entities
+            .iter()
+            .map(|d| d.trim())
+            .collect();
+        // The union, not just `tags`. `remember` copies the request's tags into
+        // `tags` as well, so on that path the two overlap — but the integration
+        // handlers (Linear, GitHub) build an `Experience` with declared names and
+        // no `tags` at all, and a declared name that no list happens to echo is
+        // still a declared name. Deduped so a surface present in both does not
+        // build two nodes.
+        let mut seen_tag_surface: HashSet<&str> = HashSet::new();
         let tag_entities: Vec<(String, EntityNode)> = experience
             .tags
             .iter()
+            .chain(experience.declared_entities.iter())
             .filter_map(|tag| {
                 let tag_name = tag.trim();
+                if !seen_tag_surface.insert(tag_name) {
+                    return None;
+                }
+                let recognised = recognised_tag_label(tag_name);
+                let label = match &recognised {
+                    Some(label) => label.clone(),
+                    // Caller-asserted existence without a recognised type.
+                    None if declared.contains(tag_name) => EntityLabel::Concept,
+                    None => return None,
+                };
                 if !tag_surface_claimed_by_ner(tag_name, &ner_claimed)
                     && tag_name.len() >= 2
                     && !blocklist.contains(tag_name.to_lowercase().as_str())
+                    && !is_structural_non_entity(tag_name)
                     && !tag_name.starts_with("tool:")
                     && !tag_name.starts_with("source:")
                     && !tag_name.starts_with("file:")
                     && !tag_name.contains(". ")
                     && !tag_name.ends_with('.')
                 {
-                    let label = classify_tag_label(tag_name);
                     Some((
                         tag_name.to_string(),
                         EntityNode {
@@ -3134,7 +3204,24 @@ impl MultiUserMemoryManager {
                             last_seen_at: now,
                             mention_count: 1,
                             summary: String::new(),
-                            attributes: HashMap::new(),
+                            // Which phase claimed this surface. The NER phase
+                            // already records `source=ner`; without the same
+                            // marker on the other phases a node's provenance is
+                            // unrecoverable from the stored graph, and "where did
+                            // this come from" is the first question any entity
+                            // -quality audit asks.
+                            attributes: {
+                                let mut a = HashMap::new();
+                                a.insert(
+                                    "source".into(),
+                                    if recognised.is_some() {
+                                        "tag-identifier".into()
+                                    } else {
+                                        "tag-declared".into()
+                                    },
+                                );
+                                a
+                            },
                             name_embedding: entity_name_embeddings
                                 .and_then(|map| map.get(tag_name))
                                 .cloned(),
@@ -3194,6 +3281,13 @@ impl MultiUserMemoryManager {
                 if ALLCAPS_BLOCKLIST.contains(&term.as_str()) {
                     return None;
                 }
+                // Same structural hygiene the NER phase applies. The regex here
+                // (`[A-Z]{3,}[A-Z0-9]*`) matches inside URL slugs and article
+                // ids as happily as it matches an acronym, and this phase is the
+                // one place that had no such gate.
+                if is_structural_non_entity(&term) {
+                    return None;
+                }
                 known_names.push(term.clone());
                 let emb = entity_name_embeddings
                     .and_then(|map| map.get(&term))
@@ -3208,7 +3302,11 @@ impl MultiUserMemoryManager {
                         last_seen_at: now,
                         mention_count: 1,
                         summary: String::new(),
-                        attributes: HashMap::new(),
+                        attributes: {
+                            let mut a = HashMap::new();
+                            a.insert("source".into(), "acronym".into());
+                            a
+                        },
                         name_embedding: emb,
                         salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
                             &EntityLabel::Technology,
@@ -3242,7 +3340,11 @@ impl MultiUserMemoryManager {
                         last_seen_at: now,
                         mention_count: 1,
                         summary: String::new(),
-                        attributes: HashMap::new(),
+                        attributes: {
+                            let mut a = HashMap::new();
+                            a.insert("source".into(), "issue-id".into());
+                            a
+                        },
                         name_embedding: entity_name_embeddings
                             .and_then(|map| map.get(issue_id))
                             .cloned(),
@@ -4060,6 +4162,62 @@ impl MultiUserMemoryManager {
     }
 }
 
+/// Whether a single whitespace-delimited token is an opaque machine identifier
+/// rather than part of a name.
+///
+/// The signature is SHAPE, not length: a name that carries a number keeps the
+/// number at one end (`Voyager2`, `Sputnik1`, `Agni5`) because the number
+/// qualifies the word. An id has no word in it — its digits are interleaved
+/// (`Gr0ciqba`, `47568e95`, `B8b4b143`) or they swamp the one or two letters
+/// that survive (`B1147659`). So a token is opaque when it mixes letters and
+/// digits AND either:
+///
+/// * it alternates between letter runs and digit runs more than once, or
+/// * it has a single alternation but fewer than three letters in total — there
+///   is no word there to qualify.
+///
+/// Plus one length rule: an all-caps alphanumeric run of 12+ characters is a
+/// URL key (`CJPBZOUEURGDJC3DRTQIJDAWPQ`), never an acronym. It still requires a
+/// digit, so a shouted heading token ("ORGANISATION") is out of reach — and a
+/// heading is exactly where an organisation's real name appears.
+///
+/// Short standalone fragments (`4cc8`, `90b0`) need no rule here: they have no
+/// run of three consecutive letters, which `is_structural_non_entity` already
+/// rejects. This function exists for the case that rule misses — an id embedded
+/// in a title-cased phrase, where a neighbouring real word supplies the letters
+/// ("Article 47568e95 5a83 57ad B98b 16f261cbad64").
+fn is_opaque_identifier_token(token: &str) -> bool {
+    let core = token.trim_matches(|c: char| !c.is_alphanumeric());
+    // Requiring a digit is what keeps a word out of this function's reach: an
+    // all-caps heading token ("ORGANISATION", "AERONAUTICS") would otherwise
+    // trip the length rule, and headings are exactly where organisation names
+    // live.
+    let letters = core.chars().filter(|c| c.is_alphabetic()).count();
+    let digits = core.chars().filter(|c| c.is_ascii_digit()).count();
+    if digits == 0 || letters == 0 {
+        return false;
+    }
+
+    if core.len() >= 12
+        && core
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    {
+        return true;
+    }
+    if core.len() < 6 || !core.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+
+    // Count boundaries between a letter run and a digit run.
+    let alternations = core
+        .chars()
+        .zip(core.chars().skip(1))
+        .filter(|(a, b)| a.is_alphabetic() != b.is_alphabetic())
+        .count();
+    alternations > 1 || letters < 3
+}
+
 /// Deterministic entity hygiene: reject structural tokens that NER backbones
 /// mislabel as named entities when fed messy real-world text (news dumps, event
 /// feeds, scraped documents) — URLs/domains/file paths, timestamps/timezones,
@@ -4081,6 +4239,55 @@ pub(crate) fn is_structural_non_entity(name: &str) -> bool {
         .iter()
         .any(|s| lower.ends_with(s))
     {
+        return true;
+    }
+
+    // Prose-document filenames ("62-kalyani-group.txt", "brief.pdf").
+    //
+    // A document is the container the text arrived in, not something the text is
+    // about, so naming it as an entity puts the envelope in the graph alongside
+    // its contents — and then wires it to them, because every entity in the
+    // document co-occurs with it. 46 of `defence-live`'s 1192 nodes were the
+    // `.txt` file each memory was scraped from.
+    //
+    // Source and config filenames are deliberately NOT here: in a developer's
+    // memory `storage.rs` or `config.toml` is the subject of the record ("the
+    // bug is in storage.rs"), so `recognised_tag_label` classifies those as
+    // Module/Configuration entities on purpose. The distinction is what the file
+    // is *to the person remembering it*, not the presence of a dot.
+    if [
+        ".txt", ".pdf", ".doc", ".docx", ".csv", ".tsv", ".log", ".rtf", ".epub",
+    ]
+    .iter()
+    .any(|s| lower.ends_with(s))
+    {
+        return true;
+    }
+
+    // Filesystem paths. Two or more separators, or a Windows drive prefix — one
+    // separator alone is left alone because it is also ordinary notation
+    // ("TCP/IP", "A/B test", "I/O").
+    if lower.matches(['/', '\\']).count() >= 2
+        || (lower.len() >= 3
+            && lower.as_bytes()[1] == b':'
+            && matches!(lower.as_bytes()[2], b'/' | b'\\'))
+    {
+        return true;
+    }
+
+    // Opaque identifier tokens: a hex id, an over-long all-caps run, or a
+    // letter/digit soup token. A name may contain a designator ("Su-30MKI",
+    // "Covid-19") but not an id — an id denotes a record, not a thing, and it is
+    // what URL slugs and article keys leave behind when a scraper title-cases
+    // them ("Article 47568e95 5a83 57ad B98b 16f261cbad64").
+    if name.split_whitespace().any(is_opaque_identifier_token) {
+        return true;
+    }
+
+    // No alphabetic character at all: bare numbers, signed floats, percentages.
+    // ("24210596", "-3.7037037037037"). The graph has numeric fields for
+    // quantities; a number is never the name of a thing.
+    if !name.chars().any(|c| c.is_alphabetic()) {
         return true;
     }
 
@@ -4248,56 +4455,104 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_tag_label_database() {
-        assert_eq!(classify_tag_label("rocksdb"), EntityLabel::Database);
-        assert_eq!(classify_tag_label("PostgreSQL"), EntityLabel::Database);
-        assert_eq!(classify_tag_label("redis"), EntityLabel::Database);
-        assert_eq!(classify_tag_label("my-db"), EntityLabel::Database);
-        assert_eq!(classify_tag_label("user-db"), EntityLabel::Database);
-    }
-
-    #[test]
-    fn test_classify_tag_label_service() {
-        assert_eq!(classify_tag_label("auth-service"), EntityLabel::Service);
-        assert_eq!(classify_tag_label("memory-api"), EntityLabel::Service);
-        assert_eq!(classify_tag_label("grpc-server"), EntityLabel::Service);
-    }
-
-    #[test]
-    fn test_classify_tag_label_environment() {
-        assert_eq!(classify_tag_label("production"), EntityLabel::Environment);
-        assert_eq!(classify_tag_label("staging"), EntityLabel::Environment);
-        assert_eq!(classify_tag_label("kubernetes"), EntityLabel::Environment);
-        assert_eq!(classify_tag_label("docker"), EntityLabel::Environment);
-    }
-
-    #[test]
-    fn test_classify_tag_label_pipeline() {
-        assert_eq!(classify_tag_label("ci-pipeline"), EntityLabel::Pipeline);
-        assert_eq!(classify_tag_label("deploy-workflow"), EntityLabel::Pipeline);
-    }
-
-    #[test]
-    fn test_classify_tag_label_document() {
-        assert_eq!(classify_tag_label("README.md"), EntityLabel::Document);
-        assert_eq!(classify_tag_label("api-spec"), EntityLabel::Document);
-    }
-
-    #[test]
-    fn test_classify_tag_label_configuration() {
+    fn test_recognised_tag_label_database() {
+        assert_eq!(recognised_tag_label("rocksdb"), Some(EntityLabel::Database));
         assert_eq!(
-            classify_tag_label("settings.toml"),
-            EntityLabel::Configuration
+            recognised_tag_label("PostgreSQL"),
+            Some(EntityLabel::Database)
         );
-        assert_eq!(classify_tag_label("app-config"), EntityLabel::Configuration);
-        assert_eq!(classify_tag_label(".env"), EntityLabel::Configuration);
+        assert_eq!(recognised_tag_label("redis"), Some(EntityLabel::Database));
+        assert_eq!(recognised_tag_label("my-db"), Some(EntityLabel::Database));
+        assert_eq!(recognised_tag_label("user-db"), Some(EntityLabel::Database));
     }
 
     #[test]
-    fn test_classify_tag_label_module() {
-        assert_eq!(classify_tag_label("graph_memory.rs"), EntityLabel::Module);
-        assert_eq!(classify_tag_label("index.ts"), EntityLabel::Module);
-        assert_eq!(classify_tag_label("utils-lib"), EntityLabel::Module);
+    fn test_recognised_tag_label_service() {
+        assert_eq!(
+            recognised_tag_label("auth-service"),
+            Some(EntityLabel::Service)
+        );
+        assert_eq!(
+            recognised_tag_label("memory-api"),
+            Some(EntityLabel::Service)
+        );
+        assert_eq!(
+            recognised_tag_label("grpc-server"),
+            Some(EntityLabel::Service)
+        );
+    }
+
+    #[test]
+    fn test_recognised_tag_label_environment() {
+        assert_eq!(
+            recognised_tag_label("kubernetes"),
+            Some(EntityLabel::Environment)
+        );
+        assert_eq!(
+            recognised_tag_label("docker"),
+            Some(EntityLabel::Environment)
+        );
+        // CHANGED: "production" and "staging" were Environment. They name a
+        // phase of work, not a thing, and the matcher has no way to know whether
+        // the corpus it is reading is a deployment log or a defence document.
+        assert_eq!(recognised_tag_label("production"), None);
+        assert_eq!(recognised_tag_label("staging"), None);
+    }
+
+    #[test]
+    fn test_recognised_tag_label_pipeline() {
+        assert_eq!(
+            recognised_tag_label("ci-pipeline"),
+            Some(EntityLabel::Pipeline)
+        );
+        assert_eq!(
+            recognised_tag_label("deploy-workflow"),
+            Some(EntityLabel::Pipeline)
+        );
+        // Whole trailing token only — prose that merely mentions a pipeline is
+        // not the name of one.
+        assert_eq!(recognised_tag_label("pipeline latency notes"), None);
+    }
+
+    #[test]
+    fn test_recognised_tag_label_document() {
+        assert_eq!(
+            recognised_tag_label("README.md"),
+            Some(EntityLabel::Document)
+        );
+        assert_eq!(
+            recognised_tag_label("api-spec"),
+            Some(EntityLabel::Document)
+        );
+    }
+
+    #[test]
+    fn test_recognised_tag_label_configuration() {
+        assert_eq!(
+            recognised_tag_label("settings.toml"),
+            Some(EntityLabel::Configuration)
+        );
+        assert_eq!(
+            recognised_tag_label("app-config"),
+            Some(EntityLabel::Configuration)
+        );
+        assert_eq!(
+            recognised_tag_label(".env"),
+            Some(EntityLabel::Configuration)
+        );
+        // CHANGED: `contains("config")` used to fire here. "stobar
+        // configuration" is a carrier-deck launch method, not a config file.
+        assert_eq!(recognised_tag_label("stobar configuration"), None);
+    }
+
+    #[test]
+    fn test_recognised_tag_label_module() {
+        assert_eq!(
+            recognised_tag_label("graph_memory.rs"),
+            Some(EntityLabel::Module)
+        );
+        assert_eq!(recognised_tag_label("index.ts"), Some(EntityLabel::Module));
+        assert_eq!(recognised_tag_label("utils-lib"), Some(EntityLabel::Module));
     }
 
     /// Build a minimal NER-phase entity for the twin-suppression tests.
@@ -4347,39 +4602,134 @@ mod tests {
     }
 
     #[test]
-    fn tags_that_ner_did_not_claim_still_become_entities() {
-        // The guard must suppress twins only. A genuine tag — a user label or a
-        // YAKE keyphrase that is not an NER entity — is still the tag phase's
-        // job, and silently dropping those would trade one defect for another.
+    fn tags_that_ner_did_not_claim_are_not_automatically_entities() {
+        // The twin guard is orthogonal to admission: it says only "NER already
+        // has this surface". Whether an unclaimed tag becomes an entity is
+        // `recognised_tag_label`'s call, and it says no unless a curated rule
+        // names the surface.
         let ner = vec![ner_phase_entity("Baltimore", EntityLabel::Location)];
         let claimed = ner_claimed_surfaces(&ner);
 
         for surface in ["kubernetes", "q3-roadmap", "Baltimore Harbor"] {
             assert!(
                 !tag_surface_claimed_by_ner(surface, &claimed),
-                "{surface:?} is not an NER entity and must still be admitted"
+                "{surface:?} is not an NER entity, so the twin guard must not fire"
+            );
+        }
+        assert_eq!(
+            recognised_tag_label("kubernetes"),
+            Some(EntityLabel::Environment),
+            "a named platform is an artifact and stays an entity"
+        );
+        assert_eq!(
+            recognised_tag_label("Baltimore Harbor"),
+            None,
+            "an unclaimed proper noun is NER's call to make, not the tag phase's"
+        );
+    }
+
+    #[test]
+    fn keyphrase_tags_do_not_become_entities() {
+        // THE INVARIANT. A graph node asserts that its name denotes a thing.
+        // `experience.tags` is search metadata — `remember` fills it with the
+        // ingest's own tags, the NER surfaces and YAKE keyphrases — so most of
+        // it names categories, not referents. Admitting it wholesale is what
+        // made 638 of `defence-live`'s 1192 entities untyped keyphrases,
+        // filenames and taxonomy codes.
+        for keyword in [
+            // YAKE keyphrases off a defence corpus: categories, not referents.
+            "empty weight",
+            "control system",
+            "submarine",
+            "missile",
+            "facilities",
+            "long-range",
+            "delay",
+            "development",
+            "production",
+            // The file the memory was scraped from.
+            "62-kalyani-group.txt",
+            "38-visakhapatnam-class-destroyer.txt",
+            // GDELT taxonomy codes, title-cased by the connector.
+            "Wb 137 Water",
+            "Tax Fncact Chief",
+            "Crisislex Crisislexrec",
+            "Manmade Disaster Implied",
+        ] {
+            assert_eq!(
+                recognised_tag_label(keyword),
+                None,
+                "{keyword:?} is a keyword, not a thing — it must stay out of the graph"
             );
         }
     }
 
     #[test]
-    fn test_classify_tag_label_fallback() {
-        // CHANGED: these now resolve to `Concept`, not `Technology`.
-        //
-        // Both ARE technologies — but `classify_tag_label` does not know that.
-        // Neither appears in any of its rules (the "rust"/"react" strings in
-        // graph_memory.rs live in the EntityExtractor's separate lexicon, not
-        // in this matcher), so they reach the fallthrough exactly like an
-        // unrecognised word does. The old default asserted `Technology` for
-        // everything that fell through, which is why an entire graph rendered
-        // as one class regardless of what it contained.
-        //
-        // Naming them `Concept` is the honest answer for a matcher that did not
-        // recognise them. Restoring `Technology` for genuine technology tags is
-        // a lexicon problem — it needs a real technology vocabulary wired into
-        // this function, not a default that guesses.
-        assert_eq!(classify_tag_label("react"), EntityLabel::Concept);
-        assert_eq!(classify_tag_label("rust"), EntityLabel::Concept);
+    fn structural_gate_rejects_documents_paths_and_ids() {
+        for junk in [
+            "62-kalyani-group.txt",
+            "brief.pdf",
+            "export.csv",
+            "server.log",
+            "C:/Users/x/notes",
+            "src/handlers/state.rs",
+            "Article 47568e95 5a83 57ad B98b 16f261cbad64",
+            "Water B1147659",
+            "Baltimore Key Bridge Collapse Gr0ciqba",
+            "No Indication Of Terrorism In Baltimore Bridge Collapse Police B8b4b143",
+            "CJPBZOUEURGDJC3DRTQIJDAWPQ",
+            "-3.7037037037037",
+            "24210596",
+            "0.404040404040404",
+        ] {
+            assert!(
+                is_structural_non_entity(junk),
+                "structural surface must be rejected: {junk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn structural_gate_spares_names_and_designators() {
+        // The gate is deterministic and runs ahead of every phase, so a false
+        // positive here silently deletes a real entity from every corpus.
+        for name in [
+            "DRDO",
+            "Indian Navy",
+            "INS Vikrant",
+            "Agni-V",
+            "Bangalore",
+            "HAL",
+            "Hindustan Aeronautics Limited",
+            // Designators keep their separator, which is what leaves a 3+ letter
+            // run for the pre-existing rule and keeps them out of reach of the
+            // opaque-identifier rules. (Glued forms — "C130", "A400M" — were
+            // already rejected before this change by the letter-run rule; that
+            // is untouched here.)
+            "Su-30MKI",
+            "MiG-29K",
+            "Covid-19",
+            // A number at one end QUALIFIES the word before it. Rejecting these
+            // is how an over-eager id rule deletes real entities: an earlier
+            // version of `is_opaque_identifier_token` keyed on length alone and
+            // silently removed every 8-character name carrying a digit.
+            "Voyager2",
+            "Sputnik1",
+            "Boeing787",
+            "Fennick1",
+            "Boeing 787",
+            "TCP/IP",
+            "ORGANISATION",
+            "AERONAUTICS",
+            "config.toml",
+            "README.md",
+            "graph_memory.rs",
+        ] {
+            assert!(
+                !is_structural_non_entity(name),
+                "real surface must survive: {name:?}"
+            );
+        }
     }
 
     #[test]

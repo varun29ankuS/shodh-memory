@@ -155,7 +155,9 @@ export interface Cluster {
   size: number;
   label: string;
   /** True when this bucket is mostly folded-in long tail, in which case naming
-   *  it after one member would mislead (front/index.html:874-878). */
+   *  it after one member would mislead (front/index.html:874-878). `label`
+   *  already reflects this — read `label`, not this flag, when rendering text;
+   *  the flag is for styling (muted colour). */
   longTail: boolean;
   dominantType: string;
 }
@@ -476,11 +478,24 @@ export function clusterUniverse(model: UniverseModel): void {
     }
     const folded = foldedInto.get(originalComm[cid]) ?? 0;
     const longTail = folded > mem.length * 0.5;
+    // A mixed bucket must not be named after one member — but it must still be
+    // named after something real. The placeholder that used to sit here read
+    // "long tail", which on screen is indistinguishable from an entity called
+    // "long tail": it is internal vocabulary for *why we could not name it*,
+    // shown where the reader expects *what is in it*. What is in it is the
+    // dominant type, so say that. `dominantType` is "Unlabelled" only when the
+    // members carry no type at all, and then the best member's name is still a
+    // better answer than jargon.
+    const label = longTail
+      ? dominantType !== "Unlabelled"
+        ? `mostly ${dominantType}`
+        : nodes[best].name
+      : nodes[best].name;
     return {
       id: cid,
       members: mem,
       size: mem.length,
-      label: longTail ? "long tail" : nodes[best].name,
+      label,
       longTail,
       dominantType,
     };

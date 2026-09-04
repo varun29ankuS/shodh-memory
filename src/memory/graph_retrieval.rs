@@ -1042,12 +1042,20 @@ fn reachable_inject(
     // Bound the injected set to the strongest-path reachable entities.
     if best.len() > REACH_MAX_ENTITIES {
         let mut items: Vec<(Uuid, f32)> = best.into_iter().collect();
-        // Score desc -> entity id asc. `best` is a HashMap, so `into_iter` yields a
-        // per-map random order (Rust seeds every map separately, so the order differs
-        // between two maps in the SAME process), and the truncate below cuts through
-        // equal-score plateaus. Without a total order the injected entity set differs
-        // between two repeats of one query. This is the RH-12 hazard already guarded
-        // on the memory sort downstream; this sort is one layer upstream and was missed.
+        // `best` is a HashMap, so this Vec arrives in RANDOMISED order, and an
+        // unstable sort on score alone gives ties no defined order at all. The
+        // very next line TRUNCATES, so two entities on equal path strength meant
+        // the injected set — and every rank derived from it — was decided by
+        // hash iteration order rather than by the graph. It shows up as a
+        // retrieval result that changes between two identical queries against
+        // one unchanged store, which is what the harness's repeat-determinism
+        // guard exists to catch.
+        //
+        // Uuid makes the order total and is stable for the lifetime of a store,
+        // which is the scope the guard compares over. It is NOT stable across
+        // two ingests of the same corpus (entity uuids are v4); a cross-ingest
+        // order would have to key on the entity name, and that costs a graph
+        // lookup per candidate inside the hot walk.
         items.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         items.truncate(REACH_MAX_ENTITIES);
         return Ok(items.into_iter().collect());
@@ -1125,9 +1133,10 @@ fn traverse_beam(
         if next.is_empty() {
             break;
         }
-        // Score desc -> endpoint id asc. Paths are pushed in graph-iteration order and
-        // the beam cut below lands mid-plateau whenever two walks score equally, so
-        // which path survives must not depend on the order neighbours arrived in.
+        // Same hazard as the reach cut above: an unstable sort on score alone,
+        // truncated immediately. Paths tie on score routinely here because
+        // `ppr_edge_weight` is a product of a few quantised factors, so which
+        // path survives the beam was undefined. Endpoint makes it total.
         next.sort_unstable_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
@@ -1339,16 +1348,38 @@ pub fn spreading_activation_retrieve_with_stats(
     // First pass: collect entities with their salience values
     let mut entity_data: Vec<(Uuid, String, f32, f32)> = Vec::new(); // (uuid, name, ic_weight, salience)
 
+    // A node this build cannot decode must cost the query that ONE seed, not the
+    // whole request. The seed lookup used to propagate the decode error straight
+    // out of `recall`, so a single unreadable node in a 9,000-node graph turned
+    // every default/hybrid/associative recall into a 500 while semantic and
+    // temporal — which never touch the graph leg — kept working.
+    //
+    // Skipping is not the same as hiding: each skip is logged with the name that
+    // could not be resolved, counted, and returned to the caller as
+    // `RetrievalStats::unreadable_graph_nodes`, so a degraded answer is
+    // distinguishable from a complete one.
+    let mut unreadable_graph_nodes = 0usize;
+
     for entity in &analysis.focal_entities {
-        if let Some(entity_node) = graph.find_entity_by_name(&entity.text)? {
-            entity_data.push((
+        match graph.find_entity_by_name(&entity.text) {
+            Ok(Some(entity_node)) => entity_data.push((
                 entity_node.uuid,
                 entity.text.clone(),
                 entity.ic_weight,
                 entity_node.salience,
-            ));
-        } else {
-            tracing::debug!("  ✗ Entity '{}' not found in graph", entity.text);
+            )),
+            Ok(None) => {
+                tracing::debug!("  ✗ Entity '{}' not found in graph", entity.text);
+            }
+            Err(e) => {
+                unreadable_graph_nodes += 1;
+                tracing::warn!(
+                    entity = %entity.text,
+                    error = %e,
+                    "graph seed skipped: its node could not be decoded — this query \
+                     answers without it"
+                );
+            }
         }
     }
 
@@ -1368,15 +1399,26 @@ pub fn spreading_activation_retrieve_with_stats(
             if name.trim().len() < 2 {
                 continue;
             }
-            if let Some(entity_node) = graph.find_entity_by_name(name)? {
-                if !seen.contains(&entity_node.uuid) {
-                    entity_data.push((
-                        entity_node.uuid,
-                        name.clone(),
-                        QUERY_NER_SEED_IC,
-                        entity_node.salience,
-                    ));
-                    added += 1;
+            match graph.find_entity_by_name(name) {
+                Ok(Some(entity_node)) => {
+                    if !seen.contains(&entity_node.uuid) {
+                        entity_data.push((
+                            entity_node.uuid,
+                            name.clone(),
+                            QUERY_NER_SEED_IC,
+                            entity_node.salience,
+                        ));
+                        added += 1;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    unreadable_graph_nodes += 1;
+                    tracing::warn!(
+                        entity = %name,
+                        error = %e,
+                        "query-NER graph seed skipped: its node could not be decoded"
+                    );
                 }
             }
         }
@@ -1426,6 +1468,9 @@ pub fn spreading_activation_retrieve_with_stats(
     } else {
         0.0
     };
+
+    // Tell the caller the answer was assembled without some of its seeds.
+    stats.unreadable_graph_nodes = unreadable_graph_nodes;
 
     if activation_map.is_empty() {
         tracing::warn!("No entities found in graph, falling back to semantic search");

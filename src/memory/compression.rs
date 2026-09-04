@@ -340,7 +340,25 @@ impl CompressionPipeline {
                 ));
             }
 
-            let mut experience: Experience = crate::serialization::decode_raw(&decompressed)?;
+            // The blob is a standalone postcard `Experience`, written at
+            // compression time — so it carries whatever `NerEntityRecord`
+            // layout was current then. A blob written before `fine_label`
+            // existed (2026-07-12) desynchronises today's decoder by one byte
+            // per NER record, exactly as an uncompressed record does, and on a
+            // store where nearly every memory is compressed this is the
+            // majority path rather than an edge case. Same recovery as
+            // `deserialize_memory`: current layout first, older layout only on
+            // failure, and the current-layout error is the one reported.
+            let mut experience: Experience =
+                match crate::serialization::decode_raw::<Experience>(&decompressed) {
+                    Ok(experience) => experience,
+                    Err(current_err) => {
+                        let _generation =
+                            crate::memory::types::NerWireGeneration::PreFineLabel.enter();
+                        crate::serialization::decode_raw::<Experience>(&decompressed)
+                            .map_err(|_| current_err)?
+                    }
+                };
 
             // `Experience::toponyms` is `#[serde(skip)]` — it rides at the tail
             // of `MemoryFlat` rather than inside the `Experience` encoding, so

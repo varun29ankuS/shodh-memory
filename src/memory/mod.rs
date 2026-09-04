@@ -379,6 +379,58 @@ fn tokenize_words(text: &str) -> HashSet<&str> {
         .collect()
 }
 
+/// Re-order runs of adjacent candidates that the score comparison could not
+/// separate, using memory CONTENT as the key.
+///
+/// WHY THIS EXISTS. `MemoryId` is a v4 uuid minted during ingest, so ordering
+/// genuine ties by id is deterministic within one store and a random
+/// permutation between two ingests of the same corpus. That second case is
+/// exactly the comparison the recall harness's determinism guards make — RH-11
+/// runs the suite twice against fresh storage, and RH-12 (`--repeats N`) gives
+/// every repeat its own storage directory and its own ingest — so any ranking
+/// decision that a uuid settles is a coin flip from the guard's point of view.
+/// Where such a decision also TRUNCATES, it changes which memories are
+/// returned at all, not merely their order.
+///
+/// Content is the retrieval path's one repeat-stable per-memory key: it is a
+/// pure function of the corpus, and `remember()` dedups on a content hash
+/// (#109), so it is unique per store. The id fallback therefore only orders
+/// candidates whose content is byte-identical, where either order is
+/// equivalent by construction.
+///
+/// `items` must already be sorted, with `tied` reporting whether two elements
+/// compared equal under that sort. Content is fetched ONLY inside runs of two
+/// or more, so a tie-free list costs one linear scan and no lookups.
+fn order_ties_by_content<T>(
+    items: &mut [T],
+    tied: impl Fn(&T, &T) -> bool,
+    id_of: impl Fn(&T) -> MemoryId,
+    get_content: impl Fn(&MemoryId) -> Option<String>,
+) {
+    let mut i = 0;
+    while i < items.len() {
+        let mut j = i + 1;
+        while j < items.len() && tied(&items[i], &items[j]) {
+            j += 1;
+        }
+        if j - i > 1 {
+            let mut contents: std::collections::HashMap<MemoryId, String> =
+                std::collections::HashMap::with_capacity(j - i);
+            for it in &items[i..j] {
+                let id = id_of(it);
+                contents
+                    .entry(id.clone())
+                    .or_insert_with(|| get_content(&id).unwrap_or_default());
+            }
+            items[i..j].sort_by(|a, b| {
+                let (ia, ib) = (id_of(a), id_of(b));
+                contents[&ia].cmp(&contents[&ib]).then_with(|| ia.cmp(&ib))
+            });
+        }
+        i = j;
+    }
+}
+
 /// Char-safe prefix of `s` containing at most `max_chars` characters.
 ///
 /// Unlike `&s[..n]`, this never panics on a multi-byte UTF-8 boundary, so it is
@@ -3238,9 +3290,21 @@ impl MemorySystem {
                             }
                         }
                     }
-                    // Strength desc -> bridge name asc: `take(graph_expand_k)` below cuts
-                    // a plateau of equal-strength neighbours, and the BM25 query text must
-                    // not depend on which one the graph happened to yield first.
+                    // Strength alone is not a TOTAL order, and this sort
+                    // TRUNCATES: when two neighbours tie on edge strength and
+                    // only one fits in `graph_expand_k`, a stable sort keeps
+                    // whichever the edge walk happened to reach first, so the
+                    // bridge set — and with it the BM25 expansion and the final
+                    // rank list — depends on traversal order rather than on the
+                    // graph's content. Ties are not rare: edges are born at a
+                    // fixed tier weight, so a young graph has many at exactly
+                    // the same strength.
+                    //
+                    // Name breaks the tie because it is unique among the
+                    // candidates (`seen` dedups on the lowercased name) and is a
+                    // property of the graph rather than of how it was walked.
+                    // Same reasoning as the `all_entities` sort in
+                    // `process_experience_into_graph`.
                     scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                     graph_bridges = scored
                         .into_iter()
@@ -3452,6 +3516,17 @@ impl MemorySystem {
                     sa_stats.entities_activated,
                     sa_stats.graph_candidates,
                 );
+
+                // Carry the graph leg's degradation count out to the caller. The
+                // leg now skips a query seed whose stored node this build cannot
+                // decode instead of failing the request, and a skipped seed
+                // changes the ANSWER — so the count has to leave this function,
+                // not just the log. Everything else in `sa_stats` is recomputed
+                // by the fusion stages below from their own candidate sets; this
+                // is the one fact only the graph leg knows.
+                if let Some(s) = stats.as_mut() {
+                    s.unreadable_graph_nodes += sa_stats.unreadable_graph_nodes;
+                }
 
                 // Map ActivatedMemory → (MemoryId, activation, hebbian_factor) for RRF fusion
                 let mut r: Vec<(MemoryId, f32, f32)> = activated_memories
@@ -4092,8 +4167,57 @@ impl MemorySystem {
                         .filter(|(_, (b, _))| *b > 0.0)
                         .map(|(id, (b, _))| (id, *b))
                         .collect();
-                    by_vec.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-                    by_bm.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+                    // `agreement` below is the top-k10 OVERLAP of these two
+                    // lists, so membership at the k10 boundary is a feature
+                    // VALUE — and this feature feeds a logistic gate whose
+                    // output (`t`) multiplies the entire vector leg. A
+                    // `MemoryId` tie-break lets two ingests of the same corpus
+                    // take different top-10s out of one exact score tie and
+                    // land on a different `t`, moving every vector-driven score
+                    // by a percent-level factor rather than a rounding error —
+                    // far too coarse for any downstream quantisation to absorb.
+                    // Order by the OTHER leg's score first (repeat-stable and
+                    // already in hand), then by content.
+                    let other_leg = |id: &MemoryId, want_bm25: bool| -> f32 {
+                        let (b, v) = hybrid_components
+                            .get(id)
+                            .copied()
+                            .unwrap_or((0.0f32, 0.0f32));
+                        if want_bm25 {
+                            b
+                        } else {
+                            v
+                        }
+                    };
+                    by_vec.sort_by(|a, b| {
+                        b.1.total_cmp(&a.1)
+                            .then_with(|| other_leg(b.0, true).total_cmp(&other_leg(a.0, true)))
+                            .then_with(|| a.0.cmp(b.0))
+                    });
+                    by_bm.sort_by(|a, b| {
+                        b.1.total_cmp(&a.1)
+                            .then_with(|| other_leg(b.0, false).total_cmp(&other_leg(a.0, false)))
+                            .then_with(|| a.0.cmp(b.0))
+                    });
+                    order_ties_by_content(
+                        &mut by_vec,
+                        |a, b| {
+                            a.1.to_bits() == b.1.to_bits()
+                                && other_leg(a.0, true).to_bits() == other_leg(b.0, true).to_bits()
+                        },
+                        |x| (*x.0).clone(),
+                        &get_content,
+                    );
+                    order_ties_by_content(
+                        &mut by_bm,
+                        |a, b| {
+                            a.1.to_bits() == b.1.to_bits()
+                                && other_leg(a.0, false).to_bits()
+                                    == other_leg(b.0, false).to_bits()
+                        },
+                        |x| (*x.0).clone(),
+                        &get_content,
+                    );
                     let peak = |xs: &[(&MemoryId, f32)]| -> f32 {
                         if xs.is_empty() {
                             return 1.0;
@@ -4810,11 +4934,61 @@ impl MemorySystem {
             }
 
             let mut res: Vec<_> = fused.into_iter().collect();
-            // Score desc; tie-break by MemoryId for stable rerank-budget cutoff.
-            // The cutoff at `rerank_budget` makes order at the boundary semantically
-            // important — without tie-break, equal-score boundary candidates can swap
-            // in/out of the rerank window across runs.
-            res.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            // This order is load-bearing twice: it picks the `rerank_budget`
+            // window below, and it feeds the `res.truncate(query.max_results)`
+            // that FIXES MEMBERSHIP of the returned top-k. Everything after that
+            // truncation re-orders what survived; nothing can re-admit a
+            // candidate the cut dropped. So the order has to be total and a pure
+            // function of repeat-stable data, or the last returned slot is
+            // decided by something that is not the query.
+            //
+            // `score desc, MemoryId asc` was neither:
+            //
+            //  * NO QUANTISATION. The final `memories` sort at the end of
+            //    `recall` rounds to 1e-6 before comparing, precisely because the
+            //    upstream f32 reductions wobble below that. This cut compared
+            //    raw, so two candidates the final ranking would call TIED were
+            //    separated here on sub-ULP noise — the cut and the final sort
+            //    disagreed about what "tied" means, and the cut won because it
+            //    runs first and discards.
+            //  * NO REPEAT-STABLE KEY. `MemoryId` is a per-ingest v4 uuid, so on
+            //    a genuine tie the surviving candidate was chosen by a value
+            //    that differs between two ingests of the same corpus.
+            //
+            // Both legs' component scores are already in hand and are pure
+            // functions of content and query, so they break most ties for free;
+            // `order_ties_by_content` resolves whatever is still tied.
+            let q6 = |s: f32| (s * 1.0e6).round();
+            let comp = |id: &MemoryId| {
+                hybrid_components
+                    .get(id)
+                    .copied()
+                    .unwrap_or((0.0f32, 0.0f32))
+            };
+            let order_fused = |res: &mut Vec<(MemoryId, f32)>| {
+                res.sort_by(|a, b| {
+                    let (ba, va) = comp(&a.0);
+                    let (bb, vb) = comp(&b.0);
+                    q6(b.1)
+                        .total_cmp(&q6(a.1))
+                        .then_with(|| bb.total_cmp(&ba))
+                        .then_with(|| vb.total_cmp(&va))
+                        .then_with(|| a.0.cmp(&b.0))
+                });
+                order_ties_by_content(
+                    res,
+                    |a, b| {
+                        let (ba, va) = comp(&a.0);
+                        let (bb, vb) = comp(&b.0);
+                        q6(a.1).to_bits() == q6(b.1).to_bits()
+                            && ba.to_bits() == bb.to_bits()
+                            && va.to_bits() == vb.to_bits()
+                    },
+                    |x| x.0.clone(),
+                    &get_content,
+                );
+            };
+            order_fused(&mut res);
             let rerank_budget = query.max_results * 2;
 
             // RH-8 gate: ontological rerank only runs in `PlusRerank` and above.
@@ -4884,9 +5058,10 @@ impl MemorySystem {
                             onto_intent.expected_labels
                         );
                     }
-                    // Re-sort after boosting since ranks may have changed.
-                    // Tie-break by MemoryId — same rationale as the pre-rerank sort above.
-                    res.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                    // Re-sort after boosting since ranks may have changed. Same
+                    // total, repeat-stable order as the pre-rerank sort above —
+                    // this one still feeds the membership-fixing truncation.
+                    order_fused(&mut res);
                 }
             }
 

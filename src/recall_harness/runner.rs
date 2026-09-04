@@ -1106,6 +1106,11 @@ pub fn ingest_corpus(
             content: item.content.clone(),
             entities: merged.clone(),
             tags: merged,
+            // Faithful to the handler (remember.rs): the request's own tags are
+            // the caller's entity assertions and are kept unmerged, because the
+            // graph admits a node on that authority. Dropping this here would
+            // measure a pipeline the server does not run.
+            declared_entities: item.tags.clone(),
             ner_entities,
             ..Default::default()
         };
