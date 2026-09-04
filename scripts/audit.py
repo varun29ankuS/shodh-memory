@@ -253,6 +253,62 @@ def audit_ordering(rust):
     return sum(1 for h in hits if h[2])
 
 
+# ---------------------------------------------------------------- nested
+
+FLAG_LET = re.compile(
+    r'let\s+(\w+)\s*(?::[^=]+)?=\s*std::env::var\("(SHODH_[A-Z0-9_]+)"\)'
+)
+VAR_READ = re.compile(r'std::env::var\("(SHODH_[A-Z0-9_]+)"\)')
+
+
+def audit_nested(rust):
+    """Flags that are unreachable unless ANOTHER flag is already set.
+
+    An arm that sets only the inner flag runs the default and reports a
+    delta of zero, which is indistinguishable from the mechanism being
+    inert -- so the flag looks measured and is not. Two have already
+    shipped: SHODH_SPREAD_FIX, whose arms silently duplicated baseline, and
+    SHODH_GRAPH_PATH_STATE, nested inside a SHODH_GRAPH_TRAVERSE that
+    defaults OFF. The second cost a 1531-case run and would have been
+    written down as the eighth inert graph lever.
+
+    Nesting is not itself the defect -- an inner mechanism may only be
+    meaningful inside the outer one, which is true of PATH_STATE. The
+    defect is nesting it silently, because the prerequisite is invisible at
+    the point where someone writes the arm, and because the CONTROL is then
+    the outer flag alone rather than the default config. Comparing against
+    the default charges the inner mechanism for the outer one's effect,
+    which for TRAVERSE was -0.0320 recall.
+    """
+    hits = []
+    for path, src in rust.items():
+        idents = {m.group(1): m.group(2) for m in FLAG_LET.finditer(src)}
+        for m in re.finditer(r"\bif\s+(\w+)\s*\{", src):
+            outer = idents.get(m.group(1))
+            if not outer:
+                continue
+            i, depth = m.end(), 1
+            while i < len(src) and depth:
+                if src[i] == "{":
+                    depth += 1
+                elif src[i] == "}":
+                    depth -= 1
+                i += 1
+            body = src[m.end():i - 1]
+            line = src[:m.start()].count("\n") + 1
+            for inner in sorted(set(VAR_READ.findall(body))):
+                if inner != outer:
+                    hits.append((path, line, outer, inner))
+
+    print("## nested -- %d flags reachable only when another flag is set" % len(hits))
+    print("   An arm setting ONLY the inner flag measures baseline against")
+    print("   baseline. Each needs its prerequisite documented at the read site,")
+    print("   and its control is the OUTER flag alone -- never the default")
+    print("   config, which confounds the two mechanisms.")
+    for path, line, outer, inner in hits:
+        print("     %-34s requires %-30s %s:%d" % (inner, outer, path, line))
+    return len(hits)
+
 # ---------------------------------------------------------------- escapes
 
 def audit_escapes(rust, ext):
@@ -267,7 +323,7 @@ def audit_escapes(rust, ext):
     return len(names)
 
 
-CHECKS = ("flags", "dormant", "tests", "ordering", "escapes")
+CHECKS = ("flags", "nested", "dormant", "tests", "ordering", "escapes")
 
 
 def main():
@@ -284,6 +340,7 @@ def main():
     for name in run:
         {
             "flags": lambda: audit_flags(rust, ext),
+            "nested": lambda: audit_nested(rust),
             "dormant": lambda: audit_dormant(rust),
             "tests": lambda: audit_tests(rust),
             "ordering": lambda: audit_ordering(rust),
