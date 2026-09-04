@@ -155,10 +155,13 @@ pub struct ZenohRememberRequest {
     pub sequence_number: Option<u32>,
     #[serde(default)]
     pub preceding_memory_id: Option<String>,
+    // Caller-declared write identity, mirroring the HTTP `RememberRequest`.
     #[serde(default)]
     pub agent_id: Option<String>,
     #[serde(default)]
     pub run_id: Option<String>,
+    #[serde(default)]
+    pub actor_id: Option<String>,
     #[serde(default)]
     pub parent_id: Option<String>,
 
@@ -407,6 +410,9 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
         outcome_details: req.outcome_details.clone(),
         confidence: req.confidence,
         terrain_type: req.terrain_type.clone(),
+        // The Zenoh analogue of `POST /api/remember`: a fleet client asked for
+        // this to be stored.
+        origin: crate::memory::types::MemoryOrigin::Zenoh,
         nearby_agents: req.nearby_agents.clone(),
         is_failure: req.is_failure,
         is_anomaly: req.is_anomaly,
@@ -427,6 +433,7 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
     let memory_clone = memory.clone();
     let agent_id = req.agent_id.clone();
     let run_id = req.run_id.clone();
+    let actor_id = req.actor_id.clone();
     let created_at = req.created_at;
     let created_at_for_facts = created_at.unwrap_or_else(chrono::Utc::now);
 
@@ -437,8 +444,8 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
     // observation re-sent with a geo fix or a reward the first copy lacked.
     let outcome = match tokio::task::spawn_blocking(move || {
         let guard = memory_clone.read();
-        if agent_id.is_some() || run_id.is_some() {
-            guard.remember_with_agent_detailed(exp_clone, created_at, agent_id, run_id)
+        if agent_id.is_some() || run_id.is_some() || actor_id.is_some() {
+            guard.remember_with_agent_detailed(exp_clone, created_at, agent_id, run_id, actor_id)
         } else {
             guard.remember_detailed(exp_clone, created_at)
         }
@@ -696,7 +703,7 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
     let anomalies_only = req.anomalies_only;
     let terrain_type = req.terrain_type.clone();
 
-    let memories = match tokio::task::spawn_blocking(move || {
+    let (memories, reinforcement_applied) = match tokio::task::spawn_blocking(move || {
         let guard = memory_for_recall.read();
         let mq = MemoryQuery {
             user_id: Some(user_id_for_recall),
@@ -714,13 +721,20 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
             terrain_type,
             ..Default::default()
         };
+        // Derived from the gate the mutation sites consult, exactly as the HTTP
+        // handler does. The Zenoh request carries no read-only flag, so this is
+        // false only under the process-wide SHODH_RECALL_READONLY pin — but a
+        // robot reading from a pinned server must still be told its read did not
+        // reinforce, or the field would be a constant dressed as an observation.
+        let reinforcement_applied = !crate::memory::recall_is_readonly(&mq);
         guard
             .recall(&mq)
+            .map(|memories| (memories, reinforcement_applied))
             .map_err(|e| anyhow::anyhow!("Recall failed: {e}"))
     })
     .await
     {
-        Ok(Ok(memories)) => memories,
+        Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             error!("Recall failed: {:?}", e);
             reply_error(&query, &format!("Recall error: {e}")).await;
@@ -746,6 +760,7 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
                     tags: m.experience.entities.clone(),
                     geo_location: m.experience.geo_location,
                     toponyms: m.experience.toponyms.clone(),
+                    origin: m.experience.origin.as_str().to_string(),
                 },
                 importance: m.importance(),
                 created_at: m.created_at.to_rfc3339(),
@@ -886,6 +901,7 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
         reminder_count: None,
         lineage: Vec::new(),
         lineage_count: None,
+        reinforcement_applied,
     };
 
     match serde_json::to_vec(&response) {
@@ -1210,6 +1226,9 @@ pub async fn handle_mission_start(sample: Sample, manager: Arc<MultiUserMemoryMa
             robot_id,
             tags: vec!["mission".to_string(), "mission_start".to_string()],
             entities: vec!["mission".to_string(), "mission_start".to_string()],
+            // The publisher announced a mission boundary; the server composed
+            // this memory as a side effect.
+            origin: crate::memory::types::MemoryOrigin::ZenohMission,
             ..Default::default()
         };
         guard.remember(experience, None)
@@ -1312,6 +1331,7 @@ pub async fn handle_mission_end(sample: Sample, manager: Arc<MultiUserMemoryMana
             reward,
             tags: vec!["mission".to_string(), "mission_end".to_string()],
             entities: vec!["mission".to_string(), "mission_end".to_string()],
+            origin: crate::memory::types::MemoryOrigin::ZenohMission,
             ..Default::default()
         };
         guard.remember(experience, None)

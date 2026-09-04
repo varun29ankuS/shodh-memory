@@ -261,6 +261,25 @@ pub struct ServerConfig {
     /// Audit log retention days (default: 30)
     pub audit_retention_days: u64,
 
+    /// Directory to archive audit records into before rotation deletes them.
+    ///
+    /// **Opt-in, default `None` = archiving off.** Set
+    /// `SHODH_AUDIT_ARCHIVE_PATH` to enable. With it unset, rotation behaves
+    /// exactly as it always has: records past `audit_retention_days` or beyond
+    /// `audit_max_entries_per_user` are deleted and not copied anywhere.
+    ///
+    /// With it set, every record rotation is about to delete is first appended
+    /// to a JSONL file in this directory and fsynced. **A failed archive aborts
+    /// the delete** — see
+    /// `MultiUserMemoryManagerRotationHelper::rotate_user_audit_logs`. An
+    /// archive that fails while rotation carries on would be worse than no
+    /// archive at all, because it turns "we rotate" into "we lost it and
+    /// believed otherwise".
+    ///
+    /// This is a durability copy, not a tamper-evidence mechanism; `CF_OPLOG`
+    /// is the hash-chained log and the archive deliberately does not imitate it.
+    pub audit_archive_path: Option<PathBuf>,
+
     /// Rate limit: requests per second (default: 4000 - LLM-friendly)
     pub rate_limit_per_second: u64,
 
@@ -305,6 +324,27 @@ pub struct ServerConfig {
     /// Whether backups are enabled (default: true in production, false in dev)
     pub backup_enabled: bool,
 
+    /// Interval between scheduled read-only integrity scrubs, in seconds
+    /// (default: 3600 = 1 hour). Set to 0 to disable, which means nothing
+    /// checks whether stored records still decode into what was written until
+    /// somebody calls `POST /api/integrity/scrub` by hand.
+    ///
+    /// Justified against measurement, re-measured after the merge because the
+    /// merge changed the cost. On the four live profiles the full pass takes
+    /// 18.0s + 28ms + 511ms + 473ms = ~19s, of which claude-code is 17.5s. The
+    /// pre-merge figure was 14.2s; the difference is the two legacy-generation
+    /// retries, which now run on nearly every record because every record on
+    /// disk predates the `origin` field.
+    ///
+    /// ~19s per 3600s is a 0.53% duty cycle of `fill_cache(false)` sequential
+    /// reads that evict nothing and take no lock the serving path needs.
+    /// Against a defect class that has twice survived over a month unnoticed,
+    /// buying a thirty-minute mean detection latency for half a percent of one
+    /// core is not a close call. Daily would cost 24x less and buy a
+    /// twelve-hour mean latency, which is not meaningfully better than the
+    /// accident that found the last one.
+    pub integrity_scrub_interval_secs: u64,
+
     /// Maximum entities extracted per memory for graph insertion (default: 10)
     /// Caps the number of NER/tag/regex entities to prevent O(n²) edge explosion
     /// in the knowledge graph. 10 entities → max 45 co-occurrence edges.
@@ -322,6 +362,18 @@ pub struct ServerConfig {
     pub telemetry_interval_secs: u64,
 }
 
+/// Interpret a `SHODH_AUDIT_ROTATION_INTERVAL` value.
+///
+/// `None` means "reject and keep the current value". Zero is rejected on
+/// purpose: `log_event` gates rotation on
+/// `count.is_multiple_of(audit_rotation_check_interval) && count > 0`, and an
+/// interval of 0 makes that condition unsatisfiable — rotation would never run
+/// again. That is a retention policy change disguised as a tuning knob, and it
+/// is not something an operator should be able to do by typo.
+pub(crate) fn parse_rotation_interval(raw: &str) -> Option<usize> {
+    raw.trim().parse::<usize>().ok().filter(|n| *n >= 1)
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -332,6 +384,7 @@ impl Default for ServerConfig {
             audit_max_entries_per_user: 10_000,
             audit_rotation_check_interval: 100,
             audit_retention_days: 30,
+            audit_archive_path: None,
             rate_limit_per_second: 4000,
             rate_limit_burst: 8000,
             public_rate_limit: true,
@@ -344,6 +397,7 @@ impl Default for ServerConfig {
             backup_interval_secs: 86400,   // 24 hours
             backup_max_count: 7,           // Keep 7 backups (1 week of daily backups)
             backup_enabled: false,         // Disabled by default, auto-enabled in production
+            integrity_scrub_interval_secs: 3600, // 1 hour; ~0.4% duty cycle at the measured 14.2s
             max_entities_per_memory: 10,   // Cap entities per memory (10 → max 45 edges)
             telemetry_enabled: false,
             telemetry_url: "https://shodh-memory.com/api/telemetry".to_string(),
@@ -400,6 +454,31 @@ impl ServerConfig {
         if let Ok(val) = env::var("SHODH_AUDIT_RETENTION_DAYS") {
             if let Ok(n) = val.parse() {
                 config.audit_retention_days = n;
+            }
+        }
+
+        // Rotation cadence had no override at all, so an operator could not
+        // slow rotation down without also changing what it deletes. Rejected
+        // below 1: `log_event` gates on `count.is_multiple_of(interval)`, and 0
+        // there silently means "never rotate", which is a policy change wearing
+        // the costume of a tuning knob.
+        if let Ok(val) = env::var("SHODH_AUDIT_ROTATION_INTERVAL") {
+            match parse_rotation_interval(&val) {
+                Some(n) => config.audit_rotation_check_interval = n,
+                None => tracing::warn!(
+                    "SHODH_AUDIT_ROTATION_INTERVAL={} is not a positive integer; keeping {}",
+                    val,
+                    config.audit_rotation_check_interval
+                ),
+            }
+        }
+
+        // Audit archiving is OPT-IN. Absent or empty leaves it off and rotation
+        // behaves exactly as before.
+        if let Ok(val) = env::var("SHODH_AUDIT_ARCHIVE_PATH") {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                config.audit_archive_path = Some(PathBuf::from(trimmed));
             }
         }
 
@@ -487,6 +566,30 @@ impl ServerConfig {
             config.backup_enabled = true;
         }
 
+        // Integrity scrub scheduler. Parsed here rather than read at the call
+        // site: an env var with no reader is a knob that lies, and this crate
+        // already ships one (`RAYON_NUM_THREADS` appears in documentation and
+        // is read by nothing). `config_reads_the_integrity_scrub_interval`
+        // pins that this one is actually wired.
+        if let Ok(val) = env::var("SHODH_INTEGRITY_SCRUB_INTERVAL") {
+            match val.parse::<u64>() {
+                Ok(0) => {
+                    tracing::warn!(
+                        "SHODH_INTEGRITY_SCRUB_INTERVAL=0 — scheduled integrity scrubs are \
+                         DISABLED; nothing will notice a store that decodes into fabrications \
+                         until POST /api/integrity/scrub is called by hand"
+                    );
+                    config.integrity_scrub_interval_secs = 0;
+                }
+                Ok(n) => config.integrity_scrub_interval_secs = n,
+                Err(e) => tracing::warn!(
+                    value = %val,
+                    error = %e,
+                    "SHODH_INTEGRITY_SCRUB_INTERVAL is not a number — keeping the default"
+                ),
+            }
+        }
+
         // Entity extraction cap
         if let Ok(val) = env::var("SHODH_MAX_ENTITIES") {
             if let Ok(n) = val.parse::<usize>() {
@@ -547,6 +650,10 @@ impl ServerConfig {
         info!("   Max concurrent: {}", self.max_concurrent_requests);
         info!("   Request timeout: {}s", self.request_timeout_secs);
         info!("   Audit retention: {} days", self.audit_retention_days);
+        match &self.audit_archive_path {
+            Some(path) => info!("   Audit archive: {} (JSONL)", path.display()),
+            None => info!("   Audit archive: disabled (rotation deletes without a copy)"),
+        }
         if self.cors.is_restricted() {
             info!("   CORS origins: {:?}", self.cors.allowed_origins);
         } else {
@@ -564,6 +671,14 @@ impl ServerConfig {
             );
         } else {
             info!("   Backup: disabled");
+        }
+        if self.integrity_scrub_interval_secs > 0 {
+            info!(
+                "   Integrity scrub: every {}s (read-only, all profiles on disk)",
+                self.integrity_scrub_interval_secs
+            );
+        } else {
+            info!("   Integrity scrub: DISABLED — nothing checks stored records");
         }
         if self.telemetry_enabled {
             let interval_hours = self.telemetry_interval_secs / 3600;
@@ -601,6 +716,13 @@ pub fn print_env_help() {
     println!("  SHODH_ROCKSDB_BLOCK_CACHE_MB - Shared RocksDB block cache in MiB (default: 256)");
     println!("  SHODH_AUDIT_MAX_ENTRIES    - Max audit entries per user (default: 10000)");
     println!("  SHODH_AUDIT_RETENTION_DAYS - Audit log retention days (default: 30)");
+    println!(
+        "  SHODH_AUDIT_ROTATION_INTERVAL - Rotate every Nth audit event per user (default: 100, min 1)"
+    );
+    println!(
+        "  SHODH_AUDIT_ARCHIVE_PATH   - Directory to archive audit records to (JSONL) before \
+         rotation deletes them (default: unset = no archive). A failed archive aborts the delete."
+    );
     println!();
     println!("Security (secure defaults — override only if you understand the risk):");
     println!("  SHODH_ALLOW_UNSIGNED_WEBHOOKS - Accept webhooks when no *_WEBHOOK_SECRET is set (default: false = reject)");
@@ -627,6 +749,10 @@ pub fn print_env_help() {
     println!("  SHODH_BACKUP_ENABLED   - Enable automatic backups true/false (default: auto in production)");
     println!("  SHODH_BACKUP_INTERVAL  - Backup interval in seconds (default: 86400 = 24 hours)");
     println!("  SHODH_BACKUP_MAX_COUNT - Max backups to keep per user (default: 7)");
+    println!(
+        "  SHODH_INTEGRITY_SCRUB_INTERVAL - Read-only integrity scrub interval in seconds \
+         (default: 3600, 0 = disabled)"
+    );
     println!();
     println!("  RUST_LOG               - Log level (e.g., info, debug, trace)");
     println!();
@@ -646,15 +772,64 @@ mod tests {
 
     #[test]
     fn test_env_override() {
-        env::set_var("SHODH_PORT", "8080");
-        env::set_var("SHODH_MAX_USERS", "500");
+        // Took no lock and put nothing back: `from_env` is also called by the
+        // server bootstrap, and the removals at the end destroyed any value the
+        // surrounding process had chosen.
+        let mut guard = crate::test_support::ScopedEnv::acquire();
+        guard.set("SHODH_PORT", "8080");
+        guard.set("SHODH_MAX_USERS", "500");
 
         let config = ServerConfig::from_env();
         assert_eq!(config.port, 8080);
         assert_eq!(config.max_users_in_memory, 500);
+    }
 
-        env::remove_var("SHODH_PORT");
-        env::remove_var("SHODH_MAX_USERS");
+    /// The interval env var is actually read.
+    ///
+    /// Not a formality. `RAYON_NUM_THREADS` appears in this crate's docs and
+    /// is read by nothing, so "an env var with this name exists" is not
+    /// evidence that setting it does anything. A knob that lies is worse than
+    /// no knob: it produces confident operators running the default.
+    ///
+    /// Takes a [`crate::test_support::ScopedEnv`] because `set_var` is
+    /// process-global and every other env test in this crate serialises on the
+    /// same lock. The guard also restores the variable on drop, so this test
+    /// cannot leave the interval unset for whatever runs after it.
+    #[test]
+    fn config_reads_the_integrity_scrub_interval() {
+        let mut guard = crate::test_support::ScopedEnv::acquire();
+
+        // The default has to be a real value, not zero-by-accident.
+        guard.remove("SHODH_INTEGRITY_SCRUB_INTERVAL");
+        assert_eq!(
+            ServerConfig::from_env().integrity_scrub_interval_secs,
+            3600,
+            "the default must schedule scrubs, not disable them"
+        );
+
+        guard.set("SHODH_INTEGRITY_SCRUB_INTERVAL", "900");
+        assert_eq!(
+            ServerConfig::from_env().integrity_scrub_interval_secs,
+            900,
+            "the value set in the environment must reach the config"
+        );
+
+        // 0 is a deliberate off switch, and must survive as 0 rather than
+        // being clamped back to the default.
+        guard.set("SHODH_INTEGRITY_SCRUB_INTERVAL", "0");
+        assert_eq!(ServerConfig::from_env().integrity_scrub_interval_secs, 0);
+
+        // Garbage keeps the default rather than silently disabling the scrub,
+        // which is the failure mode a bare `parse().unwrap_or(0)` would have.
+        guard.set("SHODH_INTEGRITY_SCRUB_INTERVAL", "hourly");
+        assert_eq!(
+            ServerConfig::from_env().integrity_scrub_interval_secs,
+            3600,
+            "an unparseable interval must not turn the scheduler off"
+        );
+
+        // No explicit cleanup: `guard` restores the value this test found,
+        // which is what the bare `remove_var` here could not do.
     }
 
     #[test]

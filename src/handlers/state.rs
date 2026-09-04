@@ -431,20 +431,15 @@ fn tag_surface_claimed_by_ner(tag: &str, ner_claimed: &HashSet<String>) -> bool 
     ner_claimed.contains(&tag.trim().to_lowercase())
 }
 
-/// Classify a tag into a specific EntityLabel based on naming patterns.
-///
-/// Tags enter the graph as entities. Instead of defaulting everything to
-/// `Technology`, this uses suffix/keyword matching to assign the correct
-/// ontological type — enabling type-aware spreading activation and
-/// `matches_with_hierarchy()` in retrieval.
 use crate::ab_testing;
 use crate::backup;
 use crate::config::ServerConfig;
 use crate::embeddings::{ner::NerEntityType, KeywordExtractor, NerConfig, NeuralNer};
 use crate::graph_memory::{
-    classify_tag_label, EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode,
+    recognised_tag_label, EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode,
     GraphMemory, GraphStats, LtpStatus, RelationshipEdge,
 };
+use crate::memory::sources::{SourceId, SourceStore};
 use crate::memory::{
     Experience, FeedbackStore, FileMemoryStore, MemoryConfig, MemoryId, MemoryStats, MemorySystem,
     ProspectiveStore, SessionStore, TodoStore,
@@ -483,9 +478,141 @@ struct MultiUserMemoryManagerRotationHelper {
     audit_logs: Arc<DashMap<String, Arc<parking_lot::RwLock<VecDeque<AuditEvent>>>>>,
     audit_retention_days: i64,
     audit_max_entries: usize,
+    /// Where to archive records before deleting them. `None` (the default)
+    /// means no archive and byte-identical rotation behaviour — see
+    /// [`crate::config::ServerConfig::audit_archive_path`].
+    audit_archive_dir: Option<std::path::PathBuf>,
 }
 
 const CF_AUDIT: &str = "audit";
+
+/// What one rotation pass did to a user's audit trail.
+///
+/// Rotation reports what it retained as well as what it removed: a key it
+/// could not interpret is not silently skipped, because a trail that quietly
+/// stops shrinking is indistinguishable from one that has nothing to shrink.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RotationOutcome {
+    /// Keys deleted from `CF_AUDIT`.
+    removed: usize,
+    /// Records rotation could not fully interpret and therefore did not touch:
+    /// keys whose timestamp would not parse, plus — when archiving is enabled —
+    /// records whose stored value would not decode. A record that cannot be
+    /// copied cannot be safely deleted either.
+    retained_unreadable: usize,
+    /// Records written to the JSONL archive before deletion. Always 0 when
+    /// archiving is off. When archiving is on this equals [`Self::removed`].
+    archived: usize,
+}
+
+/// Parse a `{user_id}:{timestamp_nanos:020}` audit key into its text form and
+/// its nanosecond stamp.
+///
+/// Returns `None` for anything rotation cannot fully interpret: bytes that are
+/// not UTF-8, a key that does not carry the expected `{user_id}:` prefix, or a
+/// suffix that is not an `i64`. `None` means "unknown", never "zero" — see
+/// [`MultiUserMemoryManagerRotationHelper::rotate_user_audit_logs`] for why
+/// that distinction is the whole point.
+fn parse_audit_key<'k>(key: &'k [u8], prefix: &str) -> Option<(&'k str, i64)> {
+    let key_str = std::str::from_utf8(key).ok()?;
+    let nanos = key_str.strip_prefix(prefix)?.parse::<i64>().ok()?;
+    Some((key_str, nanos))
+}
+
+/// Serialises archive appends across the process.
+///
+/// Per-user rotation runs on `spawn_blocking`, so two rotations can be in
+/// flight at once, each holding its own `File` handle on the same daily path.
+/// Without this they would be free to interleave partial lines. Rotation is
+/// rare and the critical section is a single buffered write plus one fsync.
+static AUDIT_ARCHIVE_WRITE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// One archived audit record, as written to the JSONL durability copy.
+#[derive(serde::Serialize)]
+struct ArchivedAuditRecord<'a> {
+    /// Memory namespace the record belonged to.
+    user_id: &'a str,
+    /// The exact `CF_AUDIT` key, so the record can be restored verbatim.
+    key: &'a str,
+    /// The decoded event.
+    event: &'a AuditEvent,
+}
+
+/// Append-only JSONL copy of audit records that rotation is about to delete.
+///
+/// # This is a durability copy, not an integrity chain
+///
+/// `CF_OPLOG` is already the hash-chained tamper-evident log. This file is
+/// deliberately not a second one: no chaining, no digests, no sequence numbers.
+/// A plain file that an operator can move, compress or truncate cannot make a
+/// tamper-evidence promise, and stamping hashes on it would advertise a
+/// guarantee it does not have. What it does promise is narrower and real:
+/// **nothing is deleted from `CF_AUDIT` that was not first written and fsynced
+/// here.**
+///
+/// # Duplicates are expected
+///
+/// Deletes are committed in batches. A crash between an archive fsync and its
+/// delete batch leaves those records in both the archive and the CF, and a
+/// later rotation will archive them again. Collapse on the (`user_id`, `key`)
+/// pair when reading. Duplicating a record is the correct failure direction for
+/// a durability copy; losing one is not.
+struct AuditArchiveWriter {
+    file: std::fs::File,
+    path: std::path::PathBuf,
+}
+
+impl AuditArchiveWriter {
+    /// Open (creating as needed) today's archive file.
+    ///
+    /// Called before rotation scans anything, so an unusable archive path fails
+    /// the pass before a single delete is issued rather than partway through.
+    fn open(dir: &std::path::Path) -> Result<Self> {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("audit archive directory {} is not usable", dir.display()))?;
+        let path = dir.join(format!(
+            "audit-{}.jsonl",
+            chrono::Utc::now().format("%Y-%m-%d")
+        ));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("cannot open audit archive {}", path.display()))?;
+        Ok(Self { file, path })
+    }
+
+    /// Append one batch and make it durable, returning the number of records
+    /// written. Any error must abort the caller's delete.
+    fn append(&mut self, user_id: &str, records: &[(String, AuditEvent)]) -> Result<usize> {
+        use std::io::Write;
+
+        if records.is_empty() {
+            return Ok(0);
+        }
+
+        let mut buf = String::new();
+        for (key, event) in records {
+            let line = serde_json::to_string(&ArchivedAuditRecord {
+                user_id,
+                key,
+                event,
+            })
+            .with_context(|| format!("cannot serialise audit record {key}"))?;
+            buf.push_str(&line);
+            buf.push('\n');
+        }
+
+        let _guard = AUDIT_ARCHIVE_WRITE_LOCK.lock();
+        self.file
+            .write_all(buf.as_bytes())
+            .with_context(|| format!("cannot append to audit archive {}", self.path.display()))?;
+        self.file
+            .sync_data()
+            .with_context(|| format!("cannot fsync audit archive {}", self.path.display()))?;
+        Ok(records.len())
+    }
+}
 
 impl MultiUserMemoryManagerRotationHelper {
     fn audit_cf(&self) -> &rocksdb::ColumnFamily {
@@ -494,88 +621,192 @@ impl MultiUserMemoryManagerRotationHelper {
             .expect("audit CF must exist")
     }
 
-    /// Rotate audit logs for a user - delete old entries and enforce max count.
+    /// Rotate audit logs for a user — delete entries past the retention window
+    /// and entries beyond the per-user cap, oldest first.
     ///
     /// Keys are `{user_id}:{timestamp_nanos:020}` so RocksDB returns them in
-    /// ascending timestamp order. Two strategies depending on scale:
-    /// - ≤100K keys: collect all, compute excess, batch delete
-    /// - >100K keys: streaming 2-pass (count, then delete) to avoid OOM
-    fn rotate_user_audit_logs(&self, user_id: &str) -> Result<usize> {
+    /// ascending timestamp order. Streaming two-pass (count, then delete) with
+    /// a `WriteBatch` flushed every 10K deletes, so peak memory does not scale
+    /// with the size of the trail.
+    ///
+    /// # Unreadable keys are retained, never deleted
+    ///
+    /// This function used to parse each key with `.unwrap_or(0)`. A key it
+    /// could not parse therefore compared as timestamp zero, which is older
+    /// than every cutoff, so it was deleted on the first pass that touched it —
+    /// unconditionally, whether or not the cap was anywhere near being hit.
+    /// (Worth being precise about the mechanism: ASCII letters sort *above*
+    /// digits, so a malformed suffix lands at the END of the user's key range,
+    /// not the front. It was never "sorted oldest"; it was *evaluated* as
+    /// infinitely old, which no position in the range could save it from.) The
+    /// records most likely to be evidence of a problem — a truncated write, a
+    /// foreign writer, disk corruption — were the ones rotation destroyed
+    /// first, inside the one structure whose entire purpose is not to lose
+    /// things.
+    ///
+    /// The rule now is uniform: anything rotation cannot fully interpret,
+    /// rotation does not touch. A failed parse is an inconclusive read, and an
+    /// inconclusive read is never proof of absence — it is certainly not proof
+    /// of age. The alternatives were considered and rejected:
+    ///
+    /// - *Hard error.* One corrupt key would then disable retention for that
+    ///   user permanently, converting a single bad record into unbounded trail
+    ///   growth — a different and larger data problem.
+    /// - *Quarantine* (re-key into a holding area). Rewriting the record
+    ///   destroys the original key bytes, which are the actual evidence of
+    ///   whatever went wrong, and the rewrite is itself a write that can fail.
+    ///
+    /// Retained keys are counted into [`RotationOutcome::retained_unreadable`]
+    /// and warned about once per pass, so the condition is visible rather than
+    /// silent. They are also excluded from the cap arithmetic: excess is
+    /// computed over readable keys only, so an unreadable key can neither be
+    /// deleted by the cap nor push a well-formed key over it.
+    ///
+    /// # Archiving (opt-in, off by default)
+    ///
+    /// With [`Self::audit_archive_dir`] set, every record about to be deleted
+    /// is first appended to a JSONL file and fsynced. The invariant is
+    /// **deleted ⊆ archived**, enforced structurally: each batch's
+    /// [`AuditArchiveWriter::append`] is `?`-propagated *before* the delete
+    /// batch is written, so an archive failure returns `Err` and that batch's
+    /// deletes never reach RocksDB. The archive handle is opened before the
+    /// scan begins, so an unusable path deletes nothing at all.
+    ///
+    /// Note the honest granularity: with more than `BATCH_FLUSH_SIZE` deletions
+    /// pending, earlier batches are already deleted (and already archived) when
+    /// a later batch fails. "Nothing was deleted" holds for an open failure and
+    /// for any pass that fits in one batch; "nothing was deleted that was not
+    /// archived" holds always.
+    ///
+    /// A record whose stored value will not decode cannot be archived, so it is
+    /// retained rather than deleted — the same rule as an unparseable key. When
+    /// archiving is off, values are never decoded and this cannot arise.
+    fn rotate_user_audit_logs(&self, user_id: &str) -> Result<RotationOutcome> {
         let cutoff_time = chrono::Utc::now() - chrono::Duration::days(self.audit_retention_days);
         let cutoff_nanos = cutoff_time.timestamp_nanos_opt().unwrap_or_else(|| {
             tracing::warn!("audit cutoff timestamp outside i64 nanos range, using 0");
             0
         });
         let prefix = format!("{user_id}:");
+        let prefix_bytes = prefix.as_bytes();
         let audit = self.audit_cf();
 
-        // Pass 1: count total entries to determine excess
-        let mut total_count = 0usize;
-        let iter = self.shared_db.prefix_iterator_cf(audit, prefix.as_bytes());
+        // Opened before anything is scanned: an unusable archive path must fail
+        // the whole pass, not surprise it partway through.
+        let mut archive = match self.audit_archive_dir.as_deref() {
+            Some(dir) => Some(AuditArchiveWriter::open(dir)?),
+            None => None,
+        };
+
+        // Pass 1: count entries to determine the excess over the cap. Only
+        // readable keys are counted, because only readable keys are deletable.
+        // The prefix bound is checked on raw bytes so a non-UTF-8 key inside
+        // the range is attributed to this user rather than skipped.
+        let mut readable_count = 0usize;
+        let mut retained_unreadable = 0usize;
+        let iter = self.shared_db.prefix_iterator_cf(audit, prefix_bytes);
         for (key, _) in iter.flatten() {
-            if let Ok(key_str) = std::str::from_utf8(&key) {
-                if !key_str.starts_with(&prefix) {
-                    break;
-                }
-                total_count += 1;
-            }
-        }
-
-        if total_count == 0 {
-            return Ok(0);
-        }
-
-        let excess_count = total_count.saturating_sub(self.audit_max_entries);
-
-        // Pass 2: stream through keys, deleting those that are too old or excess.
-        // Flush WriteBatch every 10K deletes to bound memory.
-        const BATCH_FLUSH_SIZE: usize = 10_000;
-        let mut batch = rocksdb::WriteBatch::default();
-        let mut removed_count = 0usize;
-        let mut position = 0usize;
-
-        let iter = self.shared_db.prefix_iterator_cf(audit, prefix.as_bytes());
-        for (key, _) in iter.flatten() {
-            let key_str = match std::str::from_utf8(&key) {
-                Ok(s) => s,
-                Err(_) => {
-                    position += 1;
-                    continue;
-                }
-            };
-            if !key_str.starts_with(&prefix) {
+            if !key.starts_with(prefix_bytes) {
                 break;
             }
+            if parse_audit_key(&key, &prefix).is_some() {
+                readable_count += 1;
+            } else {
+                retained_unreadable += 1;
+            }
+        }
 
-            let ts = key_str
-                .strip_prefix(&prefix)
-                .and_then(|s| s.parse::<i64>().ok())
-                .unwrap_or(0); // Malformed keys sort first → get deleted
+        if retained_unreadable > 0 {
+            tracing::warn!(
+                "Audit rotation for user {}: {} key(s) could not be parsed and were RETAINED \
+                 (an unparseable key is not evidence of age); {} readable key(s) considered",
+                user_id,
+                retained_unreadable,
+                readable_count
+            );
+        }
 
-            if ts < cutoff_nanos || position < excess_count {
-                batch.delete_cf(audit, &key);
-                removed_count += 1;
+        if readable_count == 0 {
+            return Ok(RotationOutcome {
+                removed: 0,
+                retained_unreadable,
+                archived: 0,
+            });
+        }
 
-                if removed_count.is_multiple_of(BATCH_FLUSH_SIZE) {
-                    self.shared_db
-                        .write(std::mem::take(&mut batch))
-                        .map_err(|e| anyhow::anyhow!("Failed to write rotation batch: {e}"))?;
-                    batch = rocksdb::WriteBatch::default();
+        let excess_count = readable_count.saturating_sub(self.audit_max_entries);
+
+        // Pass 2: stream through keys, deleting those that are too old or
+        // beyond the cap. Flush the WriteBatch every 10K deletes to bound
+        // memory.
+        const BATCH_FLUSH_SIZE: usize = 10_000;
+        let mut batch = rocksdb::WriteBatch::default();
+        let mut removed = 0usize;
+        let mut archived = 0usize;
+        let mut pending = 0usize;
+        // Records staged for the archive alongside the current delete batch.
+        // Stays empty when archiving is off — values are not even decoded then.
+        let mut pending_records: Vec<(String, AuditEvent)> = Vec::new();
+        // Position among READABLE keys only, so the positional cap is not
+        // shifted by keys that are never candidates for deletion.
+        let mut readable_position = 0usize;
+
+        let iter = self.shared_db.prefix_iterator_cf(audit, prefix_bytes);
+        for (key, value) in iter.flatten() {
+            if !key.starts_with(prefix_bytes) {
+                break;
+            }
+            let Some((key_str, ts)) = parse_audit_key(&key, &prefix) else {
+                // Already counted in pass 1. Left in place, deliberately.
+                continue;
+            };
+            let position = readable_position;
+            readable_position += 1;
+
+            if ts >= cutoff_nanos && position >= excess_count {
+                continue;
+            }
+
+            if archive.is_some() {
+                match crate::serialization::decode::<AuditEvent>(&value) {
+                    Ok(event) => pending_records.push((key_str.to_string(), event)),
+                    Err(e) => {
+                        // A record that cannot be copied cannot be safely
+                        // deleted. Same rule as an unparseable key.
+                        retained_unreadable += 1;
+                        tracing::warn!(
+                            "Audit record {} could not be decoded for archiving and was RETAINED: {}",
+                            key_str,
+                            e
+                        );
+                        continue;
+                    }
                 }
             }
 
-            position += 1;
+            batch.delete_cf(audit, &key);
+            pending += 1;
+
+            if pending >= BATCH_FLUSH_SIZE {
+                archived += self.commit_rotation_batch(
+                    user_id,
+                    archive.as_mut(),
+                    &mut pending_records,
+                    std::mem::take(&mut batch),
+                )?;
+                removed += pending;
+                pending = 0;
+            }
         }
 
-        // Flush remaining
-        if !removed_count.is_multiple_of(BATCH_FLUSH_SIZE) {
-            self.shared_db
-                .write(batch)
-                .map_err(|e| anyhow::anyhow!("Failed to write rotation batch: {e}"))?;
+        if pending > 0 {
+            archived +=
+                self.commit_rotation_batch(user_id, archive.as_mut(), &mut pending_records, batch)?;
+            removed += pending;
         }
 
         // Sync in-memory cache
-        if removed_count > 0 {
+        if removed > 0 {
             if let Some(log) = self.audit_logs.get(user_id) {
                 let mut log_guard = log.write();
 
@@ -590,7 +821,44 @@ impl MultiUserMemoryManagerRotationHelper {
             }
         }
 
-        Ok(removed_count)
+        Ok(RotationOutcome {
+            removed,
+            retained_unreadable,
+            archived,
+        })
+    }
+
+    /// Make one batch durable: archive first, delete second.
+    ///
+    /// The ordering here is the whole guarantee. `append` is `?`-propagated, so
+    /// if the archive write or its fsync fails this returns `Err` and the
+    /// `WriteBatch` is dropped un-written — the records it would have deleted
+    /// are still in `CF_AUDIT`. Reversing these two statements would silently
+    /// convert "we rotate" into "we lost it and believed otherwise", which is
+    /// strictly worse than having no archive.
+    ///
+    /// Returns the number of records archived (0 when archiving is off).
+    fn commit_rotation_batch(
+        &self,
+        user_id: &str,
+        archive: Option<&mut AuditArchiveWriter>,
+        records: &mut Vec<(String, AuditEvent)>,
+        batch: rocksdb::WriteBatch,
+    ) -> Result<usize> {
+        let archived = match archive {
+            Some(writer) => {
+                let written = writer.append(user_id, records)?;
+                records.clear();
+                written
+            }
+            None => 0,
+        };
+
+        self.shared_db
+            .write(batch)
+            .map_err(|e| anyhow::anyhow!("Failed to write rotation batch: {e}"))?;
+
+        Ok(archived)
     }
 }
 
@@ -742,6 +1010,26 @@ pub struct MultiUserMemoryManager {
     /// Without this, overlapping consolidation (manual + maintenance timer, or double API call)
     /// causes double decay, duplicate fact extraction, and lost edge boosts.
     consolidation_locks: DashMap<String, std::sync::atomic::AtomicBool>,
+
+    /// The ingestion source registry. Every read answers from RocksDB; this
+    /// handle holds no registry state of its own. See `crate::memory::sources`.
+    pub source_store: Arc<SourceStore>,
+
+    /// One run at a time per source. This is a LOCK, not state: losing it on
+    /// restart is correct, because a restart also means no run is in flight.
+    /// The authoritative "is a run in progress" answer is the `active:` lease
+    /// in RocksDB, which survives the process; this only stops two requests in
+    /// one process from racing.
+    pub source_locks: DashMap<SourceId, Arc<tokio::sync::Mutex<()>>>,
+
+    /// Last known integrity-scrub result per user.
+    ///
+    /// A scheduled scrub nobody can query is a write with no reader, which is
+    /// the failure mode this codebase keeps rediscovering. Everything that runs
+    /// a scrub — the scheduler and `POST /api/integrity/scrub` alike — files
+    /// its result here, and `GET /api/integrity/scrub` reads it back without
+    /// starting a sweep.
+    scrub_ledger: Arc<crate::integrity::ScrubLedger>,
 }
 
 impl MultiUserMemoryManager {
@@ -921,6 +1209,7 @@ impl MultiUserMemoryManager {
             cfs.extend(TodoStore::cf_descriptors());
             cfs.extend(ProspectiveStore::column_family_descriptors());
             cfs.extend(FileMemoryStore::cf_descriptors());
+            cfs.extend(SourceStore::cf_descriptors());
             // Feedback CF
             cfs.push(ColumnFamilyDescriptor::new(
                 crate::memory::feedback::CF_FEEDBACK,
@@ -956,6 +1245,12 @@ impl MultiUserMemoryManager {
 
         let file_store = Arc::new(FileMemoryStore::new(shared_db.clone(), &base_path)?);
         info!("File memory store initialized");
+
+        // Constructing the registry runs the startup lease sweep: any run whose
+        // process died mid-flight is marked Aborted here, before anything can
+        // observe it as still Running.
+        let source_store = Arc::new(SourceStore::new(shared_db.clone())?);
+        info!("Ingestion source registry initialized");
 
         let feedback_store = Arc::new(parking_lot::RwLock::new(
             FeedbackStore::with_shared_db(shared_db.clone(), &base_path).unwrap_or_else(|e| {
@@ -1026,6 +1321,9 @@ impl MultiUserMemoryManager {
             habituation_tracker,
             task_tracker: tokio_util::task::TaskTracker::new(),
             consolidation_locks: DashMap::new(),
+            source_store,
+            source_locks: DashMap::new(),
+            scrub_ledger: Arc::new(crate::integrity::ScrubLedger::new()),
         };
 
         info!("Running initial audit log rotation...");
@@ -1176,6 +1474,7 @@ impl MultiUserMemoryManager {
 
             let audit_retention_days = self.server_config.audit_retention_days as i64;
             let audit_max_entries = self.server_config.audit_max_entries_per_user;
+            let audit_archive_dir = self.server_config.audit_archive_path.clone();
 
             tokio::task::spawn_blocking(move || {
                 let manager = MultiUserMemoryManagerRotationHelper {
@@ -1183,13 +1482,25 @@ impl MultiUserMemoryManager {
                     audit_logs,
                     audit_retention_days,
                     audit_max_entries,
+                    audit_archive_dir,
                 };
-                if let Err(e) = manager.rotate_user_audit_logs(&user_id_clone) {
-                    tracing::warn!(
-                        "Audit log rotation failed for user {}: {}",
-                        user_id_clone,
-                        e
-                    );
+                match manager.rotate_user_audit_logs(&user_id_clone) {
+                    Ok(outcome) => {
+                        if outcome.retained_unreadable > 0 {
+                            tracing::warn!(
+                                "Audit log rotation for user {} retained {} unreadable key(s)",
+                                user_id_clone,
+                                outcome.retained_unreadable
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Audit log rotation failed for user {}: {}",
+                            user_id_clone,
+                            e
+                        );
+                    }
                 }
             });
         }
@@ -1205,53 +1516,90 @@ impl MultiUserMemoryManager {
         self.event_broadcaster.subscribe()
     }
 
-    /// Get audit history for user
-    pub fn get_history(&self, user_id: &str, memory_id: Option<&str>) -> Vec<AuditEvent> {
-        if let Some(log) = self.audit_logs.get(user_id) {
-            let events = log.read();
-            if !events.is_empty() {
-                return if let Some(mid) = memory_id {
-                    events
-                        .iter()
-                        .filter(|e| e.memory_id == mid)
-                        .cloned()
-                        .collect()
-                } else {
-                    events.iter().cloned().collect()
-                };
-            }
+    /// Read a user's audit trail, newest first, optionally filtered to one
+    /// memory.
+    ///
+    /// # Why this was rewritten rather than simply routed
+    ///
+    /// The previous body returned the in-memory cache whenever it was
+    /// non-empty and only fell through to disk when it was not. That cache is a
+    /// bounded `VecDeque` (`audit_max_entries_per_user`, default 10,000) that
+    /// `log_event` trims from the front, so for any user who has written a
+    /// single audit entry the disk branch was unreachable — and a per-memory
+    /// query for a memory whose events had aged out of that window returned an
+    /// empty vector while the durable trail still held them. A reader that
+    /// answers "no history" for a memory that has history is worse than no
+    /// reader at all, which is what this was: zero callers repo-wide.
+    ///
+    /// The fallback also hydrated the cache with a clone of the entire decoded
+    /// trail before filtering, so one per-memory lookup allocated a whole
+    /// user's history twice.
+    ///
+    /// This version filters during the scan and keeps at most `limit` events in
+    /// a bounded deque. Keys are `{user_id}:{timestamp_nanos:020}`, so RocksDB
+    /// yields them oldest-first and the newest `limit` are the last ones seen —
+    /// memory is bounded by `limit`, not by the size of the trail.
+    ///
+    /// The in-memory cache is then UNIONED in rather than consulted first:
+    /// `log_event` writes the cache synchronously but persists through
+    /// `spawn_blocking`, so an event logged moments ago may not have reached
+    /// disk. Duplicates are dropped on the full event tuple.
+    pub fn get_history(
+        &self,
+        user_id: &str,
+        memory_id: Option<&str>,
+        limit: usize,
+    ) -> Vec<AuditEvent> {
+        if limit == 0 {
+            return Vec::new();
         }
 
-        let mut events = Vec::new();
         let prefix = format!("{user_id}:");
+        let matches = |e: &AuditEvent| memory_id.is_none_or(|mid| e.memory_id == mid);
 
+        let mut newest: VecDeque<AuditEvent> = VecDeque::new();
         let audit = self.audit_cf();
         let iter = self.shared_db.prefix_iterator_cf(audit, prefix.as_bytes());
         for (key, value) in iter.flatten() {
-            if let Ok(key_str) = std::str::from_utf8(&key) {
-                if !key_str.starts_with(&prefix) {
-                    break;
-                }
-
-                if let Ok((event, _)) = crate::serialization::try_decode::<AuditEvent>(&value) {
-                    events.push(event);
+            let Ok(key_str) = std::str::from_utf8(&key) else {
+                continue;
+            };
+            if !key_str.starts_with(&prefix) {
+                break;
+            }
+            if let Ok((event, _)) = crate::serialization::try_decode::<AuditEvent>(&value) {
+                if matches(&event) {
+                    newest.push_back(event);
+                    if newest.len() > limit {
+                        newest.pop_front();
+                    }
                 }
             }
         }
 
-        if !events.is_empty() {
-            self.audit_logs
-                .entry(user_id.to_string())
-                .or_insert_with(|| {
-                    Arc::new(parking_lot::RwLock::new(VecDeque::from(events.clone())))
+        let mut events: Vec<AuditEvent> = newest.into_iter().collect();
+
+        // Union the not-yet-persisted tail from the in-memory cache.
+        if let Some(log) = self.audit_logs.get(user_id) {
+            for event in log.read().iter() {
+                if !matches(event) {
+                    continue;
+                }
+                let already_seen = events.iter().any(|seen| {
+                    seen.timestamp == event.timestamp
+                        && seen.event_type == event.event_type
+                        && seen.memory_id == event.memory_id
+                        && seen.details == event.details
                 });
+                if !already_seen {
+                    events.push(event.clone());
+                }
+            }
         }
 
-        if let Some(mid) = memory_id {
-            events.into_iter().filter(|e| e.memory_id == mid).collect()
-        } else {
-            events
-        }
+        events.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
+        events.truncate(limit);
+        events
     }
 
     /// Get or create memory system for a user
@@ -1476,6 +1824,18 @@ impl MultiUserMemoryManager {
     fn purge_user_from_shared_db(&self, user_id: &str) -> Result<()> {
         let prefix = format!("{user_id}:");
         let prefix_bytes = prefix.as_bytes();
+
+        // The source registry keys definitions, runs, leases and runtime by
+        // `{user_id}:`, but its cursors are keyed by source id alone, so a
+        // prefix delete would leave them orphaned. The store deletes a source
+        // and everything derived from it together.
+        match self.source_store.purge_user(user_id) {
+            Ok(n) if n > 0 => {
+                tracing::debug!("GDPR: purged {n} ingestion sources for {user_id}")
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("GDPR: failed to purge ingestion sources for {user_id}: {e}"),
+        }
 
         // Shared CF names that use `{user_id}:` as key prefix
         let cf_names = ["todos", "projects", "prospective"];
@@ -1706,6 +2066,76 @@ impl MultiUserMemoryManager {
         }
     }
 
+    /// Read one page of a user's audit trail, newest first, plus the true
+    /// total number of entries stored for that user.
+    ///
+    /// `total` is the count of stored entries, NOT `min(count, limit)` and not
+    /// a count capped by any over-fetch: the prefix scan visits every key for
+    /// the user, so paging with `offset` is exact rather than an approximation
+    /// that quietly saturates.
+    ///
+    /// Memory is bounded by `offset + limit`, not by the size of the trail.
+    /// Keys are `{user_id}:{timestamp_nanos:020}`, so RocksDB yields them
+    /// oldest-first; the newest `offset + limit` entries are therefore the last
+    /// ones seen, and a bounded deque keeps exactly those while the rest are
+    /// counted and dropped.
+    ///
+    /// Entries that fail to decode are counted in `total` — they are stored —
+    /// but cannot appear in a page. That is a corruption signal, so each one is
+    /// logged rather than silently skipped.
+    pub fn get_audit_page(
+        &self,
+        user_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<AuditEvent>, usize) {
+        let prefix = format!("{user_id}:");
+        let audit = self.audit_cf();
+        let window = offset.saturating_add(limit);
+
+        let mut newest: VecDeque<AuditEvent> = VecDeque::new();
+        let mut total = 0usize;
+        let mut undecodable = 0usize;
+
+        let iter = self.shared_db.prefix_iterator_cf(audit, prefix.as_bytes());
+        for (key, value) in iter.flatten() {
+            let Ok(key_str) = std::str::from_utf8(&key) else {
+                continue;
+            };
+            if !key_str.starts_with(&prefix) {
+                break;
+            }
+            total += 1;
+
+            if window == 0 {
+                continue;
+            }
+            match crate::serialization::try_decode::<AuditEvent>(&value) {
+                Ok((event, _)) => {
+                    newest.push_back(event);
+                    if newest.len() > window {
+                        newest.pop_front();
+                    }
+                }
+                Err(_) => undecodable += 1,
+            }
+        }
+
+        if undecodable > 0 {
+            tracing::warn!(
+                user_id,
+                undecodable,
+                total,
+                "audit entries failed to decode; they are counted in `total` but absent from pages"
+            );
+        }
+
+        // The deque is oldest-first; the page is newest-first.
+        let events: Vec<AuditEvent> = newest.into_iter().rev().skip(offset).take(limit).collect();
+
+        (events, total)
+    }
+
     /// Get audit logs for a user
     pub fn get_audit_logs(&self, user_id: &str, limit: usize) -> Vec<AuditEvent> {
         let mut events: Vec<AuditEvent> = Vec::new();
@@ -1792,10 +2222,15 @@ impl MultiUserMemoryManager {
             .iterator_cf(audit, rocksdb::IteratorMode::Start);
 
         for (key, _) in iter.flatten() {
-            if let Ok(key_str) = std::str::from_utf8(&key) {
-                if let Some(user_id) = key_str.split(':').next() {
-                    user_ids.insert(user_id.to_string());
-                }
+            // Split on the first ':' in the RAW bytes: a key whose suffix is
+            // not valid UTF-8 still attributes to its user this way. Decoding
+            // the whole key first would drop such an entry from the user set
+            // and could hide an entire user from rotation.
+            let Some(separator) = key.iter().position(|b| *b == b':') else {
+                continue;
+            };
+            if let Ok(user_id) = std::str::from_utf8(&key[..separator]) {
+                user_ids.insert(user_id.to_string());
             }
         }
 
@@ -1804,18 +2239,23 @@ impl MultiUserMemoryManager {
             audit_logs: self.audit_logs.clone(),
             audit_retention_days: self.server_config.audit_retention_days as i64,
             audit_max_entries: self.server_config.audit_max_entries_per_user,
+            audit_archive_dir: self.server_config.audit_archive_path.clone(),
         };
 
+        let mut total_retained_unreadable = 0usize;
+        let mut total_archived = 0usize;
         for user_id in user_ids {
             match helper.rotate_user_audit_logs(&user_id) {
-                Ok(removed) => {
-                    if removed > 0 {
+                Ok(outcome) => {
+                    if outcome.removed > 0 {
                         info!(
                             "  Rotated audit logs for user {}: removed {} old entries",
-                            user_id, removed
+                            user_id, outcome.removed
                         );
-                        total_removed += removed;
+                        total_removed += outcome.removed;
                     }
+                    total_retained_unreadable += outcome.retained_unreadable;
+                    total_archived += outcome.archived;
                 }
                 Err(e) => {
                     tracing::warn!("  Failed to rotate audit logs for user {}: {}", user_id, e);
@@ -1825,8 +2265,16 @@ impl MultiUserMemoryManager {
 
         if total_removed > 0 {
             info!(
-                "Audit log rotation complete: removed {} total entries",
-                total_removed
+                "Audit log rotation complete: removed {} total entries ({} archived first)",
+                total_removed, total_archived
+            );
+        }
+
+        if total_retained_unreadable > 0 {
+            tracing::warn!(
+                "Audit log rotation retained {} unreadable key(s) across all users — these were \
+                 NOT deleted; inspect the audit CF for corruption or a foreign writer",
+                total_retained_unreadable
             );
         }
 
@@ -2532,6 +2980,170 @@ impl MultiUserMemoryManager {
         vec![("shared".to_string(), std::sync::Arc::clone(&self.shared_db))]
     }
 
+    // =====================================================================
+    // INTEGRITY SCRUB
+    // =====================================================================
+
+    /// Last known scrub results, readable without starting a sweep.
+    pub fn scrub_ledger(&self) -> &Arc<crate::integrity::ScrubLedger> {
+        &self.scrub_ledger
+    }
+
+    /// Run one user's read-only integrity scrub and file the result.
+    ///
+    /// Blocking: on the largest live profile this takes ~14s, essentially all
+    /// of it iterating the shared default column family. Callers on the async
+    /// runtime must wrap it in `spawn_blocking`.
+    ///
+    /// Both RocksDB handles are cloned out and both guards released BEFORE the
+    /// sweep starts. Holding the graph read guard for the duration would stall
+    /// every graph writer, and parking_lot prefers writers, so every reader
+    /// queued behind them would stall too. RocksDB handles are internally
+    /// synchronised; the guards are needed only to reach them.
+    ///
+    /// Every outcome is filed, including the ones that conclude nothing: a user
+    /// whose store cannot be opened gets an `Indeterminate` entry rather than
+    /// keeping whatever the last successful run said.
+    pub fn scrub_user_and_record(
+        &self,
+        user_id: &str,
+        budget: crate::integrity::ScrubBudget,
+        source: crate::integrity::ScrubSource,
+    ) -> crate::integrity::IntegrityScrubReport {
+        let started_at = chrono::Utc::now();
+
+        let memory_db = match self.get_user_memory(user_id) {
+            Ok(sys) => {
+                let guard = sys.read();
+                guard.storage().raw_db().clone()
+            }
+            Err(e) => {
+                let report = crate::integrity::IntegrityScrubReport::indeterminate(
+                    user_id,
+                    started_at,
+                    format!("could not open the memory store: {e}"),
+                );
+                tracing::error!(
+                    user_id = %user_id,
+                    error = %e,
+                    "integrity scrub: store could not be opened — no health claim is possible"
+                );
+                self.scrub_ledger.record(source, report.clone());
+                return report;
+            }
+        };
+
+        // A user with no graph yet is not an error: the scrub names the column
+        // family as skipped, which forbids a `healthy` verdict rather than
+        // quietly reporting health for half the data.
+        let graph_db = self.get_user_graph(user_id).ok().map(|g| g.read().db_arc());
+
+        let report = match graph_db.as_ref().and_then(|db| {
+            db.cf_handle(crate::graph_memory::ENTITIES_CF_NAME)
+                .map(|cf| (db, cf))
+        }) {
+            Some((gdb, cf)) => {
+                crate::integrity::scrub_user(user_id, &memory_db, Some((gdb, cf)), budget)
+            }
+            None => crate::integrity::scrub_user(user_id, &memory_db, None, budget),
+        };
+
+        self.scrub_ledger.record(source, report.clone());
+        report
+    }
+
+    /// Every profile with a store on disk, scrubbed or not.
+    ///
+    /// Deliberately the filesystem and not the cache. Cached-users-only would
+    /// mean a profile is only checked if something else happened to open it,
+    /// and the profile measured unhealthiest so far is not the busiest one —
+    /// corruption at rest is exactly the case a cache-scoped sweep misses.
+    /// This mirrors `run_backup_all_users`, which walks the same directories
+    /// for the same reason.
+    pub fn profiles_on_disk(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&self.base_path) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.starts_with('.') || name == "audit_logs" || name == "backups" {
+                continue;
+            }
+            // The RocksDB data lives in a `storage/` subdirectory; a directory
+            // without one is not a profile.
+            if !path.join("storage").exists() {
+                continue;
+            }
+            out.push(name.to_string());
+        }
+        out.sort();
+        out
+    }
+
+    /// Scrub every profile on disk, filing each result as it completes.
+    ///
+    /// Results are filed per user rather than at the end, so a run that dies
+    /// half way has still refreshed the users it reached — and the scheduler
+    /// invalidates the ones it did not, so no stale verdict survives a failed
+    /// run.
+    ///
+    /// Cost note: opening a cold profile puts it in the LRU, so an hourly full
+    /// sweep can evict a warm user. That is a real cost and it is accepted
+    /// deliberately — a corruption check that only looks where someone is
+    /// already looking cannot answer "how would you know".
+    ///
+    /// Returns how many profiles were scrubbed, and the ledger summary as it
+    /// stands afterwards.
+    ///
+    /// The summary rather than a bare defect count, because the caller has to
+    /// be able to grade its alarm. `is_healthy` is false for `Aging` as well as
+    /// for `Unhealthy` — correctly, since aging data is not clean — so a
+    /// scheduler counting `!is_healthy` would log the same alarm for a store
+    /// serving fabrications and a store that merely predates a field. On the
+    /// current corpus that is every profile, every hour, forever: the alarm
+    /// fatigue this module exists to avoid.
+    pub fn run_integrity_scrub_all_users(
+        &self,
+        budget: crate::integrity::ScrubBudget,
+    ) -> (usize, crate::integrity::LedgerSummary) {
+        let mut scrubbed = 0;
+        let profiles = self.profiles_on_disk();
+        // Published before the sweep, not after: if this run dies half way the
+        // gauge already says how many profiles were meant to be covered, and
+        // the ledger says how many actually were.
+        crate::metrics::INTEGRITY_USERS_NEVER_SCRUBBED.set(
+            profiles
+                .iter()
+                .filter(|u| self.scrub_ledger.get(u).is_none())
+                .count() as i64,
+        );
+        for user_id in profiles {
+            let report = self.scrub_user_and_record(
+                &user_id,
+                budget.clone(),
+                crate::integrity::ScrubSource::Scheduled,
+            );
+            let _ = report;
+            scrubbed += 1;
+        }
+        let summary = self.scrub_ledger.summary();
+        crate::metrics::publish_integrity_scrub_metrics(&summary);
+        crate::metrics::INTEGRITY_USERS_NEVER_SCRUBBED.set(
+            self.profiles_on_disk()
+                .iter()
+                .filter(|u| self.scrub_ledger.get(u).is_none())
+                .count() as i64,
+        );
+        (scrubbed, summary)
+    }
+
     /// Run backups for all active users
     pub fn run_backup_all_users(&self, max_backups: usize) -> usize {
         let mut backed_up = 0;
@@ -2734,24 +3346,27 @@ impl MultiUserMemoryManager {
                     fine_label: record.fine_label.clone(),
                 })
                 .collect()
-        } else if !experience.entities.is_empty() {
-            tracing::debug!(
-                "Using {} pre-extracted entity names (no NER types available)",
-                experience.entities.len()
-            );
-            experience
-                .entities
-                .iter()
-                .map(|name| crate::embeddings::ner::NerEntity {
-                    text: name.clone(),
-                    entity_type: NerEntityType::Misc,
-                    confidence: 0.8,
-                    start: 0,
-                    end: name.len(),
-                    fine_label: None,
-                })
-                .collect()
         } else {
+            // REMOVED, deliberately: a branch here used to fall back to
+            // `experience.entities` — a plain `Vec<String>` with no spans and no
+            // types — and synthesise a `NerEntity` per name at `Misc` / 0.8
+            // confidence.
+            //
+            // Those names are not an extraction. `remember` builds that vector
+            // as `req.tags + NER surfaces + YAKE keyphrases` and stores it into
+            // both `entities` and `tags`, so on a document corpus it is mostly
+            // keyphrases and the source filename. Presenting it to this pipeline
+            // as if it were NER output gave every one of those strings the
+            // authority of a committed span: 46 `.txt` filenames became graph
+            // nodes on `defence-live`, each typed `Misc` → `Concept` with no
+            // `fine_type`, and no rebuild could ever re-type them because the
+            // branch fired before the typer did.
+            //
+            // Falling through to the typer costs a NER pass on memories written
+            // before `ner_entities` existed (or by an ingest where NER failed).
+            // That is the correct price: an entity node needs a committed span
+            // from something that decides what text denotes, and nothing else in
+            // this function can supply one.
             match self.neural_ner.extract(&experience.content) {
                 Ok(entities) => {
                     tracing::debug!(
@@ -3108,22 +3723,95 @@ impl MultiUserMemoryManager {
         // surfaces rejected as entities re-entered the graph as tags.
         let ner_claimed = ner_claimed_surfaces(&ner_entities);
 
-        // Build tag entity nodes
+        // Build tag entity nodes.
+        //
+        // A GRAPH NODE IS A CLAIM THAT SOMETHING EXISTS. The knowledge graph is a
+        // model of things — organisations, places, vehicles, weapons — and every
+        // node asserts that its name denotes one of them. A tag is not evidence
+        // of that. `experience.tags` is the memory's search metadata: `remember`
+        // fills it with `req.tags` (whatever the ingest passed — for a document
+        // corpus, the source filename), the NER surfaces, and YAKE keyphrases.
+        // Keyphrases are *categories* ("empty weight", "control system",
+        // "submarine"), not referents; taxonomy codes ("Wb 137 Water") name a
+        // classification scheme, not a thing; a filename names the container the
+        // text arrived in.
+        //
+        // This phase used to write a node for each of them, and it dominated the
+        // graph: on `defence-live` 638 of 1192 entities came from here and none
+        // carried a `fine_type`, because no typer had ever looked at them.
+        // Filtering that by *string shape* cannot work — a corpus of headlines
+        // and metadata fields is entirely title-cased, so capitalisation carries
+        // no information, and on prose it admits any keyphrase whose second word
+        // happens to be a name ("named BrahMos", "including ADA").
+        //
+        // So admission is by AUTHORITY, not by shape. Three authorities can say a
+        // surface denotes a thing:
+        //
+        //   1. The schema-driven typer committed a span for it — the `ner_*`
+        //      phases above, which is where most real entities come from.
+        //   2. The CALLER asserted it: `experience.declared_entities` is the
+        //      `tags` of the write request, kept unmerged for exactly this. A
+        //      person or an integration naming an entity is evidence; that is
+        //      what a tag on a `remember` call has always meant, and it is how a
+        //      caller supplies a name the typer's schema does not cover. What it
+        //      is NOT is evidence of a *type* — so unless rule 3 also fires the
+        //      node is `Concept` with no `fine_type`, which is the honest
+        //      reading of "someone told us this exists".
+        //   3. `recognised_tag_label` matched a curated naming convention that
+        //      only artifacts follow: a named product (`rocksdb`), a file
+        //      (`config.toml`), a service (`auth-service`). This is what keeps a
+        //      developer's own tags in their graph, and it is the only authority
+        //      that also supplies a type.
+        //
+        // A surface no authority recognises stays a keyword. It is still
+        // indexed, still searchable and still reachable through `recall_by_tags`;
+        // it just does not become a thing.
+        //
+        // Note that rule 2 is why the maximal-mention mask further down still
+        // works. That mask blocks causal edges to a name that is a fragment of a
+        // CO-MENTIONED entity ("Vornak2" inside "the Vornak2 incident"), and it
+        // can only see entities this function creates. The full mention is
+        // exactly the kind of name a caller declares and a span-based typer
+        // clips, so without rule 2 the mask silently stops firing and
+        // cross-document causal bridges return.
+        let declared: HashSet<&str> = experience
+            .declared_entities
+            .iter()
+            .map(|d| d.trim())
+            .collect();
+        // The union, not just `tags`. `remember` copies the request's tags into
+        // `tags` as well, so on that path the two overlap — but the integration
+        // handlers (Linear, GitHub) build an `Experience` with declared names and
+        // no `tags` at all, and a declared name that no list happens to echo is
+        // still a declared name. Deduped so a surface present in both does not
+        // build two nodes.
+        let mut seen_tag_surface: HashSet<&str> = HashSet::new();
         let tag_entities: Vec<(String, EntityNode)> = experience
             .tags
             .iter()
+            .chain(experience.declared_entities.iter())
             .filter_map(|tag| {
                 let tag_name = tag.trim();
+                if !seen_tag_surface.insert(tag_name) {
+                    return None;
+                }
+                let recognised = recognised_tag_label(tag_name);
+                let label = match &recognised {
+                    Some(label) => label.clone(),
+                    // Caller-asserted existence without a recognised type.
+                    None if declared.contains(tag_name) => EntityLabel::Concept,
+                    None => return None,
+                };
                 if !tag_surface_claimed_by_ner(tag_name, &ner_claimed)
                     && tag_name.len() >= 2
                     && !blocklist.contains(tag_name.to_lowercase().as_str())
+                    && !is_structural_non_entity(tag_name)
                     && !tag_name.starts_with("tool:")
                     && !tag_name.starts_with("source:")
                     && !tag_name.starts_with("file:")
                     && !tag_name.contains(". ")
                     && !tag_name.ends_with('.')
                 {
-                    let label = classify_tag_label(tag_name);
                     Some((
                         tag_name.to_string(),
                         EntityNode {
@@ -3134,7 +3822,24 @@ impl MultiUserMemoryManager {
                             last_seen_at: now,
                             mention_count: 1,
                             summary: String::new(),
-                            attributes: HashMap::new(),
+                            // Which phase claimed this surface. The NER phase
+                            // already records `source=ner`; without the same
+                            // marker on the other phases a node's provenance is
+                            // unrecoverable from the stored graph, and "where did
+                            // this come from" is the first question any entity
+                            // -quality audit asks.
+                            attributes: {
+                                let mut a = HashMap::new();
+                                a.insert(
+                                    "source".into(),
+                                    if recognised.is_some() {
+                                        "tag-identifier".into()
+                                    } else {
+                                        "tag-declared".into()
+                                    },
+                                );
+                                a
+                            },
                             name_embedding: entity_name_embeddings
                                 .and_then(|map| map.get(tag_name))
                                 .cloned(),
@@ -3194,6 +3899,13 @@ impl MultiUserMemoryManager {
                 if ALLCAPS_BLOCKLIST.contains(&term.as_str()) {
                     return None;
                 }
+                // Same structural hygiene the NER phase applies. The regex here
+                // (`[A-Z]{3,}[A-Z0-9]*`) matches inside URL slugs and article
+                // ids as happily as it matches an acronym, and this phase is the
+                // one place that had no such gate.
+                if is_structural_non_entity(&term) {
+                    return None;
+                }
                 known_names.push(term.clone());
                 let emb = entity_name_embeddings
                     .and_then(|map| map.get(&term))
@@ -3208,7 +3920,11 @@ impl MultiUserMemoryManager {
                         last_seen_at: now,
                         mention_count: 1,
                         summary: String::new(),
-                        attributes: HashMap::new(),
+                        attributes: {
+                            let mut a = HashMap::new();
+                            a.insert("source".into(), "acronym".into());
+                            a
+                        },
                         name_embedding: emb,
                         salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
                             &EntityLabel::Technology,
@@ -3242,7 +3958,11 @@ impl MultiUserMemoryManager {
                         last_seen_at: now,
                         mention_count: 1,
                         summary: String::new(),
-                        attributes: HashMap::new(),
+                        attributes: {
+                            let mut a = HashMap::new();
+                            a.insert("source".into(), "issue-id".into());
+                            a
+                        },
                         name_embedding: entity_name_embeddings
                             .and_then(|map| map.get(issue_id))
                             .cloned(),
@@ -4060,6 +4780,62 @@ impl MultiUserMemoryManager {
     }
 }
 
+/// Whether a single whitespace-delimited token is an opaque machine identifier
+/// rather than part of a name.
+///
+/// The signature is SHAPE, not length: a name that carries a number keeps the
+/// number at one end (`Voyager2`, `Sputnik1`, `Agni5`) because the number
+/// qualifies the word. An id has no word in it — its digits are interleaved
+/// (`Gr0ciqba`, `47568e95`, `B8b4b143`) or they swamp the one or two letters
+/// that survive (`B1147659`). So a token is opaque when it mixes letters and
+/// digits AND either:
+///
+/// * it alternates between letter runs and digit runs more than once, or
+/// * it has a single alternation but fewer than three letters in total — there
+///   is no word there to qualify.
+///
+/// Plus one length rule: an all-caps alphanumeric run of 12+ characters is a
+/// URL key (`CJPBZOUEURGDJC3DRTQIJDAWPQ`), never an acronym. It still requires a
+/// digit, so a shouted heading token ("ORGANISATION") is out of reach — and a
+/// heading is exactly where an organisation's real name appears.
+///
+/// Short standalone fragments (`4cc8`, `90b0`) need no rule here: they have no
+/// run of three consecutive letters, which `is_structural_non_entity` already
+/// rejects. This function exists for the case that rule misses — an id embedded
+/// in a title-cased phrase, where a neighbouring real word supplies the letters
+/// ("Article 47568e95 5a83 57ad B98b 16f261cbad64").
+fn is_opaque_identifier_token(token: &str) -> bool {
+    let core = token.trim_matches(|c: char| !c.is_alphanumeric());
+    // Requiring a digit is what keeps a word out of this function's reach: an
+    // all-caps heading token ("ORGANISATION", "AERONAUTICS") would otherwise
+    // trip the length rule, and headings are exactly where organisation names
+    // live.
+    let letters = core.chars().filter(|c| c.is_alphabetic()).count();
+    let digits = core.chars().filter(|c| c.is_ascii_digit()).count();
+    if digits == 0 || letters == 0 {
+        return false;
+    }
+
+    if core.len() >= 12
+        && core
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    {
+        return true;
+    }
+    if core.len() < 6 || !core.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+
+    // Count boundaries between a letter run and a digit run.
+    let alternations = core
+        .chars()
+        .zip(core.chars().skip(1))
+        .filter(|(a, b)| a.is_alphabetic() != b.is_alphabetic())
+        .count();
+    alternations > 1 || letters < 3
+}
+
 /// Deterministic entity hygiene: reject structural tokens that NER backbones
 /// mislabel as named entities when fed messy real-world text (news dumps, event
 /// feeds, scraped documents) — URLs/domains/file paths, timestamps/timezones,
@@ -4081,6 +4857,55 @@ pub(crate) fn is_structural_non_entity(name: &str) -> bool {
         .iter()
         .any(|s| lower.ends_with(s))
     {
+        return true;
+    }
+
+    // Prose-document filenames ("62-kalyani-group.txt", "brief.pdf").
+    //
+    // A document is the container the text arrived in, not something the text is
+    // about, so naming it as an entity puts the envelope in the graph alongside
+    // its contents — and then wires it to them, because every entity in the
+    // document co-occurs with it. 46 of `defence-live`'s 1192 nodes were the
+    // `.txt` file each memory was scraped from.
+    //
+    // Source and config filenames are deliberately NOT here: in a developer's
+    // memory `storage.rs` or `config.toml` is the subject of the record ("the
+    // bug is in storage.rs"), so `recognised_tag_label` classifies those as
+    // Module/Configuration entities on purpose. The distinction is what the file
+    // is *to the person remembering it*, not the presence of a dot.
+    if [
+        ".txt", ".pdf", ".doc", ".docx", ".csv", ".tsv", ".log", ".rtf", ".epub",
+    ]
+    .iter()
+    .any(|s| lower.ends_with(s))
+    {
+        return true;
+    }
+
+    // Filesystem paths. Two or more separators, or a Windows drive prefix — one
+    // separator alone is left alone because it is also ordinary notation
+    // ("TCP/IP", "A/B test", "I/O").
+    if lower.matches(['/', '\\']).count() >= 2
+        || (lower.len() >= 3
+            && lower.as_bytes()[1] == b':'
+            && matches!(lower.as_bytes()[2], b'/' | b'\\'))
+    {
+        return true;
+    }
+
+    // Opaque identifier tokens: a hex id, an over-long all-caps run, or a
+    // letter/digit soup token. A name may contain a designator ("Su-30MKI",
+    // "Covid-19") but not an id — an id denotes a record, not a thing, and it is
+    // what URL slugs and article keys leave behind when a scraper title-cases
+    // them ("Article 47568e95 5a83 57ad B98b 16f261cbad64").
+    if name.split_whitespace().any(is_opaque_identifier_token) {
+        return true;
+    }
+
+    // No alphabetic character at all: bare numbers, signed floats, percentages.
+    // ("24210596", "-3.7037037037037"). The graph has numeric fields for
+    // quantities; a number is never the name of a thing.
+    if !name.chars().any(|c| c.is_alphabetic()) {
         return true;
     }
 
@@ -4248,56 +5073,104 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_tag_label_database() {
-        assert_eq!(classify_tag_label("rocksdb"), EntityLabel::Database);
-        assert_eq!(classify_tag_label("PostgreSQL"), EntityLabel::Database);
-        assert_eq!(classify_tag_label("redis"), EntityLabel::Database);
-        assert_eq!(classify_tag_label("my-db"), EntityLabel::Database);
-        assert_eq!(classify_tag_label("user-db"), EntityLabel::Database);
-    }
-
-    #[test]
-    fn test_classify_tag_label_service() {
-        assert_eq!(classify_tag_label("auth-service"), EntityLabel::Service);
-        assert_eq!(classify_tag_label("memory-api"), EntityLabel::Service);
-        assert_eq!(classify_tag_label("grpc-server"), EntityLabel::Service);
-    }
-
-    #[test]
-    fn test_classify_tag_label_environment() {
-        assert_eq!(classify_tag_label("production"), EntityLabel::Environment);
-        assert_eq!(classify_tag_label("staging"), EntityLabel::Environment);
-        assert_eq!(classify_tag_label("kubernetes"), EntityLabel::Environment);
-        assert_eq!(classify_tag_label("docker"), EntityLabel::Environment);
-    }
-
-    #[test]
-    fn test_classify_tag_label_pipeline() {
-        assert_eq!(classify_tag_label("ci-pipeline"), EntityLabel::Pipeline);
-        assert_eq!(classify_tag_label("deploy-workflow"), EntityLabel::Pipeline);
-    }
-
-    #[test]
-    fn test_classify_tag_label_document() {
-        assert_eq!(classify_tag_label("README.md"), EntityLabel::Document);
-        assert_eq!(classify_tag_label("api-spec"), EntityLabel::Document);
-    }
-
-    #[test]
-    fn test_classify_tag_label_configuration() {
+    fn test_recognised_tag_label_database() {
+        assert_eq!(recognised_tag_label("rocksdb"), Some(EntityLabel::Database));
         assert_eq!(
-            classify_tag_label("settings.toml"),
-            EntityLabel::Configuration
+            recognised_tag_label("PostgreSQL"),
+            Some(EntityLabel::Database)
         );
-        assert_eq!(classify_tag_label("app-config"), EntityLabel::Configuration);
-        assert_eq!(classify_tag_label(".env"), EntityLabel::Configuration);
+        assert_eq!(recognised_tag_label("redis"), Some(EntityLabel::Database));
+        assert_eq!(recognised_tag_label("my-db"), Some(EntityLabel::Database));
+        assert_eq!(recognised_tag_label("user-db"), Some(EntityLabel::Database));
     }
 
     #[test]
-    fn test_classify_tag_label_module() {
-        assert_eq!(classify_tag_label("graph_memory.rs"), EntityLabel::Module);
-        assert_eq!(classify_tag_label("index.ts"), EntityLabel::Module);
-        assert_eq!(classify_tag_label("utils-lib"), EntityLabel::Module);
+    fn test_recognised_tag_label_service() {
+        assert_eq!(
+            recognised_tag_label("auth-service"),
+            Some(EntityLabel::Service)
+        );
+        assert_eq!(
+            recognised_tag_label("memory-api"),
+            Some(EntityLabel::Service)
+        );
+        assert_eq!(
+            recognised_tag_label("grpc-server"),
+            Some(EntityLabel::Service)
+        );
+    }
+
+    #[test]
+    fn test_recognised_tag_label_environment() {
+        assert_eq!(
+            recognised_tag_label("kubernetes"),
+            Some(EntityLabel::Environment)
+        );
+        assert_eq!(
+            recognised_tag_label("docker"),
+            Some(EntityLabel::Environment)
+        );
+        // CHANGED: "production" and "staging" were Environment. They name a
+        // phase of work, not a thing, and the matcher has no way to know whether
+        // the corpus it is reading is a deployment log or a defence document.
+        assert_eq!(recognised_tag_label("production"), None);
+        assert_eq!(recognised_tag_label("staging"), None);
+    }
+
+    #[test]
+    fn test_recognised_tag_label_pipeline() {
+        assert_eq!(
+            recognised_tag_label("ci-pipeline"),
+            Some(EntityLabel::Pipeline)
+        );
+        assert_eq!(
+            recognised_tag_label("deploy-workflow"),
+            Some(EntityLabel::Pipeline)
+        );
+        // Whole trailing token only — prose that merely mentions a pipeline is
+        // not the name of one.
+        assert_eq!(recognised_tag_label("pipeline latency notes"), None);
+    }
+
+    #[test]
+    fn test_recognised_tag_label_document() {
+        assert_eq!(
+            recognised_tag_label("README.md"),
+            Some(EntityLabel::Document)
+        );
+        assert_eq!(
+            recognised_tag_label("api-spec"),
+            Some(EntityLabel::Document)
+        );
+    }
+
+    #[test]
+    fn test_recognised_tag_label_configuration() {
+        assert_eq!(
+            recognised_tag_label("settings.toml"),
+            Some(EntityLabel::Configuration)
+        );
+        assert_eq!(
+            recognised_tag_label("app-config"),
+            Some(EntityLabel::Configuration)
+        );
+        assert_eq!(
+            recognised_tag_label(".env"),
+            Some(EntityLabel::Configuration)
+        );
+        // CHANGED: `contains("config")` used to fire here. "stobar
+        // configuration" is a carrier-deck launch method, not a config file.
+        assert_eq!(recognised_tag_label("stobar configuration"), None);
+    }
+
+    #[test]
+    fn test_recognised_tag_label_module() {
+        assert_eq!(
+            recognised_tag_label("graph_memory.rs"),
+            Some(EntityLabel::Module)
+        );
+        assert_eq!(recognised_tag_label("index.ts"), Some(EntityLabel::Module));
+        assert_eq!(recognised_tag_label("utils-lib"), Some(EntityLabel::Module));
     }
 
     /// Build a minimal NER-phase entity for the twin-suppression tests.
@@ -4347,39 +5220,134 @@ mod tests {
     }
 
     #[test]
-    fn tags_that_ner_did_not_claim_still_become_entities() {
-        // The guard must suppress twins only. A genuine tag — a user label or a
-        // YAKE keyphrase that is not an NER entity — is still the tag phase's
-        // job, and silently dropping those would trade one defect for another.
+    fn tags_that_ner_did_not_claim_are_not_automatically_entities() {
+        // The twin guard is orthogonal to admission: it says only "NER already
+        // has this surface". Whether an unclaimed tag becomes an entity is
+        // `recognised_tag_label`'s call, and it says no unless a curated rule
+        // names the surface.
         let ner = vec![ner_phase_entity("Baltimore", EntityLabel::Location)];
         let claimed = ner_claimed_surfaces(&ner);
 
         for surface in ["kubernetes", "q3-roadmap", "Baltimore Harbor"] {
             assert!(
                 !tag_surface_claimed_by_ner(surface, &claimed),
-                "{surface:?} is not an NER entity and must still be admitted"
+                "{surface:?} is not an NER entity, so the twin guard must not fire"
+            );
+        }
+        assert_eq!(
+            recognised_tag_label("kubernetes"),
+            Some(EntityLabel::Environment),
+            "a named platform is an artifact and stays an entity"
+        );
+        assert_eq!(
+            recognised_tag_label("Baltimore Harbor"),
+            None,
+            "an unclaimed proper noun is NER's call to make, not the tag phase's"
+        );
+    }
+
+    #[test]
+    fn keyphrase_tags_do_not_become_entities() {
+        // THE INVARIANT. A graph node asserts that its name denotes a thing.
+        // `experience.tags` is search metadata — `remember` fills it with the
+        // ingest's own tags, the NER surfaces and YAKE keyphrases — so most of
+        // it names categories, not referents. Admitting it wholesale is what
+        // made 638 of `defence-live`'s 1192 entities untyped keyphrases,
+        // filenames and taxonomy codes.
+        for keyword in [
+            // YAKE keyphrases off a defence corpus: categories, not referents.
+            "empty weight",
+            "control system",
+            "submarine",
+            "missile",
+            "facilities",
+            "long-range",
+            "delay",
+            "development",
+            "production",
+            // The file the memory was scraped from.
+            "62-kalyani-group.txt",
+            "38-visakhapatnam-class-destroyer.txt",
+            // GDELT taxonomy codes, title-cased by the connector.
+            "Wb 137 Water",
+            "Tax Fncact Chief",
+            "Crisislex Crisislexrec",
+            "Manmade Disaster Implied",
+        ] {
+            assert_eq!(
+                recognised_tag_label(keyword),
+                None,
+                "{keyword:?} is a keyword, not a thing — it must stay out of the graph"
             );
         }
     }
 
     #[test]
-    fn test_classify_tag_label_fallback() {
-        // CHANGED: these now resolve to `Concept`, not `Technology`.
-        //
-        // Both ARE technologies — but `classify_tag_label` does not know that.
-        // Neither appears in any of its rules (the "rust"/"react" strings in
-        // graph_memory.rs live in the EntityExtractor's separate lexicon, not
-        // in this matcher), so they reach the fallthrough exactly like an
-        // unrecognised word does. The old default asserted `Technology` for
-        // everything that fell through, which is why an entire graph rendered
-        // as one class regardless of what it contained.
-        //
-        // Naming them `Concept` is the honest answer for a matcher that did not
-        // recognise them. Restoring `Technology` for genuine technology tags is
-        // a lexicon problem — it needs a real technology vocabulary wired into
-        // this function, not a default that guesses.
-        assert_eq!(classify_tag_label("react"), EntityLabel::Concept);
-        assert_eq!(classify_tag_label("rust"), EntityLabel::Concept);
+    fn structural_gate_rejects_documents_paths_and_ids() {
+        for junk in [
+            "62-kalyani-group.txt",
+            "brief.pdf",
+            "export.csv",
+            "server.log",
+            "C:/Users/x/notes",
+            "src/handlers/state.rs",
+            "Article 47568e95 5a83 57ad B98b 16f261cbad64",
+            "Water B1147659",
+            "Baltimore Key Bridge Collapse Gr0ciqba",
+            "No Indication Of Terrorism In Baltimore Bridge Collapse Police B8b4b143",
+            "CJPBZOUEURGDJC3DRTQIJDAWPQ",
+            "-3.7037037037037",
+            "24210596",
+            "0.404040404040404",
+        ] {
+            assert!(
+                is_structural_non_entity(junk),
+                "structural surface must be rejected: {junk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn structural_gate_spares_names_and_designators() {
+        // The gate is deterministic and runs ahead of every phase, so a false
+        // positive here silently deletes a real entity from every corpus.
+        for name in [
+            "DRDO",
+            "Indian Navy",
+            "INS Vikrant",
+            "Agni-V",
+            "Bangalore",
+            "HAL",
+            "Hindustan Aeronautics Limited",
+            // Designators keep their separator, which is what leaves a 3+ letter
+            // run for the pre-existing rule and keeps them out of reach of the
+            // opaque-identifier rules. (Glued forms — "C130", "A400M" — were
+            // already rejected before this change by the letter-run rule; that
+            // is untouched here.)
+            "Su-30MKI",
+            "MiG-29K",
+            "Covid-19",
+            // A number at one end QUALIFIES the word before it. Rejecting these
+            // is how an over-eager id rule deletes real entities: an earlier
+            // version of `is_opaque_identifier_token` keyed on length alone and
+            // silently removed every 8-character name carrying a digit.
+            "Voyager2",
+            "Sputnik1",
+            "Boeing787",
+            "Fennick1",
+            "Boeing 787",
+            "TCP/IP",
+            "ORGANISATION",
+            "AERONAUTICS",
+            "config.toml",
+            "README.md",
+            "graph_memory.rs",
+        ] {
+            assert!(
+                !is_structural_non_entity(name),
+                "real surface must survive: {name:?}"
+            );
+        }
     }
 
     #[test]
@@ -4451,5 +5419,451 @@ mod tests {
             0,
             "reading the snapshot must not recreate the evicted cache entry"
         );
+    }
+}
+
+#[cfg(test)]
+mod audit_rotation_tests {
+    use super::*;
+
+    /// Open a throwaway shared DB carrying only the audit CF, with the same
+    /// (absence of) prefix-extractor configuration production uses — so
+    /// `prefix_iterator_cf` behaves here exactly as it does live.
+    fn open_audit_db(path: &std::path::Path) -> Arc<rocksdb::DB> {
+        let mut db_opts = rocksdb::Options::default();
+        db_opts.create_if_missing(true);
+        db_opts.create_missing_column_families(true);
+        let cfs = vec![
+            rocksdb::ColumnFamilyDescriptor::new("default", rocksdb::Options::default()),
+            rocksdb::ColumnFamilyDescriptor::new(CF_AUDIT, rocksdb::Options::default()),
+        ];
+        Arc::new(
+            rocksdb::DB::open_cf_descriptors(&db_opts, path, cfs).expect("open throwaway audit db"),
+        )
+    }
+
+    /// Write one audit record under `{user}:{key_suffix}` — the suffix is taken
+    /// verbatim so tests can plant keys rotation cannot parse.
+    fn put_event(
+        db: &rocksdb::DB,
+        user: &str,
+        key_suffix: &str,
+        label: &str,
+        ts: chrono::DateTime<chrono::Utc>,
+    ) -> String {
+        let event = AuditEvent {
+            timestamp: ts,
+            event_type: "test_event".to_string(),
+            memory_id: label.to_string(),
+            details: label.to_string(),
+        };
+        let value = crate::serialization::encode(&event).expect("encode audit event");
+        let cf = db.cf_handle(CF_AUDIT).expect("audit cf");
+        let key = format!("{user}:{key_suffix}");
+        db.put_cf(&cf, key.as_bytes(), value)
+            .expect("put audit key");
+        key
+    }
+
+    /// Write a record whose key is a well-formed zero-padded nanosecond stamp.
+    fn well_formed(db: &rocksdb::DB, user: &str, ts: chrono::DateTime<chrono::Utc>) -> String {
+        let nanos = ts
+            .timestamp_nanos_opt()
+            .expect("timestamp in i64 nanos range");
+        put_event(
+            db,
+            user,
+            &format!("{nanos:020}"),
+            &format!("event@{nanos}"),
+            ts,
+        )
+    }
+
+    /// Every surviving key for `user`, ascending.
+    fn surviving_keys(db: &rocksdb::DB, user: &str) -> Vec<String> {
+        let cf = db.cf_handle(CF_AUDIT).expect("audit cf");
+        let prefix = format!("{user}:");
+        db.iterator_cf(&cf, rocksdb::IteratorMode::Start)
+            .flatten()
+            .filter_map(|(k, _)| String::from_utf8(k.to_vec()).ok())
+            .filter(|k| k.starts_with(&prefix))
+            .collect()
+    }
+
+    fn helper(
+        db: Arc<rocksdb::DB>,
+        retention_days: i64,
+        max_entries: usize,
+    ) -> MultiUserMemoryManagerRotationHelper {
+        MultiUserMemoryManagerRotationHelper {
+            shared_db: db,
+            audit_logs: Arc::new(DashMap::new()),
+            audit_retention_days: retention_days,
+            audit_max_entries: max_entries,
+            audit_archive_dir: None,
+        }
+    }
+
+    fn helper_with_archive(
+        db: Arc<rocksdb::DB>,
+        retention_days: i64,
+        max_entries: usize,
+        archive_dir: std::path::PathBuf,
+    ) -> MultiUserMemoryManagerRotationHelper {
+        MultiUserMemoryManagerRotationHelper {
+            audit_archive_dir: Some(archive_dir),
+            ..helper(db, retention_days, max_entries)
+        }
+    }
+
+    /// Every JSONL line currently in the archive directory.
+    fn archive_lines(dir: &std::path::Path) -> Vec<serde_json::Value> {
+        let mut lines = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return lines;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).expect("read archive file");
+            for line in body.lines().filter(|l| !l.trim().is_empty()) {
+                lines.push(serde_json::from_str(line).expect("archive line is JSON"));
+            }
+        }
+        lines
+    }
+
+    /// A key whose timestamp cannot be parsed is not evidence of age. Rotation
+    /// must leave it alone — deleting it because the parse failed destroys the
+    /// records most likely to be evidence of a problem.
+    #[test]
+    fn unparseable_key_survives_the_retention_sweep() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = open_audit_db(dir.path());
+        let user = "audit-user";
+        let now = chrono::Utc::now();
+
+        let ancient = well_formed(&db, user, now - chrono::Duration::days(90));
+        let recent_a = well_formed(&db, user, now - chrono::Duration::days(1));
+        let recent_b = well_formed(&db, user, now - chrono::Duration::hours(1));
+        let malformed = put_event(&db, user, "not-a-timestamp", "unparseable", now);
+
+        // Retention 30d, cap far above the record count: only the age rule fires.
+        helper(db.clone(), 30, 1_000)
+            .rotate_user_audit_logs(user)
+            .expect("rotation succeeds");
+
+        let survivors = surviving_keys(&db, user);
+        assert!(
+            survivors.contains(&malformed),
+            "unparseable key was deleted; rotation cannot prove it is old. survivors: {survivors:?}"
+        );
+        assert!(
+            !survivors.contains(&ancient),
+            "the genuinely old well-formed key should still be deleted"
+        );
+        assert!(
+            survivors.contains(&recent_a) && survivors.contains(&recent_b),
+            "in-retention keys must survive. survivors: {survivors:?}"
+        );
+    }
+
+    /// The max-entries cap is positional. An unparseable key must neither be
+    /// deleted by it nor push a well-formed key over the edge: the cap governs
+    /// the trail rotation can actually read.
+    #[test]
+    fn unparseable_key_survives_the_excess_sweep() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = open_audit_db(dir.path());
+        let user = "capped-user";
+        let now = chrono::Utc::now();
+
+        // All four well within retention, so only the cap can delete.
+        let oldest = well_formed(&db, user, now - chrono::Duration::hours(4));
+        let older = well_formed(&db, user, now - chrono::Duration::hours(3));
+        let newer = well_formed(&db, user, now - chrono::Duration::hours(2));
+        let newest = well_formed(&db, user, now - chrono::Duration::hours(1));
+        let malformed = put_event(&db, user, "corrupt-suffix", "unparseable", now);
+
+        helper(db.clone(), 30, 2)
+            .rotate_user_audit_logs(user)
+            .expect("rotation succeeds");
+
+        let survivors = surviving_keys(&db, user);
+        assert!(
+            survivors.contains(&malformed),
+            "unparseable key was deleted by the cap. survivors: {survivors:?}"
+        );
+        assert!(
+            survivors.contains(&newer) && survivors.contains(&newest),
+            "the newest {{max_entries}} well-formed keys must survive. survivors: {survivors:?}"
+        );
+        assert!(
+            !survivors.contains(&oldest) && !survivors.contains(&older),
+            "the oldest well-formed keys beyond the cap should be deleted. survivors: {survivors:?}"
+        );
+    }
+
+    /// Documents the actual byte order: ASCII letters sort ABOVE digits, so an
+    /// unparseable suffix lands at the END of the user's range, not the front.
+    /// It was never "sorted oldest" — it was treated as infinitely old by the
+    /// `unwrap_or(0)` cutoff comparison, which fires regardless of position.
+    #[test]
+    fn unparseable_key_sorts_last_not_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = open_audit_db(dir.path());
+        let user = "order-user";
+        let now = chrono::Utc::now();
+
+        well_formed(&db, user, now - chrono::Duration::days(90));
+        well_formed(&db, user, now);
+        let malformed = put_event(&db, user, "zz-unparseable", "unparseable", now);
+
+        let ordered = surviving_keys(&db, user);
+        assert_eq!(
+            ordered.last(),
+            Some(&malformed),
+            "expected the unparseable key to sort last, not first: {ordered:?}"
+        );
+    }
+
+    /// Retention is not allowed to be silent about what it skipped: a trail
+    /// that quietly stops shrinking must be distinguishable from one with
+    /// nothing to shrink.
+    #[test]
+    fn rotation_outcome_counts_retained_unreadable_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = open_audit_db(dir.path());
+        let user = "counted-user";
+        let now = chrono::Utc::now();
+
+        well_formed(&db, user, now - chrono::Duration::days(90));
+        well_formed(&db, user, now);
+        put_event(&db, user, "bad-one", "unparseable", now);
+        put_event(&db, user, "bad-two", "unparseable", now);
+
+        let outcome = helper(db.clone(), 30, 1_000)
+            .rotate_user_audit_logs(user)
+            .expect("rotation succeeds");
+
+        assert_eq!(outcome.removed, 1, "exactly the one aged-out key");
+        assert_eq!(
+            outcome.retained_unreadable, 2,
+            "both unparseable keys must be reported, not silently skipped"
+        );
+    }
+
+    /// A non-UTF-8 key is unreadable for the same reason a bad suffix is, and
+    /// gets the same treatment. It must also not be dropped from the counts.
+    #[test]
+    fn non_utf8_key_is_retained_and_counted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = open_audit_db(dir.path());
+        let user = "binary-user";
+        let now = chrono::Utc::now();
+
+        well_formed(&db, user, now - chrono::Duration::days(90));
+        let cf = db.cf_handle(CF_AUDIT).expect("audit cf");
+        let mut raw_key = format!("{user}:").into_bytes();
+        raw_key.extend_from_slice(&[0xff, 0xfe, 0xfd]);
+        db.put_cf(&cf, &raw_key, b"not-decodable".as_slice())
+            .expect("put raw key");
+
+        let outcome = helper(db.clone(), 30, 1_000)
+            .rotate_user_audit_logs(user)
+            .expect("rotation succeeds");
+
+        assert_eq!(outcome.retained_unreadable, 1);
+        assert!(
+            db.get_cf(&cf, &raw_key).expect("read back").is_some(),
+            "a non-UTF-8 audit key must survive rotation"
+        );
+    }
+
+    /// THE decisive archive test. With archiving on and the archive write
+    /// forced to fail, rotation must delete nothing. An archive that fails
+    /// while rotation carries on turns "we rotate" into "we lost it and
+    /// believed otherwise", which is worse than having no archive at all.
+    ///
+    /// The failure is induced without fault injection: the archive directory
+    /// path is occupied by a regular FILE, so `create_dir_all` cannot produce
+    /// it and the writer cannot be opened. This is portable on Windows and
+    /// Unix alike.
+    #[test]
+    fn failed_archive_deletes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = open_audit_db(&dir.path().join("db"));
+        let user = "archived-user";
+        let now = chrono::Utc::now();
+
+        let ancient_a = well_formed(&db, user, now - chrono::Duration::days(120));
+        let ancient_b = well_formed(&db, user, now - chrono::Duration::days(90));
+        let recent = well_formed(&db, user, now);
+
+        // Occupy the archive path with a file so the directory cannot exist.
+        let blocked = dir.path().join("archive");
+        std::fs::write(&blocked, b"this path is a file, not a directory")
+            .expect("write blocking file");
+
+        let error = helper_with_archive(db.clone(), 30, 1_000, blocked)
+            .rotate_user_audit_logs(user)
+            .expect_err("rotation must fail when the archive cannot be opened");
+        assert!(
+            error.to_string().contains("audit archive"),
+            "error should name the archive: {error}"
+        );
+
+        let survivors = surviving_keys(&db, user);
+        assert_eq!(
+            survivors.len(),
+            3,
+            "a failed archive must abort the delete: {survivors:?}"
+        );
+        for key in [&ancient_a, &ancient_b, &recent] {
+            assert!(
+                survivors.contains(key),
+                "{key} was deleted despite the archive failing"
+            );
+        }
+    }
+
+    /// With archiving on and working, every record rotation deletes must be
+    /// present in the JSONL first — `deleted ⊆ archived`.
+    #[test]
+    fn archive_receives_every_deleted_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = open_audit_db(&dir.path().join("db"));
+        let archive_dir = dir.path().join("archive");
+        let user = "archived-user";
+        let now = chrono::Utc::now();
+
+        let ancient_a = well_formed(&db, user, now - chrono::Duration::days(120));
+        let ancient_b = well_formed(&db, user, now - chrono::Duration::days(90));
+        let recent = well_formed(&db, user, now);
+
+        let outcome = helper_with_archive(db.clone(), 30, 1_000, archive_dir.clone())
+            .rotate_user_audit_logs(user)
+            .expect("rotation succeeds");
+
+        assert_eq!(outcome.removed, 2);
+        assert_eq!(
+            outcome.archived, outcome.removed,
+            "every deleted record must have been archived"
+        );
+
+        let lines = archive_lines(&archive_dir);
+        let archived_keys: Vec<String> = lines
+            .iter()
+            .map(|v| v["key"].as_str().expect("key field").to_string())
+            .collect();
+        assert_eq!(archived_keys.len(), 2, "archive lines: {lines:?}");
+        assert!(archived_keys.contains(&ancient_a) && archived_keys.contains(&ancient_b));
+        assert!(
+            !archived_keys.contains(&recent),
+            "a surviving record must not be archived"
+        );
+
+        // The archive is a faithful copy, not a summary: the event body is there.
+        assert_eq!(lines[0]["user_id"].as_str(), Some(user));
+        assert_eq!(lines[0]["event"]["event_type"].as_str(), Some("test_event"));
+
+        let survivors = surviving_keys(&db, user);
+        assert_eq!(survivors, vec![recent]);
+    }
+
+    /// Archiving is opt-in. With it off — the default — rotation deletes
+    /// exactly as it did before and writes no file anywhere.
+    #[test]
+    fn archiving_off_by_default_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = open_audit_db(&dir.path().join("db"));
+        let archive_dir = dir.path().join("archive");
+        let user = "plain-user";
+        let now = chrono::Utc::now();
+
+        well_formed(&db, user, now - chrono::Duration::days(90));
+        let recent = well_formed(&db, user, now);
+
+        assert!(
+            crate::config::ServerConfig::default()
+                .audit_archive_path
+                .is_none(),
+            "audit archiving must default to off"
+        );
+
+        let outcome = helper(db.clone(), 30, 1_000)
+            .rotate_user_audit_logs(user)
+            .expect("rotation succeeds");
+
+        assert_eq!(outcome.removed, 1);
+        assert_eq!(outcome.archived, 0);
+        assert!(!archive_dir.exists(), "no archive directory may be created");
+        assert_eq!(surviving_keys(&db, user), vec![recent]);
+    }
+
+    /// A record whose stored value will not decode cannot be copied, so with
+    /// archiving on it is retained rather than deleted — the same rule as an
+    /// unparseable key, applied to the value side.
+    #[test]
+    fn undecodable_value_is_retained_when_archiving() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = open_audit_db(&dir.path().join("db"));
+        let archive_dir = dir.path().join("archive");
+        let user = "corrupt-value-user";
+        let now = chrono::Utc::now();
+
+        let good = well_formed(&db, user, now - chrono::Duration::days(120));
+        // Well-formed KEY, garbage VALUE, also past the retention cutoff.
+        let corrupt_nanos = (now - chrono::Duration::days(90))
+            .timestamp_nanos_opt()
+            .expect("in range");
+        let corrupt = format!("{user}:{corrupt_nanos:020}");
+        let cf = db.cf_handle(CF_AUDIT).expect("audit cf");
+        db.put_cf(&cf, corrupt.as_bytes(), b"not a postcard record".as_slice())
+            .expect("put corrupt value");
+
+        let outcome = helper_with_archive(db.clone(), 30, 1_000, archive_dir.clone())
+            .rotate_user_audit_logs(user)
+            .expect("rotation succeeds");
+
+        assert_eq!(outcome.removed, 1, "only the decodable aged-out record");
+        assert_eq!(outcome.archived, 1);
+        assert_eq!(outcome.retained_unreadable, 1);
+
+        let survivors = surviving_keys(&db, user);
+        assert!(
+            survivors.contains(&corrupt),
+            "an undecodable record must not be deleted: {survivors:?}"
+        );
+        assert!(!survivors.contains(&good));
+    }
+
+    /// The rotation cadence override is new. Zero must be rejected: it makes
+    /// `count.is_multiple_of(interval) && count > 0` unsatisfiable, silently
+    /// disabling rotation forever — a policy change wearing a tuning knob's
+    /// costume.
+    #[test]
+    fn rotation_interval_override_rejects_values_that_would_disable_rotation() {
+        use crate::config::parse_rotation_interval;
+
+        for bad in ["0", "-5", "", "   ", "many", "1.5"] {
+            assert!(
+                parse_rotation_interval(bad).is_none(),
+                "{bad:?} must be rejected, not accepted as a cadence"
+            );
+        }
+        assert_eq!(parse_rotation_interval("1"), Some(1));
+        assert_eq!(parse_rotation_interval(" 250 "), Some(250));
+
+        // And the rejected value would in fact have disabled rotation.
+        let disabled_interval = 0usize;
+        for count in 1..500usize {
+            assert!(
+                !(count.is_multiple_of(disabled_interval) && count > 0),
+                "interval 0 must never fire rotation"
+            );
+        }
     }
 }

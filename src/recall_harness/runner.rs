@@ -156,7 +156,7 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
     // so production callers (which never invoke the harness) stay
     // unaffected.
     // ------------------------------------------------------------------
-    pin_harness_threads();
+    let _harness_env = pin_harness_threads();
 
     let corpus_path = inputs
         .corpus_path
@@ -307,6 +307,7 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
             &cases,
             &layer_modes,
             inputs.age_days,
+            _harness_env.recall_read_only(),
         )
         .with_context(|| format!("repeat {i} of {repeats}"))?;
         passes.push(pass);
@@ -560,6 +561,7 @@ fn run_one_pass(
     cases: &[SmokeCase],
     layer_modes: &[LayerMode],
     age_days: f64,
+    read_only: bool,
 ) -> Result<OnePassResult> {
     // Ingest through the production manager so the graph/lineage/ontology layer
     // is actually built, then query the per-user `MemorySystem` (which now has a
@@ -696,6 +698,7 @@ fn run_one_pass(
                 query_text: Some(case.query.clone()),
                 max_results: SMOKE_K,
                 layers: *mode,
+                read_only,
                 ..Default::default()
             };
             // SHODH_QUERY_NER A/B lever: neural-NER graph seeding (no-op when unset).
@@ -774,14 +777,15 @@ fn run_one_pass(
             // construction — the deeper vector pool admits new competitors, so
             // a gold item's deep rank can even sit below its production rank;
             // that is inherent to fetching a deeper list, not an
-            // inconsistency. The deep query is side-effect-free because the
-            // harness pins SHODH_RECALL_READONLY=1 (pin_harness_threads), so
-            // it cannot contaminate Hebbian/access state between cases.
+            // inconsistency. The deep query carries the same `read_only` the
+            // pass was started with, so it cannot contaminate Hebbian/access
+            // state between cases.
             let deep_retrieved: Vec<String> = if diag_k > SMOKE_K {
                 let mut deep_query = Query {
                     query_text: Some(case.query.clone()),
                     max_results: diag_k,
                     layers: *mode,
+                    read_only,
                     ..Default::default()
                 };
                 manager.annotate_query_ner(&mut deep_query);
@@ -923,36 +927,118 @@ fn run_one_pass(
 /// This function only sets each variable when it is currently unset, so a
 /// caller that explicitly chose a different value (e.g. for a benchmark)
 /// keeps their override.
-fn pin_harness_threads() {
-    // SAFETY: env mutation is process-wide. The harness is the sole entry
-    // point that calls this; the production server never invokes the
-    // recall harness, so we are not racing other readers in any deployed
-    // binary. The recall-eval CLI is single-threaded at startup.
-    unsafe {
-        if std::env::var_os("SHODH_ONNX_THREADS").is_none() {
-            std::env::set_var("SHODH_ONNX_THREADS", "1");
+///
+/// # Why this returns a guard
+///
+/// It used to return `()` and never restore anything. That is harmless in the
+/// `recall_eval` binary, whose entire process IS the harness — but inside
+/// `cargo test` the harness is a handful of tests sharing one process with a
+/// thousand others, and the pin leaked to all of them. `SHODH_RECALL_READONLY=1`
+/// in particular silently disabled reinforcement for every test that ran
+/// afterwards or alongside, and it stayed invisible because nothing asserted
+/// that the default path still reinforces. That variable is no longer written
+/// here at all — see [`HarnessEnvPin::recall_read_only`] — but the same leak
+/// applies to the three that remain.
+///
+/// The previous fix wrapped the harness's own tests in a guard. That is a fix
+/// you have to remember at seven call sites and at every future one, and it
+/// restored only one of the four variables this function sets. Returning the
+/// guard from the function that does the damage removes the choice: a caller
+/// that ignores the return value drops it immediately and the pin lasts zero
+/// statements, which is loud rather than silent.
+#[must_use = "dropping the pin immediately restores the env; bind it for the \
+              lifetime of the harness run"]
+pub(crate) fn pin_harness_threads() -> HarnessEnvPin {
+    HarnessEnvPin::acquire()
+}
+
+/// The process-wide variables [`pin_harness_threads`] pins, in the order they
+/// are applied. Every entry is `set only if unset`.
+///
+/// `SHODH_RECALL_READONLY` is deliberately NOT in this list any more. It is the
+/// one determinism variable that changes observable behaviour for any code that
+/// happens to be running (recall stops writing usage state), so a process-wide
+/// pin of it is not just a leak on the way out — it is visible to every other
+/// thread for the whole duration of the run. A mutex serialises writers, not
+/// readers, so no lock can contain that. The harness now carries the decision
+/// on the `Query` it issues instead; see [`HarnessEnvPin::recall_read_only`].
+const HARNESS_ENV_PINS: [(&str, &str); 3] = [
+    // MiniLM/NER intra-op single-threaded: multi-threaded float reductions
+    // accumulate in non-deterministic order.
+    ("SHODH_ONNX_THREADS", "1"),
+    // Any par_iter() in scoring runs serially, same reason.
+    ("RAYON_NUM_THREADS", "1"),
+    // Freeze the scoring clock. Repeat passes execute minutes apart; with a live
+    // clock the recency component of every score drifts between repeats, which
+    // is enough to flip near-tie adjacent ranks (smoke-094) and trip the
+    // determinism gate on noise unrelated to the code under test. The anchor is
+    // FIXED (not run-start) because corpus created_at values are static
+    // fixtures: a live anchor would erode recency a little more every real day,
+    // silently rotting baseline.json until some near-tie flips weeks later.
+    ("SHODH_EVAL_NOW", HARNESS_CLOCK_ANCHOR),
+];
+
+/// RAII pin of the harness determinism env. Holds the crate-wide
+/// [`crate::memory::RECALL_ENV_LOCK`] so no other thread can mutate the same
+/// variables concurrently, and restores every previous value on drop.
+///
+/// The lock is reentrant, so a caller that already pinned (e.g. a test holding
+/// `RecallEnvPin`) can call a suite entry point without deadlocking.
+pub(crate) struct HarnessEnvPin {
+    _lock: parking_lot::ReentrantMutexGuard<'static, ()>,
+    previous: [(&'static str, Option<std::ffi::OsString>); HARNESS_ENV_PINS.len()],
+    recall_read_only: bool,
+}
+
+impl HarnessEnvPin {
+    fn acquire() -> Self {
+        let lock = crate::memory::RECALL_ENV_LOCK.lock();
+        let previous = HARNESS_ENV_PINS.map(|(key, value)| {
+            let prior = std::env::var_os(key);
+            if prior.is_none() {
+                // Process-wide mutation, but this thread holds RECALL_ENV_LOCK
+                // for the guard's whole lifetime, and that is the only lock any
+                // harness env mutation in this crate takes.
+                std::env::set_var(key, value);
+            }
+            (key, prior)
+        });
+        // Same decision the process-wide pin used to encode, read once instead
+        // of written once: unset means read-only (repeats measure variance, not
+        // learning curves), and the documented opt-out for learning-curve
+        // experiments is an explicit `SHODH_RECALL_READONLY` that is not "1".
+        // Reading an env var is safe against concurrent readers; writing one is
+        // what was never safe.
+        let recall_read_only = match std::env::var_os("SHODH_RECALL_READONLY") {
+            None => true,
+            Some(v) => v.to_str() == Some("1"),
+        };
+        Self {
+            _lock: lock,
+            previous,
+            recall_read_only,
         }
-        if std::env::var_os("RAYON_NUM_THREADS").is_none() {
-            std::env::set_var("RAYON_NUM_THREADS", "1");
-        }
-        // Repeats measure variance, not learning curves: recall must not
-        // mutate usage state mid-eval. FLAT fusion made graph magnitude
-        // load-bearing, so first-repeat co-activation writes were shifting
-        // later repeats' rankings (L1 smoke non-determinism). Learning-curve
-        // experiments opt out by setting SHODH_RECALL_READONLY=0 explicitly.
-        if std::env::var_os("SHODH_RECALL_READONLY").is_none() {
-            std::env::set_var("SHODH_RECALL_READONLY", "1");
-        }
-        // Freeze the scoring clock. Repeat passes execute minutes apart; with
-        // a live clock the recency component of every score drifts between
-        // repeats, which is enough to flip near-tie adjacent ranks (smoke-094)
-        // and trip the determinism gate on noise unrelated to the code under
-        // test. The anchor is FIXED (not run-start) because corpus created_at
-        // values are static fixtures: a live anchor would also erode recency
-        // a little more every real day, silently rotting baseline.json until
-        // some near-tie flips weeks after it was generated.
-        if std::env::var_os("SHODH_EVAL_NOW").is_none() {
-            std::env::set_var("SHODH_EVAL_NOW", HARNESS_CLOCK_ANCHOR);
+    }
+
+    /// Whether recalls issued during this harness run must perform no usage
+    /// writes. Set on every `Query` the harness builds, so the harness gets a
+    /// reproducible corpus without a process property that unrelated threads
+    /// can observe.
+    pub(crate) fn recall_read_only(&self) -> bool {
+        self.recall_read_only
+    }
+}
+
+impl Drop for HarnessEnvPin {
+    fn drop(&mut self) {
+        // Restore in reverse application order so nested pins unwind LIFO.
+        for (key, prior) in self.previous.iter_mut().rev() {
+            // Still holding RECALL_ENV_LOCK: the guard field is dropped after
+            // this loop.
+            match prior.take() {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
         }
     }
 }
@@ -1106,7 +1192,15 @@ pub fn ingest_corpus(
             content: item.content.clone(),
             entities: merged.clone(),
             tags: merged,
+            // Faithful to the handler (remember.rs): the request's own tags are
+            // the caller's entity assertions and are kept unmerged, because the
+            // graph admits a node on that authority. Dropping this here would
+            // measure a pipeline the server does not run.
+            declared_entities: item.tags.clone(),
             ner_entities,
+            // Benchmark corpus, not a user's memory. Stamped so an eval store
+            // is distinguishable from a real one.
+            origin: crate::memory::types::MemoryOrigin::RecallHarness,
             ..Default::default()
         };
 
@@ -1254,7 +1348,7 @@ pub fn run_longmemeval(
     k: usize,
     layer_modes: &[LayerMode],
 ) -> Result<LongMemEvalReport> {
-    pin_harness_threads();
+    let _harness_env = pin_harness_threads();
 
     let manifest_path = base_dir.join("manifest.jsonl");
     let manifest_txt = std::fs::read_to_string(&manifest_path)
@@ -1353,6 +1447,7 @@ pub fn run_longmemeval(
             query_text: Some(case.question.clone()),
             max_results: k,
             layers: primary_mode,
+            read_only: _harness_env.recall_read_only(),
             ..Default::default()
         };
         manager.annotate_query_ner(&mut query);
@@ -1509,7 +1604,7 @@ pub fn run_longmemeval(
 /// change what is stored and need separate ingests — run those via the workflow's
 /// before/after `ref` A/B instead.
 pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
-    pin_harness_threads();
+    let _harness_env = pin_harness_threads();
 
     let corpus_path = inputs
         .corpus_path
@@ -1616,6 +1711,7 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
                 query_text: Some(case.query.clone()),
                 max_results: SMOKE_K,
                 layers: LayerMode::Full,
+                read_only: _harness_env.recall_read_only(),
                 ..Default::default()
             };
             let memories = system.read().recall(&query).unwrap_or_default();
@@ -1735,7 +1831,7 @@ fn phrase_in_text(name: &str, text_lc: &str) -> bool {
 /// rate, and extraction counts — turning "is NER the bottleneck?" into a number. Low recall ⇒
 /// the traversal/graph starts from wrong-or-missing seeds and NER/linking is the ceiling.
 pub fn analyze_linking(inputs: &RunInputs) -> Result<LinkingReport> {
-    pin_harness_threads();
+    let _harness_env = pin_harness_threads();
 
     let corpus_path = inputs
         .corpus_path
@@ -1951,7 +2047,7 @@ fn apply_eval_caps(
 }
 
 pub fn analyze_funnel(inputs: &RunInputs) -> Result<FunnelReport> {
-    pin_harness_threads();
+    let _harness_env = pin_harness_threads();
 
     let corpus_path = inputs
         .corpus_path
@@ -2037,6 +2133,7 @@ pub fn analyze_funnel(inputs: &RunInputs) -> Result<FunnelReport> {
             query_text: Some(case.query.clone()),
             max_results: diag_k,
             layers: crate::memory::types::LayerMode::Full,
+            read_only: _harness_env.recall_read_only(),
             ..Default::default()
         };
 
@@ -2090,7 +2187,7 @@ pub fn analyze_funnel(inputs: &RunInputs) -> Result<FunnelReport> {
 }
 
 pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityReport> {
-    pin_harness_threads();
+    let _harness_env = pin_harness_threads();
     const MAX_HOPS: usize = 3;
     // Safety valve against hub-entity blowup on dense graphs. Far above any
     // LoCoMo component size, so it does not bias the result in practice.
@@ -2491,6 +2588,7 @@ fn run_learning_arm(
     cyc: usize,
     outcome: RetrievalOutcome,
     outcome_name: &str,
+    read_only: bool,
 ) -> Result<LearningCurveArm> {
     const TRACK_K: usize = 50;
     const MIN_COLD_RANK: usize = 2;
@@ -2507,6 +2605,7 @@ fn run_learning_arm(
             query_text: Some(q.to_string()),
             max_results: TRACK_K,
             layers: LayerMode::Full,
+            read_only,
             ..Default::default()
         };
         match system.read().recall(&query) {
@@ -2598,7 +2697,7 @@ fn run_learning_arm(
 /// learning rate via `SHODH_REWARD_LR_MULT` and re-run to see if a stronger
 /// reward moves rank, not just score.
 pub fn analyze_learning_curve(inputs: &RunInputs, cycles: usize) -> Result<LearningCurveReport> {
-    pin_harness_threads();
+    let _harness_env = pin_harness_threads();
 
     let corpus_path = inputs
         .corpus_path
@@ -2625,8 +2724,16 @@ pub fn analyze_learning_curve(inputs: &RunInputs, cycles: usize) -> Result<Learn
     for (name, outcome) in arms_spec {
         // Fresh storage per arm — reinforcement mutates state; arms must not bleed.
         let arm_storage = inputs.storage_path.join(name.to_lowercase());
-        let arm = run_learning_arm(&arm_storage, &corpus, &cases, cyc, outcome, name)
-            .with_context(|| format!("learning-curve arm {name}"))?;
+        let arm = run_learning_arm(
+            &arm_storage,
+            &corpus,
+            &cases,
+            cyc,
+            outcome,
+            name,
+            _harness_env.recall_read_only(),
+        )
+        .with_context(|| format!("learning-curve arm {name}"))?;
         arms.push(arm);
     }
 
@@ -2694,6 +2801,19 @@ mod tests {
         let id = Uuid::new_v4().simple().to_string();
         std::env::temp_dir().join(format!("shodh-recall-{label}-{id}"))
     }
+
+    // The harness's process-wide env mutation is contained by
+    // `pin_harness_threads` itself, which returns an RAII pin: it takes the
+    // crate-wide `RECALL_ENV_LOCK` and restores every variable it set on drop.
+    //
+    // This module used to carry a local `HarnessEnvGuard` that tests had to
+    // remember to acquire. It was the right diagnosis and the wrong location.
+    // `pin_harness_threads` then set `SHODH_ONNX_THREADS`, `RAYON_NUM_THREADS`,
+    // `SHODH_RECALL_READONLY` and `SHODH_EVAL_NOW` for the PROCESS; the local
+    // guard restored exactly one of them, so the frozen scoring clock leaked
+    // regardless — and any future test (or non-test caller) that forgot the
+    // guard leaked all four. Tests below bind the pin the same way the suite
+    // entry points do, and the lock is reentrant so nesting is safe.
 
     /// Lineage repro (substrate diagnosis 2026-06-10): root-cause P@1 has been
     /// 0.0 through every fix, and the instrumented CI run produced ZERO edge
@@ -2891,12 +3011,14 @@ mod tests {
     #[test]
     #[ignore = "training-data export — run explicitly"]
     fn export_fusion_training_data() {
+        let _harness_env = pin_harness_threads();
         let dir = unique_storage_dir("fusion-export");
         let out = dir.join("fusion_features.jsonl");
-        // SAFETY: process-wide env; run as a single explicit --ignored test.
-        unsafe {
-            std::env::set_var("SHODH_FUSION_FEATURE_EXPORT", &out);
-        }
+        let mut env = crate::test_support::ScopedEnv::acquire_recall();
+        env.set(
+            "SHODH_FUSION_FEATURE_EXPORT",
+            out.to_str().expect("export path is valid UTF-8"),
+        );
         let inputs = RunInputs {
             storage_path: dir.join("run"),
             corpus_path: Some(crate::recall_harness::fixtures::manifest_path(
@@ -2912,9 +3034,7 @@ mod tests {
             age_days: 0.0,
         };
         let report = run_smoke_suite_with_ranks(&inputs).expect("export run");
-        unsafe {
-            std::env::remove_var("SHODH_FUSION_FEATURE_EXPORT");
-        }
+        drop(env);
         let stable = std::path::Path::new("target/fusion_training.jsonl");
         std::fs::copy(&out, stable).expect("copy export");
         let lines = std::fs::read_to_string(stable).expect("read export");
@@ -2964,7 +3084,8 @@ mod tests {
         let gold_uuid = id_map.get("tw-gold").copied().expect("gold ingested");
 
         let system = manager.get_user_memory(EVAL_USER).expect("system");
-        std::env::set_var("SHODH_TYPED_WALK", "1");
+        let mut env = crate::test_support::ScopedEnv::acquire_recall();
+        env.set("SHODH_TYPED_WALK", "1");
         let results = system
             .read()
             .recall(&crate::memory::types::Query {
@@ -2974,7 +3095,7 @@ mod tests {
                 ..Default::default()
             })
             .expect("recall");
-        std::env::remove_var("SHODH_TYPED_WALK");
+        drop(env);
 
         let rank = results.iter().position(|m| m.id.0 == gold_uuid);
         assert!(
@@ -2997,6 +3118,7 @@ mod tests {
     /// root, ranked first.
     #[test]
     fn lineage_fragment_bridges_never_form() {
+        let _harness_env = pin_harness_threads();
         let dir = unique_storage_dir("lineage-flood-diag");
         let manager = build_manager(&dir).expect("manager");
         let chains = crate::recall_harness::multihop::DEFAULT_CHAINS;
@@ -3159,6 +3281,7 @@ mod tests {
 
     #[test]
     fn lineage_walk_survives_harness_scale() {
+        let _harness_env = pin_harness_threads();
         let dir = unique_storage_dir("lineage-scale");
         let manager = build_manager(&dir).expect("manager");
         let chains = crate::recall_harness::multihop::DEFAULT_CHAINS;
@@ -3225,6 +3348,7 @@ mod tests {
                     query_text: Some(case.query.clone()),
                     max_results: 10,
                     layers: *mode,
+                    read_only: _harness_env.recall_read_only(),
                     ..Default::default()
                 };
                 let _ = system.read().recall(&q);
@@ -3245,6 +3369,7 @@ mod tests {
             query_text: Some("What was the earliest origin behind the Selvic incident?".into()),
             max_results: 10,
             layers: LayerMode::Full,
+            read_only: _harness_env.recall_read_only(),
             ..Default::default()
         };
         let results = system.read().recall(&query).expect("recall");
@@ -3269,6 +3394,7 @@ mod tests {
     /// sequence or in the CI environment.
     #[test]
     fn lineage_harness_end_to_end_reproduces_ci() {
+        let _harness_env = pin_harness_threads();
         let dir = unique_storage_dir("lineage-harness-e2e");
         let inputs = RunInputs {
             storage_path: dir.clone(),
@@ -3446,6 +3572,7 @@ mod tests {
     /// captured by RH-6 baseline runs, not by unit tests.
     #[test]
     fn runner_executes_smoke_suite_and_produces_well_formed_report() {
+        let _harness_env = pin_harness_threads();
         let storage = unique_storage_dir("runner");
         let inputs = RunInputs {
             storage_path: storage.clone(),
@@ -3571,11 +3698,12 @@ mod tests {
         };
 
         let q = "What did Alice's collaborator discover?";
-        std::env::remove_var("SHODH_FUSION_V2");
+        let mut env = crate::test_support::ScopedEnv::acquire_recall();
+        env.remove("SHODH_FUSION_V2");
         let off = recall_order(q);
-        std::env::set_var("SHODH_FUSION_V2", "1");
+        env.set("SHODH_FUSION_V2", "1");
         let on = recall_order(q);
-        std::env::remove_var("SHODH_FUSION_V2");
+        drop(env);
         let _ = std::fs::remove_dir_all(&storage);
 
         let rank = |v: &Vec<(String, f32)>, id: &str| v.iter().position(|(i, _)| i == id);
@@ -3645,10 +3773,11 @@ mod tests {
                 .unwrap_or_default()
         };
 
-        std::env::set_var("SHODH_FUSION_V2", "1");
+        let mut env = crate::test_support::ScopedEnv::acquire_recall();
+        env.set("SHODH_FUSION_V2", "1");
         let pf = order(LayerMode::PlusFacts);
         let full = order(LayerMode::Full);
-        std::env::remove_var("SHODH_FUSION_V2");
+        drop(env);
         let _ = std::fs::remove_dir_all(&storage);
 
         let rank = |v: &Vec<String>, id: &str| v.iter().position(|i| i == id);
@@ -3741,6 +3870,7 @@ mod tests {
     #[test]
     #[ignore = "expensive: runs the smoke suite twice (~12min). enable with --ignored before shipping harness changes."]
     fn runner_repeats_2_produces_same_quality_as_repeats_1() {
+        let _harness_env = pin_harness_threads();
         let storage1 = unique_storage_dir("repeats1");
         let storage2 = unique_storage_dir("repeats2");
 
@@ -3823,6 +3953,7 @@ mod tests {
     #[test]
     #[ignore = "expensive: runs the smoke suite with 6 modes (~6× query time). enable with --ignored before shipping layer-gate changes."]
     fn runner_layer_all_emits_six_modes_with_per_mode_determinism() {
+        let _harness_env = pin_harness_threads();
         let storage = unique_storage_dir("layer-all");
         let inputs = RunInputs {
             storage_path: storage.clone(),

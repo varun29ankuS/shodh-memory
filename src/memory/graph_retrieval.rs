@@ -50,7 +50,7 @@ use crate::constants::{
 use crate::embeddings::Embedder;
 use crate::graph_memory::{EdgeTier, EntityLabel, EpisodicNode, GraphMemory, RelationType};
 use crate::memory::query_parser::{infer_ontological_intent, OntologicalIntent};
-use crate::memory::recall_readonly;
+use crate::memory::recall_is_readonly;
 use crate::memory::types::MemoryTier;
 // Note: compute_relevance removed - using unified density-weighted scoring directly
 use crate::memory::query_parser::{analyze_query, QueryAnalysis};
@@ -1042,12 +1042,20 @@ fn reachable_inject(
     // Bound the injected set to the strongest-path reachable entities.
     if best.len() > REACH_MAX_ENTITIES {
         let mut items: Vec<(Uuid, f32)> = best.into_iter().collect();
-        // Score desc -> entity id asc. `best` is a HashMap, so `into_iter` yields a
-        // per-map random order (Rust seeds every map separately, so the order differs
-        // between two maps in the SAME process), and the truncate below cuts through
-        // equal-score plateaus. Without a total order the injected entity set differs
-        // between two repeats of one query. This is the RH-12 hazard already guarded
-        // on the memory sort downstream; this sort is one layer upstream and was missed.
+        // `best` is a HashMap, so this Vec arrives in RANDOMISED order, and an
+        // unstable sort on score alone gives ties no defined order at all. The
+        // very next line TRUNCATES, so two entities on equal path strength meant
+        // the injected set — and every rank derived from it — was decided by
+        // hash iteration order rather than by the graph. It shows up as a
+        // retrieval result that changes between two identical queries against
+        // one unchanged store, which is what the harness's repeat-determinism
+        // guard exists to catch.
+        //
+        // Uuid makes the order total and is stable for the lifetime of a store,
+        // which is the scope the guard compares over. It is NOT stable across
+        // two ingests of the same corpus (entity uuids are v4); a cross-ingest
+        // order would have to key on the entity name, and that costs a graph
+        // lookup per candidate inside the hot walk.
         items.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         items.truncate(REACH_MAX_ENTITIES);
         return Ok(items.into_iter().collect());
@@ -1125,9 +1133,10 @@ fn traverse_beam(
         if next.is_empty() {
             break;
         }
-        // Score desc -> endpoint id asc. Paths are pushed in graph-iteration order and
-        // the beam cut below lands mid-plateau whenever two walks score equally, so
-        // which path survives must not depend on the order neighbours arrived in.
+        // Same hazard as the reach cut above: an unstable sort on score alone,
+        // truncated immediately. Paths tie on score routinely here because
+        // `ppr_edge_weight` is a product of a few quantised factors, so which
+        // path survives the beam was undefined. Endpoint makes it total.
         next.sort_unstable_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
@@ -1339,16 +1348,38 @@ pub fn spreading_activation_retrieve_with_stats(
     // First pass: collect entities with their salience values
     let mut entity_data: Vec<(Uuid, String, f32, f32)> = Vec::new(); // (uuid, name, ic_weight, salience)
 
+    // A node this build cannot decode must cost the query that ONE seed, not the
+    // whole request. The seed lookup used to propagate the decode error straight
+    // out of `recall`, so a single unreadable node in a 9,000-node graph turned
+    // every default/hybrid/associative recall into a 500 while semantic and
+    // temporal — which never touch the graph leg — kept working.
+    //
+    // Skipping is not the same as hiding: each skip is logged with the name that
+    // could not be resolved, counted, and returned to the caller as
+    // `RetrievalStats::unreadable_graph_nodes`, so a degraded answer is
+    // distinguishable from a complete one.
+    let mut unreadable_graph_nodes = 0usize;
+
     for entity in &analysis.focal_entities {
-        if let Some(entity_node) = graph.find_entity_by_name(&entity.text)? {
-            entity_data.push((
+        match graph.find_entity_by_name(&entity.text) {
+            Ok(Some(entity_node)) => entity_data.push((
                 entity_node.uuid,
                 entity.text.clone(),
                 entity.ic_weight,
                 entity_node.salience,
-            ));
-        } else {
-            tracing::debug!("  ✗ Entity '{}' not found in graph", entity.text);
+            )),
+            Ok(None) => {
+                tracing::debug!("  ✗ Entity '{}' not found in graph", entity.text);
+            }
+            Err(e) => {
+                unreadable_graph_nodes += 1;
+                tracing::warn!(
+                    entity = %entity.text,
+                    error = %e,
+                    "graph seed skipped: its node could not be decoded — this query \
+                     answers without it"
+                );
+            }
         }
     }
 
@@ -1368,15 +1399,26 @@ pub fn spreading_activation_retrieve_with_stats(
             if name.trim().len() < 2 {
                 continue;
             }
-            if let Some(entity_node) = graph.find_entity_by_name(name)? {
-                if !seen.contains(&entity_node.uuid) {
-                    entity_data.push((
-                        entity_node.uuid,
-                        name.clone(),
-                        QUERY_NER_SEED_IC,
-                        entity_node.salience,
-                    ));
-                    added += 1;
+            match graph.find_entity_by_name(name) {
+                Ok(Some(entity_node)) => {
+                    if !seen.contains(&entity_node.uuid) {
+                        entity_data.push((
+                            entity_node.uuid,
+                            name.clone(),
+                            QUERY_NER_SEED_IC,
+                            entity_node.salience,
+                        ));
+                        added += 1;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    unreadable_graph_nodes += 1;
+                    tracing::warn!(
+                        entity = %name,
+                        error = %e,
+                        "query-NER graph seed skipped: its node could not be decoded"
+                    );
                 }
             }
         }
@@ -1426,6 +1468,9 @@ pub fn spreading_activation_retrieve_with_stats(
     } else {
         0.0
     };
+
+    // Tell the caller the answer was assembled without some of its seeds.
+    stats.unreadable_graph_nodes = unreadable_graph_nodes;
 
     if activation_map.is_empty() {
         tracing::warn!("No entities found in graph, falling back to semantic search");
@@ -2041,18 +2086,24 @@ pub fn spreading_activation_retrieve_with_stats(
     // Hebbian reinforcement: strengthen edges traversed during spreading activation
     // Other traversal methods (traverse_from_entity, traverse_weighted, traverse_bidirectional)
     // all call batch_strengthen_synapses — spreading activation should too.
-    // SHODH_RECALL_READONLY gate: this is a graph-leg mutation, so read-only
-    // recall (eval repeats) must skip it exactly like the access-count and
+    // Read-only gate: this is a graph-leg mutation, so read-only recall (eval
+    // repeats via the env pin, or a caller that asked for a reproducible answer
+    // via `Query::read_only`) must skip it exactly like the access-count and
     // coactivation writes in mod.rs do — the traversed-edge STATS are still
     // collected above (`stats.traversed_edges`) so diagnostics are unaffected,
     // only the persistent strength MUTATION is skipped.
-    // Two independent suppressors, deliberately separate: `recall_readonly()` is
+    // Two independent suppressors, deliberately separate: the read-only gate is
     // measurement integrity (no recall-path writes during an eval), while the
     // `graph_potentiation` family ablates THIS mechanism alone. Keeping them
     // apart is what allows the potentiation write to be measured against a live
     // run rather than only against a frozen one.
+    //
+    // The read-only side takes the QUERY, not the process: `recall_is_readonly`
+    // is `recall_readonly_env() || query.read_only`, so it strictly subsumes the
+    // process-wide env read it replaces here. A caller that asked for a
+    // read-only recall is honoured even when the process was never pinned.
     if !stats.traversed_edges.is_empty()
-        && !recall_readonly()
+        && !recall_is_readonly(query)
         && crate::memory::ablation::is_enabled("graph_potentiation")
     {
         if let Err(e) = graph.batch_strengthen_synapses(&stats.traversed_edges) {
@@ -2907,11 +2958,6 @@ mod tests {
         assert!(min_threshold < 1.0);
     }
 
-    /// Process-global lock for tests that manipulate `SHODH_RECALL_READONLY`.
-    /// `env::set_var`/`remove_var` are not thread-safe against concurrent
-    /// readers on other test threads (same pattern as `auth.rs`'s `ENV_LOCK`).
-    static RECALL_READONLY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Regression test for the measurement-integrity bug: spreading activation's
     /// Hebbian reinforcement (`graph.batch_strengthen_synapses` on the traversed
     /// edges) ran unconditionally, never checking `SHODH_RECALL_READONLY`. Every
@@ -2919,7 +2965,7 @@ mod tests {
     /// repeat N+1 of the same query saw different (stronger) edges than repeat
     /// N purely from having been queried once already — a same-system A/B
     /// confound the eval harness's read-only gate exists specifically to
-    /// prevent (see `recall_readonly()`'s doc comment in `memory/mod.rs`).
+    /// prevent (see `recall_is_readonly()`'s doc comment in `memory/mod.rs`).
     ///
     /// Asserts: under the flag, two recall passes leave the traversed edge's
     /// strength byte-identical; with the flag unset (production default), the
@@ -2932,13 +2978,9 @@ mod tests {
         };
         use chrono::Utc;
 
-        let _env_guard = RECALL_READONLY_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        // Defensive reset (matches auth.rs's `clear_auth_env` idiom): don't
-        // trust a prior test's cleanup, since `recall_readonly()` re-reads the
-        // env on every call rather than caching it.
-        std::env::remove_var("SHODH_RECALL_READONLY");
+        // Holds the crate-wide lock and restores the previous value on drop, so
+        // this test cannot leak its own pin the way the harness tests did.
+        let _env = crate::memory::RecallEnvPin::pin("0");
 
         struct StubEmbedder;
         impl crate::embeddings::Embedder for StubEmbedder {
@@ -3015,7 +3057,187 @@ mod tests {
         let embedder = StubEmbedder;
         let episode_to_memory = |_ep: &EpisodicNode| -> Result<Option<SharedMemory>> { Ok(None) };
 
-        let run_recall = || {
+        let run_recall = |q: &Query| {
+            spreading_activation_retrieve_with_stats(
+                "widget",
+                q,
+                &graph,
+                &embedder,
+                None,
+                None,
+                None,
+                episode_to_memory,
+            )
+        };
+
+        // Sanity: the graph leg must actually traverse the widget->gadget edge,
+        // or the assertions below would hold vacuously (nothing to strengthen).
+        let (_, sanity_stats) = run_recall(&query).expect("sanity recall");
+        assert!(
+            sanity_stats.traversed_edges.contains(&edge_uuid),
+            "spreading activation must traverse the seeded edge for this test \
+             to exercise the Hebbian-strengthening gate; traversed={:?}",
+            sanity_stats.traversed_edges
+        );
+
+        // --- the env pin feeds the gate ---
+        //
+        // Asserted with NO recall inside the window. `SHODH_RECALL_READONLY=1`
+        // is process-wide: every other test thread reads it for as long as it
+        // is set, and a mutex serialises the writers, not those readers. So the
+        // window here is two `recall_is_readonly` calls rather than two full
+        // spreading-activation passes. What the gate then DOES with a `true`
+        // answer is proven below against this same fixture via the per-request
+        // flag — `recall_is_readonly` is the single input the graph leg
+        // consults, so env -> gate and gate -> no-write compose.
+        {
+            let _pin_on = crate::memory::RecallEnvPin::pin("1");
+            assert!(
+                crate::memory::recall_is_readonly(&query),
+                "SHODH_RECALL_READONLY=1 must make the recall read-only even \
+                 though the request did not ask for it"
+            );
+        }
+        assert!(
+            !crate::memory::recall_is_readonly(&query),
+            "the nested pin must restore the explicit 0 this test holds"
+        );
+
+        // --- read-only recall: two passes, byte-identical strength ---
+        let readonly_query = Query {
+            read_only: true,
+            ..query.clone()
+        };
+        let strength_ro_0 = strength_of(&graph);
+        run_recall(&readonly_query).expect("recall #1 (read-only)");
+        let strength_ro_1 = strength_of(&graph);
+        run_recall(&readonly_query).expect("recall #2 (read-only)");
+        let strength_ro_2 = strength_of(&graph);
+
+        assert_eq!(
+            strength_ro_0.to_bits(),
+            strength_ro_1.to_bits(),
+            "a read-only recall must leave edge strength byte-identical \
+             after recall #1 (got {strength_ro_0} -> {strength_ro_1}) — this is \
+             the graph-leg Hebbian-strengthening leak this test guards against"
+        );
+        assert_eq!(
+            strength_ro_1.to_bits(),
+            strength_ro_2.to_bits(),
+            "a read-only recall must leave edge strength byte-identical \
+             after recall #2 (got {strength_ro_1} -> {strength_ro_2})"
+        );
+
+        // --- production default (gate off): strengthening still happens ---
+        let strength_prod_0 = strength_of(&graph);
+        run_recall(&query).expect("recall #3 (production default)");
+        let strength_prod_1 = strength_of(&graph);
+
+        assert!(
+            strength_prod_1 > strength_prod_0,
+            "gate off (production default) must still strengthen the \
+             traversed edge (Hebbian learning), got {strength_prod_0} -> {strength_prod_1}"
+        );
+    }
+
+    /// The same graph-leg gate, reached through the PER-REQUEST flag rather than
+    /// the process-wide env pin, with the pin explicitly unset throughout.
+    ///
+    /// The pin is a property of the process. A server handling concurrent
+    /// callers cannot use it to answer one request without learning, so
+    /// "reproducible" was not something the HTTP path could offer: run the same
+    /// query twice and the second answer comes from a corpus the first altered.
+    /// `Query::read_only` is that missing per-request capability, and this test
+    /// exists because a flag that is simply ignored produces byte-identical
+    /// state too — so it also proves the same edge DOES strengthen when the
+    /// flag is off, on the same fixture, in the same run.
+    #[test]
+    fn spreading_activation_per_request_readonly_flag_skips_hebbian_strengthening() {
+        use crate::graph_memory::{
+            EdgeTier, EntityLabel, EntityNode, GraphMemory, LtpStatus, RelationType,
+            RelationshipEdge,
+        };
+        use chrono::Utc;
+
+        // The pin is explicitly OFF for this whole test: the claim under test
+        // is that the per-request flag ALONE suppresses the write. An explicit
+        // "0" rather than an unset variable, so no only-if-unset writer can
+        // turn it on underneath the assertion.
+        let _env = crate::memory::RecallEnvPin::pin("0");
+
+        struct StubEmbedder;
+        impl crate::embeddings::Embedder for StubEmbedder {
+            fn encode(&self, _text: &str) -> Result<Vec<f32>> {
+                Ok(vec![0.1, 0.2, 0.3, 0.4])
+            }
+            fn dimension(&self) -> usize {
+                4
+            }
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let mk_entity = |name: &str| EntityNode {
+            uuid: Uuid::new_v4(),
+            name: name.to_string(),
+            labels: vec![EntityLabel::Concept],
+            created_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 1.0,
+            is_proper_noun: false,
+            selectivity: None,
+            fine_type: None,
+            kb_id: None,
+        };
+        let widget = graph.add_entity(mk_entity("widget")).unwrap();
+        let gadget = graph.add_entity(mk_entity("gadget")).unwrap();
+
+        let now = Utc::now();
+        let edge_uuid = graph
+            .add_relationship(RelationshipEdge {
+                uuid: Uuid::new_v4(),
+                from_entity: widget,
+                to_entity: gadget,
+                relation_type: RelationType::RelatedTo,
+                strength: 0.5,
+                created_at: now,
+                valid_at: now,
+                invalidated_at: None,
+                source_episode_id: None,
+                context: String::new(),
+                last_activated: now,
+                activation_count: 1,
+                ltp_status: LtpStatus::None,
+                activation_timestamps: None,
+                tier: EdgeTier::L2Episodic,
+                entity_confidence: None,
+                forman_curvature: None,
+                endpoint_selectivity: None,
+                provenance: Vec::new(),
+                promoted_at: None,
+            })
+            .unwrap();
+
+        let strength_of = |g: &GraphMemory| -> f32 {
+            g.get_relationship(&edge_uuid)
+                .unwrap()
+                .expect("edge must still exist")
+                .strength
+        };
+
+        let embedder = StubEmbedder;
+        let episode_to_memory = |_ep: &EpisodicNode| -> Result<Option<SharedMemory>> { Ok(None) };
+        let run_recall = |read_only: bool| {
+            let query = Query {
+                query_text: Some("widget".to_string()),
+                read_only,
+                ..Query::default()
+            };
             spreading_activation_retrieve_with_stats(
                 "widget",
                 &query,
@@ -3028,52 +3250,48 @@ mod tests {
             )
         };
 
-        // Sanity: the graph leg must actually traverse the widget->gadget edge,
-        // or the assertions below would hold vacuously (nothing to strengthen).
-        let (_, sanity_stats) = run_recall().expect("sanity recall");
+        // Sanity: the graph leg must traverse the seeded edge, or "strength did
+        // not change" would hold vacuously.
+        let (_, sanity_stats) = run_recall(true).expect("sanity recall");
         assert!(
             sanity_stats.traversed_edges.contains(&edge_uuid),
             "spreading activation must traverse the seeded edge for this test \
-             to exercise the Hebbian-strengthening gate; traversed={:?}",
+             to exercise the gate; traversed={:?}",
             sanity_stats.traversed_edges
         );
 
-        // --- SHODH_RECALL_READONLY=1: two passes, byte-identical strength ---
-        std::env::set_var("SHODH_RECALL_READONLY", "1");
-
+        // --- read_only: true — two passes, byte-identical strength ---
         let strength_ro_0 = strength_of(&graph);
-        run_recall().expect("recall #1 (read-only)");
+        run_recall(true).expect("recall #1 (read-only)");
         let strength_ro_1 = strength_of(&graph);
-        run_recall().expect("recall #2 (read-only)");
+        run_recall(true).expect("recall #2 (read-only)");
         let strength_ro_2 = strength_of(&graph);
 
         assert_eq!(
             strength_ro_0.to_bits(),
             strength_ro_1.to_bits(),
-            "SHODH_RECALL_READONLY=1 must leave edge strength byte-identical \
-             after recall #1 (got {strength_ro_0} -> {strength_ro_1}) — this is \
-             the graph-leg Hebbian-strengthening leak this test guards against"
+            "Query::read_only=true must leave edge strength byte-identical \
+             after recall #1 (got {strength_ro_0} -> {strength_ro_1})"
         );
         assert_eq!(
             strength_ro_1.to_bits(),
             strength_ro_2.to_bits(),
-            "SHODH_RECALL_READONLY=1 must leave edge strength byte-identical \
+            "Query::read_only=true must leave edge strength byte-identical \
              after recall #2 (got {strength_ro_1} -> {strength_ro_2})"
         );
 
-        // --- production default (flag unset): strengthening still happens ---
-        std::env::remove_var("SHODH_RECALL_READONLY");
-
+        // --- read_only: false — the default still learns ---
+        // Without this the test would pass just as well against a flag nobody
+        // reads, because an inert pipeline is also byte-identical.
         let strength_prod_0 = strength_of(&graph);
-        run_recall().expect("recall #3 (production default)");
+        run_recall(false).expect("recall #3 (default)");
         let strength_prod_1 = strength_of(&graph);
 
         assert!(
             strength_prod_1 > strength_prod_0,
-            "flag unset (production default) must still strengthen the \
-             traversed edge (Hebbian learning), got {strength_prod_0} -> {strength_prod_1}"
+            "read_only=false (product default) must still strengthen the \
+             traversed edge — the flag adds a mode, it does not remove \
+             reinforcement-on-read; got {strength_prod_0} -> {strength_prod_1}"
         );
-
-        std::env::remove_var("SHODH_RECALL_READONLY");
     }
 }

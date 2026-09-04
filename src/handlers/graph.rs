@@ -412,10 +412,51 @@ pub async fn canonicalize_user_graph(
     })))
 }
 
+/// Query parameters for the graph rebuild.
+#[derive(Debug, Default, Deserialize)]
+pub struct RebuildGraphParams {
+    /// Discard each memory's cached entity extraction and re-run NER over its
+    /// content (`?fresh_ner=true`). Defaults to false.
+    ///
+    /// A rebuild replays every stored memory through the graph pipeline, which
+    /// reads the cached `experience.ner_entities` when it has them and only
+    /// falls through to the neural typer when it does not. That ordering is
+    /// right for a normal rebuild — it is what makes the operation cheap and
+    /// reproducible — but it means a rebuild reconstructs the typing decisions
+    /// that were cached at ingest, not the ones the current typer would make.
+    ///
+    /// So a corpus ingested before a typer improvement cannot be re-typed at
+    /// all. It replays its own history forever, and every entity keeps the class
+    /// (and the absent `fine_type`) it was given by whatever ran the day it was
+    /// written.
+    ///
+    /// Setting this drops the cache for the duration of the rebuild so entities
+    /// are re-derived from `content`. It costs a full NER pass over the corpus,
+    /// which is why it is opt-in.
+    ///
+    /// It does NOT drop `experience.declared_entities`: those are the names the
+    /// caller asserted, not a cached inference, and re-running the typer is no
+    /// reason to discard what a person said. A corpus written before that field
+    /// existed simply has none, and rebuilds to whatever the typer and the
+    /// curated identifier table can support on their own.
+    ///
+    /// OPERATIONAL NOTE: the rebuild runs synchronously inside the request, and
+    /// the server applies a `TimeoutLayer` of `SHODH_REQUEST_TIMEOUT` seconds
+    /// (default 60). A fresh-NER pass over a corpus of any size will exceed
+    /// that, and a timed-out request drops the connection, which cancels the
+    /// handler and leaves the graph *partially* rebuilt — indistinguishable, from
+    /// the outside, from a rebuild that finished. Raise `SHODH_REQUEST_TIMEOUT`
+    /// to cover the whole pass before using this on a real corpus, and treat a
+    /// 408 as "the graph is now in an unknown state", not as "try again later".
+    #[serde(default)]
+    pub fresh_ner: bool,
+}
+
 /// POST /api/graph/{user_id}/rebuild - Rebuild graph from all existing memories
 pub async fn rebuild_user_graph(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
+    Query(params): Query<RebuildGraphParams>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     validation::validate_user_id(&user_id).map_validation_err("user_id")?;
 
@@ -446,9 +487,23 @@ pub async fn rebuild_user_graph(
 
     let total_memories = memories.len();
     let mut processed = 0;
+    let fresh_ner = params.fresh_ner;
 
     // Re-process each memory through entity extraction
-    for (memory_id, experience) in memories {
+    for (memory_id, mut experience) in memories {
+        if fresh_ner {
+            // Drop the cached extraction so the pipeline re-derives entities from
+            // `content`. See `RebuildGraphParams::fresh_ner` — without this the
+            // rebuild cannot change any entity's type, however much the typer has
+            // improved since the memory was written.
+            //
+            // `entities` is cleared alongside `ner_entities` because the two were
+            // written as one merged list and a half-dropped cache is worse than
+            // either state: it would leave the pipeline reading a list that has
+            // the old extraction's surfaces but not its types.
+            experience.entities.clear();
+            experience.ner_entities.clear();
+        }
         if let Err(e) = state.process_experience_into_graph(&user_id, &experience, &memory_id, None)
         {
             tracing::debug!("Failed to process memory {}: {}", memory_id.0, e);

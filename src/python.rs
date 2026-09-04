@@ -416,10 +416,25 @@ impl PyMemorySystem {
             }
         };
 
+        // A caller reaching this binding named these entities on purpose, and
+        // that assertion is one of the three authorities the knowledge graph
+        // admits a node on. It has to be captured HERE, because `entities` on
+        // the stored Experience becomes a merged vector -- caller names, NER
+        // surfaces and YAKE keyphrases concatenated -- and the merge cannot
+        // afterwards tell an asserted name from a statistical keyphrase.
+        //
+        // Shares `declared_entities_from` with the HTTP path rather than
+        // repeating the rule, so a name admitted through the bindings and one
+        // admitted through /api/remember are validated, deduplicated and capped
+        // identically. A second copy of that rule is a second thing to drift.
+        let declared_entities =
+            crate::handlers::remember::declared_entities_from(entities.as_deref().unwrap_or(&[]));
+
         let experience = Experience {
             experience_type: exp_type,
             content,
             context: None,
+            declared_entities,
             entities: entities.unwrap_or_default(),
             metadata: metadata.unwrap_or_default(),
             embeddings: None,
@@ -481,6 +496,9 @@ impl PyMemorySystem {
             // NER records, which the direct Python API never produces (see
             // `ner_entities` above). No NER records means no toponyms to resolve.
             toponyms: vec![],
+            // In-process binding: the embedding Python app called us directly,
+            // with no HTTP hop and no axum handler in between.
+            origin: crate::memory::types::MemoryOrigin::PythonApi,
         };
 
         let memory_id = self
@@ -812,6 +830,12 @@ impl PyMemorySystem {
             retrieval_mode,
             offset: 0,
             layers: crate::memory::types::LayerMode::Full,
+            // The in-process binding is an ordinary product client, so it takes
+            // the product default: a read reinforces what it returns. The
+            // process-wide SHODH_RECALL_READONLY pin still overrides this — the
+            // gate ORs the two — which is what an eval embedding these bindings
+            // relies on.
+            read_only: false,
         };
 
         let memories = self
@@ -1832,6 +1856,9 @@ impl PyMemorySystem {
                 experience_type: ExperienceType::Conversation,
                 content: context.clone(),
                 tags: vec!["proactive-context".to_string()],
+                // Same shape as the HTTP auto-ingest: the caller asked for
+                // context, not for a write.
+                origin: crate::memory::types::MemoryOrigin::AutoIngest,
                 ..Default::default()
             };
             match self.inner.remember(experience, None) {
@@ -1889,6 +1916,9 @@ impl PyMemorySystem {
             retrieval_mode: RetrievalMode::Hybrid,
             offset: 0,
             layers: crate::memory::types::LayerMode::Full,
+            // See `recall()` above: product default, overridable only by the
+            // process-wide pin.
+            read_only: false,
         };
 
         let memories = self

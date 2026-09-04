@@ -65,9 +65,16 @@ pub enum AppError {
     /// A backup id that is not among the user's backups. Distinct from a
     /// storage fault: the caller recovers by listing backups and picking one.
     BackupNotFound(u32),
+    /// An ingestion source id that is not in this user's registry.
+    SourceNotFound(String),
 
     // Conflict Errors (409)
     MemoryAlreadyExists(String),
+    /// A run for this source is already in flight. Its own variant rather than
+    /// `MemoryAlreadyExists` because the code goes on the wire, and a client
+    /// that backs off on SOURCE_RUN_IN_PROGRESS should not have to recognise
+    /// an error named after memories.
+    SourceRunInProgress(String),
 
     // Internal Errors (500)
     StorageError(String),
@@ -125,7 +132,9 @@ impl AppError {
             Self::TodoNotFound(_) => "TODO_NOT_FOUND",
             Self::ProjectNotFound(_) => "PROJECT_NOT_FOUND",
             Self::BackupNotFound(_) => "BACKUP_NOT_FOUND",
+            Self::SourceNotFound(_) => "SOURCE_NOT_FOUND",
             Self::MemoryAlreadyExists(_) => "MEMORY_ALREADY_EXISTS",
+            Self::SourceRunInProgress(_) => "SOURCE_RUN_IN_PROGRESS",
             Self::StorageError(_) => "STORAGE_ERROR",
             Self::DatabaseError(_) => "DATABASE_ERROR",
             Self::SerializationError(_) => "SERIALIZATION_ERROR",
@@ -154,9 +163,10 @@ impl AppError {
             | Self::UserNotFound(_)
             | Self::TodoNotFound(_)
             | Self::ProjectNotFound(_)
-            | Self::BackupNotFound(_) => StatusCode::NOT_FOUND,
+            | Self::BackupNotFound(_)
+            | Self::SourceNotFound(_) => StatusCode::NOT_FOUND,
 
-            Self::MemoryAlreadyExists(_) => StatusCode::CONFLICT,
+            Self::MemoryAlreadyExists(_) | Self::SourceRunInProgress(_) => StatusCode::CONFLICT,
 
             Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
 
@@ -198,7 +208,11 @@ impl AppError {
             Self::TodoNotFound(id) => format!("Todo not found: {id}"),
             Self::ProjectNotFound(id) => format!("Project not found: {id}"),
             Self::BackupNotFound(id) => format!("Backup not found: {id}"),
+            Self::SourceNotFound(id) => format!("Source not found: {id}"),
             Self::MemoryAlreadyExists(id) => format!("Memory already exists: {id}"),
+            Self::SourceRunInProgress(id) => {
+                format!("A run is already in progress for source: {id}")
+            }
             Self::StorageError(msg) => format!("Storage error: {msg}"),
             Self::DatabaseError(msg) => format!("Database error: {msg}"),
             Self::SerializationError(msg) => format!("Serialization error: {msg}"),
@@ -358,7 +372,10 @@ mod tests {
     /// so a dev server handed the user id to any client that asked.
     #[test]
     fn server_errors_are_sanitised_outside_production_too() {
-        std::env::remove_var("SHODH_ENV");
+        // Unsynchronised `remove_var` on a variable `auth` and `middleware`
+        // tests both write: this raced them in both directions.
+        let mut guard = crate::test_support::ScopedEnv::acquire();
+        guard.remove("SHODH_ENV");
 
         let leaky = AppError::Internal(anyhow::anyhow!(
             "Failed to initialize memory system for user 'alice@example.com' at /Users/alice/data"

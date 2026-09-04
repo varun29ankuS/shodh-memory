@@ -18,7 +18,7 @@ use super::types::MemoryEvent;
 use crate::errors::{AppError, ValidationErrorExt};
 use crate::memory::sessions::SessionEvent;
 use crate::memory::todo_formatter;
-use crate::memory::{Experience, ExperienceType};
+use crate::memory::{Experience, ExperienceType, MemoryOrigin};
 use crate::memory::{
     MemoryId, Project, ProjectId, ProjectStats, ProjectStatus, ProspectiveTask, ProspectiveTaskId,
     ProspectiveTaskStatus, ProspectiveTrigger, Recurrence, Todo, TodoComment, TodoCommentId,
@@ -114,12 +114,20 @@ pub struct ListRemindersResponse {
 #[derive(Debug, Deserialize)]
 pub struct GetDueRemindersRequest {
     pub user_id: String,
-    #[serde(default = "default_true")]
+    /// Acknowledge every returned reminder, moving it `Pending` → `Triggered`.
+    ///
+    /// Defaults to FALSE: reading what is due must not consume it. This used
+    /// to default to true, so a caller that omitted the field — the natural
+    /// thing to do when polling for display — silently acknowledged every
+    /// reminder it saw. The 60-second scheduler
+    /// (`AppState::check_and_emit_due_reminders`) emits `REMINDER_DUE` only for
+    /// tasks still `Pending`, so those acknowledgements consumed the
+    /// notification without ever telling the user.
+    ///
+    /// Set it explicitly to true only when the caller is genuinely delivering
+    /// the reminder and taking responsibility for it.
+    #[serde(default)]
     pub mark_triggered: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// Response for due reminders
@@ -134,7 +142,13 @@ pub struct DueRemindersResponse {
 pub struct CheckContextRemindersRequest {
     pub user_id: String,
     pub context: String,
-    #[serde(default = "default_true")]
+    /// Acknowledge every matched reminder. Defaults to FALSE for the same
+    /// reason as [`GetDueRemindersRequest::mark_triggered`] — and more acutely
+    /// here, because a context-triggered reminder has no due time, so the
+    /// scheduler's `due:` index scan never sees it and this endpoint is the
+    /// only thing that can fire it. Consuming one on a display read would lose
+    /// it outright.
+    #[serde(default)]
     pub mark_triggered: bool,
 }
 
@@ -242,13 +256,22 @@ mod todo_wire {
 }
 
 /// Response for todo operations
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct TodoResponse {
     pub success: bool,
     #[serde(serialize_with = "todo_wire::opt")]
     pub todo: Option<Todo>,
     pub project: Option<Project>,
     pub formatted: String,
+    /// Present only when an update settled a recurring todo: the occurrence it
+    /// spawned. Mirrors `TodoCompleteResponse::next_recurrence`, and is
+    /// omitted entirely otherwise so existing clients see no change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_recurrence: Option<Todo>,
+    /// Todos whose dependency set is fully satisfied now that this one is
+    /// done. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unblocked: Vec<Todo>,
 }
 
 /// Response for todo list operations
@@ -330,6 +353,10 @@ pub struct UpdateTodoRequest {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub external_id: Option<String>,
+    /// Replace the recurrence pattern (same forms `add` accepts). Pass an
+    /// empty string to remove it, the way an empty `parent_id` clears a parent.
+    #[serde(default)]
+    pub recurrence: Option<String>,
     /// Replace the set of todos this one depends on (short keys or UUIDs).
     /// Pass an empty array to clear. Cycles are rejected.
     #[serde(default)]
@@ -507,22 +534,19 @@ pub struct ListProjectsRequest {
 // HELPER FUNCTIONS
 // =============================================================================
 
-/// Parse recurrence string to Recurrence enum
+/// Parse a recurrence string into the full [`Recurrence`] enum.
+///
+/// The grammar lives on the type ([`Recurrence::from_pattern`]) because MIF
+/// import reads the same patterns; this only turns its reason into the HTTP
+/// error shape, with the accepted forms appended.
 fn parse_recurrence(s: &str) -> Result<Recurrence, AppError> {
-    match s.to_lowercase().as_str() {
-        "daily" => Ok(Recurrence::Daily),
-        "weekly" => Ok(Recurrence::Weekly {
-            days: vec![1, 2, 3, 4, 5],
-        }),
-        "monthly" => Ok(Recurrence::Monthly { day: 1 }),
-        unknown => Err(AppError::InvalidInput {
-            field: "recurrence".to_string(),
-            reason: format!(
-                "Unknown recurrence '{}'. Valid values: daily, weekly, monthly",
-                unknown
-            ),
-        }),
-    }
+    Recurrence::from_pattern(s).map_err(|reason| AppError::InvalidInput {
+        field: "recurrence".to_string(),
+        reason: format!(
+            "Invalid recurrence '{s}': {reason}. Valid forms: {}",
+            Recurrence::PATTERN_FORMS
+        ),
+    })
 }
 
 /// Resolve todo references (short keys like "SHO-3", seq numbers, or UUIDs)
@@ -1310,6 +1334,9 @@ pub async fn create_todo(
         content: memory_content,
         experience_type: ExperienceType::Task,
         tags,
+        // The caller asked to change a todo, not to store a memory; the server
+        // composed this text itself.
+        origin: MemoryOrigin::TodoLifecycle,
         ..Default::default()
     };
 
@@ -1409,6 +1436,7 @@ pub async fn create_todo(
         todo: Some(todo),
         project: None,
         formatted,
+        ..Default::default()
     }))
 }
 
@@ -1703,6 +1731,7 @@ pub async fn get_todo(
         todo: Some(todo),
         project: None,
         formatted,
+        ..Default::default()
     }))
 }
 
@@ -1737,6 +1766,7 @@ async fn update_todo_core(
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::TodoNotFound(todo_id.clone()))?;
 
+    let previous_status = todo.status.clone();
     // `related_memory_ids` has replace semantics, so the back-links of memories
     // dropped from the set have to be revoked as well as new ones written.
     let links_before = todo.related_memory_ids.clone();
@@ -1745,7 +1775,7 @@ async fn update_todo_core(
         todo.content = content.clone();
     }
     if let Some(ref status_str) = req.status {
-        todo.status = TodoStatus::from_str_loose(status_str).ok_or_else(|| {
+        let status = TodoStatus::from_str_loose(status_str).ok_or_else(|| {
             AppError::InvalidInput {
                 field: "status".to_string(),
                 reason: format!(
@@ -1754,6 +1784,10 @@ async fn update_todo_core(
                 ),
             }
         })?;
+        // Never assign the status directly: `apply_status` owns `completed_at`
+        // in both directions, so a todo settled here is stamped and a todo
+        // reopened here stops claiming it was ever finished.
+        todo.apply_status(status);
     }
     if let Some(ref priority_str) = req.priority {
         todo.priority =
@@ -1782,6 +1816,18 @@ async fn update_todo_core(
     }
     if let Some(ref external_id) = req.external_id {
         todo.external_id = Some(external_id.clone());
+    }
+    // Replace semantics, with an empty string meaning "stop recurring" — the
+    // same convention `parent_id` uses to clear a parent.
+    let mut recurrence_changed = false;
+    if let Some(ref recurrence_str) = req.recurrence {
+        let parsed = if recurrence_str.trim().is_empty() {
+            None
+        } else {
+            Some(parse_recurrence(recurrence_str)?)
+        };
+        recurrence_changed = parsed != todo.recurrence;
+        todo.recurrence = parsed;
     }
     if let Some(ref parent_id_str) = req.parent_id {
         if parent_id_str.is_empty() {
@@ -1861,12 +1907,47 @@ async fn update_todo_core(
         }
     }
 
-    state
-        .todo_store
-        .update_todo(&todo)
-        .map_err(AppError::Internal)?;
+    // Moving into Done or Cancelled settles the todo, and settlement runs down
+    // one path for every client: the same stamp, the same recurrence rollover
+    // and the same completion record as POST /complete. Routing `status=done`
+    // through here rather than rejecting it is what existing callers need —
+    // the TUI cycles in_progress → done through this endpoint
+    // (`tui/src/stream.rs::next_status`) and the MCP `update_todo` tool ships
+    // `done` and `cancelled` in its status enum.
+    //
+    // A completion is any arrival in Done from somewhere else, including from
+    // Cancelled — `/complete` re-completes a cancelled todo and rolls it over,
+    // so this door must too. Arriving where you already are changes nothing,
+    // which is what keeps a repeated `status=done` idempotent.
+    let completed_here = todo.status == TodoStatus::Done && previous_status != TodoStatus::Done;
+    let settling = completed_here || (todo.status.is_settled() && !previous_status.is_settled());
 
-    // Keep the memory side in step with the replaced link set.
+    let (todo, next_recurrence) = if settling {
+        state
+            .todo_store
+            .settle_todo(&todo)
+            .map_err(AppError::Internal)?
+    } else {
+        state
+            .todo_store
+            .update_todo(&todo)
+            .map_err(AppError::Internal)?;
+        (todo, None)
+    };
+
+    let unblocked = if completed_here {
+        record_completion(&state, &req.user_id, &todo, next_recurrence.as_ref())
+    } else {
+        Vec::new()
+    };
+
+    // `related_memory_ids` has replace semantics, so the memory side has to be
+    // brought in step with the REPLACED set, not just told about additions: a
+    // memory dropped from the set keeps a back-link to this todo otherwise, and
+    // the link is then only half-dead — visible from the memory, invisible from
+    // the todo. Runs after the store write so the links being reconciled are the
+    // ones that were actually persisted, and after settlement so a recurrence
+    // rollover cannot race it.
     let added: Vec<MemoryId> = todo
         .related_memory_ids
         .iter()
@@ -1880,37 +1961,75 @@ async fn update_todo_core(
         .collect();
     sync_memory_back_links(&state, &req.user_id, &todo.id, added, removed).await?;
 
-    let update_description = {
-        let mut changes = Vec::new();
-        if req.status.is_some() {
-            changes.push(format!("status → {:?}", todo.status));
+    // Settling THROUGH this endpoint rolls a recurrence over exactly as
+    // `POST /api/todos/complete` does, and the next occurrence is a clone that
+    // copies `related_memory_ids` — so it needs its own back-links here too.
+    // Without this the two settlement doors disagree again in a way neither
+    // parent branch could have had: back-link symmetry did not exist on the
+    // branch that unified settlement, and settlement-through-update did not
+    // exist on the branch that fixed back-links.
+    if let Some(ref next_todo) = next_recurrence {
+        sync_memory_back_links(
+            &state,
+            &req.user_id,
+            &next_todo.id,
+            next_todo.related_memory_ids.clone(),
+            Vec::new(),
+        )
+        .await?;
+    }
+
+    let mut changes = Vec::new();
+    // A completion is already recorded by `record_completion` (its own comment
+    // and its own memory), so the update note covers only what else changed in
+    // the same call — "mark it done" leaves one comment behind, not two.
+    if req.status.is_some() && !completed_here {
+        changes.push(format!("status → {:?}", todo.status));
+    }
+    if req.priority.is_some() {
+        changes.push(format!("priority → {:?}", todo.priority));
+    }
+    if req.content.is_some() {
+        changes.push("content updated".to_string());
+    }
+    if req.project.is_some() {
+        changes.push(format!(
+            "project → {}",
+            project_name.as_deref().unwrap_or("none")
+        ));
+    }
+    if req.blocked_on.is_some() {
+        changes.push(format!(
+            "blocked on: {}",
+            todo.blocked_on.as_deref().unwrap_or("cleared")
+        ));
+    }
+    if recurrence_changed {
+        changes.push(match todo.recurrence {
+            Some(ref r) => format!("recurrence → {:?}", r),
+            None => "recurrence cleared".to_string(),
+        });
+    }
+    if blocked_by_changed {
+        if todo.blocked_by.is_empty() {
+            changes.push("dependencies cleared".to_string());
+        } else {
+            changes.push(format!("blocked by {} todo(s)", todo.blocked_by.len()));
         }
-        if req.priority.is_some() {
-            changes.push(format!("priority → {:?}", todo.priority));
+    }
+    let update_description = changes.join(", ");
+
+    // The audit ledger records what the request did, including the transition
+    // `record_completion` reported under its own event type.
+    let audit_description = if completed_here {
+        let status_change = format!("status → {:?}", todo.status);
+        if update_description.is_empty() {
+            status_change
+        } else {
+            format!("{status_change}, {update_description}")
         }
-        if req.content.is_some() {
-            changes.push("content updated".to_string());
-        }
-        if req.project.is_some() {
-            changes.push(format!(
-                "project → {}",
-                project_name.as_deref().unwrap_or("none")
-            ));
-        }
-        if req.blocked_on.is_some() {
-            changes.push(format!(
-                "blocked on: {}",
-                todo.blocked_on.as_deref().unwrap_or("cleared")
-            ));
-        }
-        if blocked_by_changed {
-            if todo.blocked_by.is_empty() {
-                changes.push("dependencies cleared".to_string());
-            } else {
-                changes.push(format!("blocked by {} todo(s)", todo.blocked_by.len()));
-            }
-        }
-        changes.join(", ")
+    } else {
+        update_description.clone()
     };
 
     if !update_description.is_empty() {
@@ -1944,6 +2063,7 @@ async fn update_todo_core(
             content: memory_content,
             experience_type: ExperienceType::Context,
             tags,
+            origin: MemoryOrigin::TodoLifecycle,
             ..Default::default()
         };
 
@@ -1991,7 +2111,19 @@ async fn update_todo_core(
         }
     }
 
-    let formatted = todo_formatter::format_todo_updated(&todo, project_name.as_deref());
+    // An update that completed the todo reads back as a completion, so a text
+    // client sees the next occurrence and what it unblocked rather than a bare
+    // "Updated" line that hides both.
+    let formatted = if completed_here {
+        let mut formatted = todo_formatter::format_todo_completed(&todo, next_recurrence.as_ref());
+        if !unblocked.is_empty() {
+            let ids: Vec<String> = unblocked.iter().map(|t| t.short_id()).collect();
+            formatted.push_str(&format!("\n\n  → Unblocked: {}", ids.join(", ")));
+        }
+        formatted
+    } else {
+        todo_formatter::format_todo_updated(&todo, project_name.as_deref())
+    };
 
     state.emit_event(MemoryEvent {
         event_type: "TODO_UPDATE".to_string(),
@@ -2019,10 +2151,10 @@ async fn update_todo_core(
         &format!(
             "Updated todo [{}]: {}",
             todo.short_id(),
-            if update_description.is_empty() {
+            if audit_description.is_empty() {
                 "no changes"
             } else {
-                &update_description
+                &audit_description
             }
         ),
     );
@@ -2032,7 +2164,159 @@ async fn update_todo_core(
         todo: Some(todo),
         project: None,
         formatted,
+        next_recurrence,
+        unblocked,
     }))
+}
+
+/// Everything that has to happen when a todo settles into Done, whichever
+/// endpoint settled it: the completion activity comment, the searchable
+/// completion memory, the session event, the TODO_COMPLETE stream event and
+/// the audit line. Returns the todos its completion unblocks.
+///
+/// `/complete` and `/update` with `status=done` both call this, so a
+/// completion records the same facts either way — the divergence between the
+/// two paths is what let a "done" update vanish without a trace.
+fn record_completion(
+    state: &AppState,
+    user_id: &str,
+    completed: &Todo,
+    next: Option<&Todo>,
+) -> Vec<Todo> {
+    let days_taken = (chrono::Utc::now() - completed.created_at).num_hours() as f64 / 24.0;
+    let _ = state.todo_store.add_activity(
+        user_id,
+        &completed.id,
+        format!("Marked complete after {:.1} days", days_taken),
+    );
+
+    let memory_content = format!(
+        "[{}] Todo completed: {} (took {:.1} days)",
+        completed.short_id(),
+        completed.content,
+        days_taken
+    );
+
+    let mut tags = vec![
+        format!("todo:{}", completed.short_id()),
+        "todo-completed".to_string(),
+        "completion".to_string(),
+    ];
+    if let Some(ref project_id) = completed.project_id {
+        if let Ok(Some(project)) = state.todo_store.get_project(user_id, project_id) {
+            tags.push(format!("project:{}", project.name));
+        }
+    }
+
+    let experience = Experience {
+        content: memory_content,
+        experience_type: ExperienceType::Task,
+        tags,
+        // The caller completed a todo; the server composed and stored this
+        // echo. Stamped here because settlement was consolidated into this one
+        // function AFTER the origin field landed on a sibling branch, so the
+        // stamp its predecessor carried would otherwise have been dropped and
+        // every completion echo would read `Unknown` — a value no new write is
+        // allowed to take.
+        origin: MemoryOrigin::TodoLifecycle,
+        ..Default::default()
+    };
+
+    if let Ok(memory) = state.get_user_memory(user_id) {
+        let memory_clone = memory.clone();
+        let exp_clone = experience.clone();
+        let state_clone = state.clone();
+        let user_id_owned = user_id.to_string();
+        let todo_id_for_link = completed.id.clone();
+
+        tokio::spawn(async move {
+            let memory_result = tokio::task::spawn_blocking(move || {
+                let memory_guard = memory_clone.read();
+                memory_guard.remember(exp_clone, None)
+            })
+            .await;
+
+            if let Ok(Ok(memory_id)) = memory_result {
+                if let Err(e) = state_clone.process_experience_into_graph(
+                    &user_id_owned,
+                    &experience,
+                    &memory_id,
+                    None,
+                ) {
+                    tracing::debug!(
+                        "Graph processing failed for todo completion memory {}: {}",
+                        memory_id.0,
+                        e
+                    );
+                }
+                if let Err(e) = state_clone.todo_store.add_related_memory(
+                    &user_id_owned,
+                    &todo_id_for_link,
+                    memory_id.clone(),
+                ) {
+                    tracing::debug!(
+                        "Failed to link completion memory {} to todo: {}",
+                        memory_id.0,
+                        e
+                    );
+                }
+                tracing::debug!(memory_id = %memory_id.0, "Todo completion stored as searchable memory");
+            }
+        });
+    }
+
+    // Surface todos whose dependency set is now fully satisfied —
+    // "you finished this; here is what it unblocks"
+    let unblocked = state
+        .todo_store
+        .unblocked_by_completion(user_id, &completed.id)
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Failed to compute unblocked todos");
+            Vec::new()
+        });
+
+    state.emit_event(MemoryEvent {
+        event_type: "TODO_COMPLETE".to_string(),
+        timestamp: chrono::Utc::now(),
+        user_id: user_id.to_string(),
+        memory_id: Some(completed.id.0.to_string()),
+        content_preview: Some(completed.content.clone()),
+        memory_type: Some("Done".to_string()),
+        importance: None,
+        count: None,
+        entities: None,
+        results: None,
+    });
+
+    let session_id = state.session_store.get_or_create_session(user_id);
+    state.session_store.add_event(
+        &session_id,
+        SessionEvent::TodoCompleted {
+            timestamp: chrono::Utc::now(),
+            todo_id: completed.id.0.to_string(),
+        },
+    );
+
+    tracing::info!(
+        user_id = %user_id,
+        todo_id = %completed.id,
+        has_next = next.is_some(),
+        "Completed todo"
+    );
+
+    state.log_event(
+        user_id,
+        "TODO_COMPLETE",
+        &completed.id.0.to_string(),
+        &format!(
+            "Completed todo [{}]: '{}' (recurrence={})",
+            completed.short_id(),
+            completed.content.chars().take(40).collect::<String>(),
+            next.is_some()
+        ),
+    );
+
+    unblocked
 }
 
 /// POST /api/todos/{todo_id}/complete - Mark todo as complete
@@ -2068,170 +2352,45 @@ async fn complete_todo_core(
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::TodoNotFound(todo_id.clone()))?;
 
-    let result = state
+    let (completed, next) = state
         .todo_store
         .complete_todo(&req.user_id, &todo.id)
-        .map_err(AppError::Internal)?;
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::TodoNotFound(todo_id.clone()))?;
 
-    if result.is_some() {
-        let days_taken = (chrono::Utc::now() - todo.created_at).num_hours() as f64 / 24.0;
-        let activity_msg = format!("Marked complete after {:.1} days", days_taken);
-        let _ = state
-            .todo_store
-            .add_activity(&req.user_id, &todo.id, activity_msg.clone());
+    let unblocked = record_completion(&state, &req.user_id, &completed, next.as_ref());
 
-        let memory_content = format!(
-            "[{}] Todo completed: {} (took {:.1} days)",
-            todo.short_id(),
-            todo.content,
-            days_taken
-        );
-
-        let mut tags = vec![
-            format!("todo:{}", todo.short_id()),
-            "todo-completed".to_string(),
-            "completion".to_string(),
-        ];
-        if let Some(ref project_id) = todo.project_id {
-            if let Ok(Some(project)) = state.todo_store.get_project(&req.user_id, project_id) {
-                tags.push(format!("project:{}", project.name));
-            }
-        }
-
-        let experience = Experience {
-            content: memory_content,
-            experience_type: ExperienceType::Task,
-            tags,
-            ..Default::default()
-        };
-
-        if let Ok(memory) = state.get_user_memory(&req.user_id) {
-            let memory_clone = memory.clone();
-            let exp_clone = experience.clone();
-            let state_clone = state.clone();
-            let user_id = req.user_id.clone();
-            let todo_id_for_link = todo.id.clone();
-
-            tokio::spawn(async move {
-                let memory_result = tokio::task::spawn_blocking(move || {
-                    let memory_guard = memory_clone.read();
-                    memory_guard.remember(exp_clone, None)
-                })
-                .await;
-
-                if let Ok(Ok(memory_id)) = memory_result {
-                    if let Err(e) = state_clone.process_experience_into_graph(
-                        &user_id,
-                        &experience,
-                        &memory_id,
-                        None,
-                    ) {
-                        tracing::debug!(
-                            "Graph processing failed for todo completion memory {}: {}",
-                            memory_id.0,
-                            e
-                        );
-                    }
-                    if let Err(e) = state_clone.todo_store.add_related_memory(
-                        &user_id,
-                        &todo_id_for_link,
-                        memory_id.clone(),
-                    ) {
-                        tracing::debug!(
-                            "Failed to link completion memory {} to todo: {}",
-                            memory_id.0,
-                            e
-                        );
-                    }
-                    tracing::debug!(memory_id = %memory_id.0, "Todo completion stored as searchable memory");
-                }
-            });
-        }
+    let mut formatted = todo_formatter::format_todo_completed(&completed, next.as_ref());
+    if !unblocked.is_empty() {
+        let ids: Vec<String> = unblocked.iter().map(|t| t.short_id()).collect();
+        formatted.push_str(&format!("\n\n  → Unblocked: {}", ids.join(", ")));
     }
 
-    match result {
-        Some((completed, next)) => {
-            // A recurring todo spawns its next occurrence by cloning itself,
-            // memory links included. That new todo id needs its own back-links,
-            // or the copied `related_memory_ids` would be one-sided again.
-            if let Some(ref next_todo) = next {
-                sync_memory_back_links(
-                    &state,
-                    &req.user_id,
-                    &next_todo.id,
-                    next_todo.related_memory_ids.clone(),
-                    Vec::new(),
-                )
-                .await?;
-            }
-
-            // Surface todos whose dependency set is now fully satisfied —
-            // "you finished this; here is what it unblocks"
-            let unblocked = state
-                .todo_store
-                .unblocked_by_completion(&req.user_id, &completed.id)
-                .unwrap_or_else(|e| {
-                    tracing::warn!(error = %e, "Failed to compute unblocked todos");
-                    Vec::new()
-                });
-
-            let mut formatted = todo_formatter::format_todo_completed(&completed, next.as_ref());
-            if !unblocked.is_empty() {
-                let ids: Vec<String> = unblocked.iter().map(|t| t.short_id()).collect();
-                formatted.push_str(&format!("\n\n  → Unblocked: {}", ids.join(", ")));
-            }
-
-            state.emit_event(MemoryEvent {
-                event_type: "TODO_COMPLETE".to_string(),
-                timestamp: chrono::Utc::now(),
-                user_id: req.user_id.clone(),
-                memory_id: Some(completed.id.0.to_string()),
-                content_preview: Some(completed.content.clone()),
-                memory_type: Some("Done".to_string()),
-                importance: None,
-                count: None,
-                entities: None,
-                results: None,
-            });
-
-            let session_id = state.session_store.get_or_create_session(&req.user_id);
-            state.session_store.add_event(
-                &session_id,
-                SessionEvent::TodoCompleted {
-                    timestamp: chrono::Utc::now(),
-                    todo_id: completed.id.0.to_string(),
-                },
-            );
-
-            tracing::info!(
-                user_id = %req.user_id,
-                todo_id = %completed.id,
-                has_next = next.is_some(),
-                "Completed todo"
-            );
-
-            state.log_event(
-                &req.user_id,
-                "TODO_COMPLETE",
-                &completed.id.0.to_string(),
-                &format!(
-                    "Completed todo [{}]: '{}' (recurrence={})",
-                    completed.short_id(),
-                    completed.content.chars().take(40).collect::<String>(),
-                    next.is_some()
-                ),
-            );
-
-            Ok(Json(TodoCompleteResponse {
-                success: true,
-                todo: Some(completed),
-                next_recurrence: next,
-                unblocked,
-                formatted,
-            }))
-        }
-        None => Err(AppError::TodoNotFound(todo_id)),
+    // A recurring todo spawns its next occurrence by cloning itself, memory
+    // links included. That new todo id needs its own back-links, or the copied
+    // `related_memory_ids` would point at memories that do not point back.
+    // `record_completion` owns every other completion side effect (the echo
+    // memory, the activity note, the event stream, the audit entry and the
+    // unblocked set), but it does not know about link symmetry, so the sync
+    // stays here where the next occurrence is in hand.
+    if let Some(ref next_todo) = next {
+        sync_memory_back_links(
+            &state,
+            &req.user_id,
+            &next_todo.id,
+            next_todo.related_memory_ids.clone(),
+            Vec::new(),
+        )
+        .await?;
     }
+
+    Ok(Json(TodoCompleteResponse {
+        success: true,
+        todo: Some(completed),
+        next_recurrence: next,
+        unblocked,
+        formatted,
+    }))
 }
 
 /// DELETE /api/todos/{todo_id} - Delete a todo
@@ -2316,6 +2475,7 @@ async fn delete_todo_core(
         todo: None,
         project: None,
         formatted,
+        ..Default::default()
     }))
 }
 
@@ -2394,6 +2554,7 @@ async fn reorder_todo_core(
                 todo: Some(updated),
                 project: None,
                 formatted,
+                ..Default::default()
             }))
         }
         None => Err(AppError::TodoNotFound(todo_id)),
@@ -2563,6 +2724,7 @@ pub async fn add_todo_comment(
         content: memory_content,
         experience_type,
         tags,
+        origin: MemoryOrigin::TodoLifecycle,
         ..Default::default()
     };
 
@@ -3364,5 +3526,159 @@ mod tests {
             related_todo_ids(&mem_b).is_empty(),
             "deleting a todo must remove its back-link, not leave a dangling id"
         );
+    }
+
+    /// A recurrence rollover clones the todo, `related_memory_ids` included, so
+    /// the spawned occurrence needs back-links of its own. Both settlement doors
+    /// roll a recurrence over, so both must write them.
+    ///
+    /// This case belongs to neither parent branch: back-link symmetry did not
+    /// exist on the branch that made `status=done` settle through `/update`, and
+    /// settling through `/update` did not exist on the branch that fixed
+    /// back-links. It only became reachable when they were merged, which is why
+    /// it is asserted through BOTH doors on the same fixture — a test that
+    /// exercised only `/complete` would have passed while `/update` left the
+    /// spawned occurrence's links half-dead.
+    #[tokio::test]
+    async fn a_recurrence_spawned_by_either_settlement_door_gets_its_back_links() {
+        let harness = TestHarness::new();
+        let user_id = "recurrence-backlink-user";
+
+        let source = {
+            let memory = harness.manager.get_user_memory(user_id).unwrap();
+            let guard = memory.read();
+            guard
+                .remember(
+                    Experience {
+                        content: "the plants wilt without daily water".to_string(),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap()
+        };
+
+        let related_todo_ids = |mid: &MemoryId| -> Vec<TodoId> {
+            let memory = harness.manager.get_user_memory(user_id).unwrap();
+            let guard = memory.read();
+            guard.get_memory(mid).unwrap().related_todo_ids
+        };
+
+        // `door` settles the todo it is given and returns the spawned occurrence.
+        let settle = |door: &'static str, todo_id: String| {
+            let harness = &harness;
+            async move {
+                let req = match door {
+                    "update" => test_helpers::post_json(
+                        &format!("/api/todos/{todo_id}/update"),
+                        &json!({ "user_id": user_id, "status": "done" }),
+                    ),
+                    _ => test_helpers::post_json(
+                        "/api/todos/complete",
+                        &json!({ "user_id": user_id, "todo_id": todo_id }),
+                    ),
+                };
+                let (status, body) = test_helpers::send(harness.router(), req).await;
+                assert_eq!(status, StatusCode::OK, "{door}: {body}");
+                let next = body["next_recurrence"]["id"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{door} must spawn a next occurrence: {body}"))
+                    .to_string();
+                next
+            }
+        };
+
+        let req = test_helpers::post_json(
+            "/api/todos/add",
+            &json!({
+                "user_id": user_id,
+                "content": "Water the plants",
+                "recurrence": "daily",
+                "due_date": "today",
+                "related_memory_ids": [source.0.to_string()],
+            }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let first = body["todo"]["id"].as_str().unwrap().to_string();
+
+        // Door 1: PUT-style update to `done`.
+        let second = settle("update", first).await;
+        let second_id = TodoId(second.parse().unwrap());
+        assert!(
+            related_todo_ids(&source).contains(&second_id),
+            "settling through /update must give the spawned occurrence a \
+             memory-side back-link; it inherited related_memory_ids"
+        );
+
+        // Door 2: the dedicated completion endpoint, on the occurrence door 1
+        // produced — so the two doors are exercised in one chain.
+        let third = settle("complete", second).await;
+        let third_id = TodoId(third.parse().unwrap());
+        assert!(
+            related_todo_ids(&source).contains(&third_id),
+            "settling through /complete must give the spawned occurrence a \
+             memory-side back-link"
+        );
+    }
+}
+
+#[cfg(test)]
+mod reminder_read_purity_tests {
+    //! `/api/reminders/due` and `/api/reminders/check` used to default
+    //! `mark_triggered` to TRUE, so a caller that simply omitted the field —
+    //! the natural thing to do when reading — flipped every reminder it saw
+    //! from `Pending` to `Triggered`.
+    //!
+    //! That is not just a status change. The 60-second scheduler in
+    //! `AppState::check_and_emit_due_reminders` is what actually delivers a
+    //! reminder to the user, and it emits `REMINDER_DUE` only for tasks whose
+    //! `mark_triggered` returns `Ok(true)` — i.e. only for tasks still
+    //! `Pending`. Anything a read had already marked was skipped with a debug
+    //! line, so polling `/due` to *display* pending reminders consumed the very
+    //! notification the poller exists to deliver, and the user was never told.
+    //!
+    //! A read is now a read: mutation requires `mark_triggered: true`
+    //! explicitly. `proactive_context` already reads due tasks without marking
+    //! them (`handlers/recall.rs`), which is the behaviour these endpoints now
+    //! match.
+
+    use super::*;
+
+    #[test]
+    fn due_reminders_request_defaults_to_a_pure_read() {
+        let req: GetDueRemindersRequest =
+            serde_json::from_str(r#"{"user_id":"claude-code"}"#).expect("deserialize");
+        assert!(
+            !req.mark_triggered,
+            "omitting mark_triggered made /api/reminders/due a mutating read, \
+             consuming the notification the scheduler owes the user"
+        );
+    }
+
+    #[test]
+    fn context_reminders_request_defaults_to_a_pure_read() {
+        let req: CheckContextRemindersRequest =
+            serde_json::from_str(r#"{"user_id":"claude-code","context":"deploying"}"#)
+                .expect("deserialize");
+        assert!(
+            !req.mark_triggered,
+            "omitting mark_triggered made /api/reminders/check a mutating read"
+        );
+    }
+
+    #[test]
+    fn explicit_mark_triggered_still_opts_in() {
+        let due: GetDueRemindersRequest =
+            serde_json::from_str(r#"{"user_id":"u","mark_triggered":true}"#).expect("deserialize");
+        assert!(
+            due.mark_triggered,
+            "acknowledging a reminder must still be possible, explicitly"
+        );
+
+        let ctx: CheckContextRemindersRequest =
+            serde_json::from_str(r#"{"user_id":"u","context":"c","mark_triggered":true}"#)
+                .expect("deserialize");
+        assert!(ctx.mark_triggered);
     }
 }

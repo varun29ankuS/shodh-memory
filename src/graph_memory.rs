@@ -195,7 +195,35 @@ fn default_salience() -> f32 {
 ///
 /// New variants are additive only — never remove existing variants to
 /// maintain backward compatibility with MessagePack-serialized data.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+///
+/// # Wire format: variants are addressed by DECLARATION INDEX
+///
+/// Postcard encodes an enum as the varint index of its variant in declaration
+/// order, so "additive only" is not enough — a variant may only be appended
+/// AFTER every variant that already exists. Inserting one anywhere else
+/// renumbers every variant below it, and every stored record that used one of
+/// them now names a different variant.
+///
+/// That happened here. `c365eef3` (2026-07-11, "extend coarse EntityLabel to
+/// the 18-type schema rollup") inserted `Norp` … `Time` *above* `Other(String)`,
+/// moving `Other` from index 23 to index 35. Stored nodes written before it
+/// encode `Other("MISC")` as `0x17` + the string; read back under the new
+/// declaration, `0x17` is `Norp` — a UNIT variant — so the string's length
+/// prefix and bytes are consumed by whatever field follows (`created_at`, whose
+/// chrono deserializer then reports `Serde Deserialization Error` on "MISC"),
+/// and the rest of the node is garbage. On a live 9,215-node graph that is
+/// **6,821 nodes (74%) unreadable**.
+///
+/// `RelationType` got this right: `Precedes` was appended AFTER
+/// `Custom(String)` precisely so `Custom`'s index could not move, and there is a
+/// test pinning it to hand-derived bytes. Do the same here — append below
+/// `Other`, never above it.
+///
+/// The 07-11 renumbering is not undone (that would break every node written
+/// since, which the same reasoning protects). Instead
+/// [`EntityLabelWireGeneration`] lets the decoder retry a node under the
+/// pre-07-11 numbering.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
 pub enum EntityLabel {
     Person,
     Organization,
@@ -260,6 +288,224 @@ pub enum EntityLabel {
     /// Times of day / durations, distinct from calendar `Date` (schema coarse: `time`)
     Time,
     Other(String),
+    // APPEND NEW VARIANTS BELOW THIS LINE, never above `Other` — see the
+    // wire-format note on this enum. `Other`'s index has already moved once
+    // (23 → 35) and cost 74% of a live graph.
+}
+
+/// Which numbering of [`EntityLabel`]'s variants the current thread is decoding.
+///
+/// See the wire-format note on [`EntityLabel`] for why two numberings exist. The
+/// mechanism mirrors [`crate::memory::types::NerWireGeneration`]: a thread-local
+/// set only by [`decode_entity_node`], for the duration of one synchronous
+/// `postcard::from_bytes` call, affecting deserialization only. Writes are
+/// always current-generation, so a node read through the legacy path and
+/// rewritten comes back in today's numbering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntityLabelWireGeneration {
+    /// Today's declaration order: `Other(String)` at index 35.
+    Current,
+    /// The order written before `c365eef3` (2026-07-11): the first 23 variants
+    /// unchanged, `Other(String)` at index 23, and nothing above it.
+    PreSchemaRollup,
+}
+
+thread_local! {
+    static ENTITY_LABEL_WIRE_GENERATION: std::cell::Cell<EntityLabelWireGeneration> =
+        const { std::cell::Cell::new(EntityLabelWireGeneration::Current) };
+}
+
+/// Restores the previous [`EntityLabelWireGeneration`] when dropped.
+#[must_use = "the generation is restored when this guard drops, so it must be held \
+              for the duration of the decode"]
+pub struct EntityLabelWireGenerationGuard(EntityLabelWireGeneration);
+
+impl EntityLabelWireGeneration {
+    /// Decode `EntityLabel` under this numbering until the returned guard drops.
+    pub fn enter(self) -> EntityLabelWireGenerationGuard {
+        let previous = ENTITY_LABEL_WIRE_GENERATION.with(|g| g.replace(self));
+        EntityLabelWireGenerationGuard(previous)
+    }
+
+    /// The numbering the current thread is decoding under.
+    pub fn current() -> Self {
+        ENTITY_LABEL_WIRE_GENERATION.with(|g| g.get())
+    }
+}
+
+impl Drop for EntityLabelWireGenerationGuard {
+    fn drop(&mut self) {
+        ENTITY_LABEL_WIRE_GENERATION.with(|g| g.set(self.0));
+    }
+}
+
+/// `EntityLabel` as declared before `c365eef3` renumbered it.
+///
+/// Only the ORDER matters — this is what postcard reads indices against. The
+/// twin is spelled out rather than generated so that a future edit to
+/// `EntityLabel` cannot silently change what "the old numbering" means.
+#[derive(Deserialize)]
+#[serde(rename = "EntityLabel")]
+enum EntityLabelPreSchemaRollup {
+    Person,
+    Organization,
+    Location,
+    Technology,
+    Concept,
+    Event,
+    Date,
+    Product,
+    Skill,
+    Keyword,
+    Project,
+    Task,
+    Document,
+    Repository,
+    Service,
+    Database,
+    Metric,
+    Configuration,
+    Environment,
+    Pipeline,
+    Team,
+    Role,
+    Module,
+    Other(String),
+}
+
+impl From<EntityLabelPreSchemaRollup> for EntityLabel {
+    fn from(legacy: EntityLabelPreSchemaRollup) -> Self {
+        use EntityLabelPreSchemaRollup as L;
+        match legacy {
+            L::Person => Self::Person,
+            L::Organization => Self::Organization,
+            L::Location => Self::Location,
+            L::Technology => Self::Technology,
+            L::Concept => Self::Concept,
+            L::Event => Self::Event,
+            L::Date => Self::Date,
+            L::Product => Self::Product,
+            L::Skill => Self::Skill,
+            L::Keyword => Self::Keyword,
+            L::Project => Self::Project,
+            L::Task => Self::Task,
+            L::Document => Self::Document,
+            L::Repository => Self::Repository,
+            L::Service => Self::Service,
+            L::Database => Self::Database,
+            L::Metric => Self::Metric,
+            L::Configuration => Self::Configuration,
+            L::Environment => Self::Environment,
+            L::Pipeline => Self::Pipeline,
+            L::Team => Self::Team,
+            L::Role => Self::Role,
+            L::Module => Self::Module,
+            L::Other(s) => Self::Other(s),
+        }
+    }
+}
+
+/// `EntityLabel` as declared today. Deriving on a twin keeps the current path
+/// byte-identical to the derived impl it replaced.
+#[derive(Deserialize)]
+#[serde(rename = "EntityLabel")]
+enum EntityLabelCurrent {
+    Person,
+    Organization,
+    Location,
+    Technology,
+    Concept,
+    Event,
+    Date,
+    Product,
+    Skill,
+    Keyword,
+    Project,
+    Task,
+    Document,
+    Repository,
+    Service,
+    Database,
+    Metric,
+    Configuration,
+    Environment,
+    Pipeline,
+    Team,
+    Role,
+    Module,
+    Norp,
+    Gpe,
+    Facility,
+    Vehicle,
+    Weapon,
+    Work,
+    Law,
+    Title,
+    Cyber,
+    Money,
+    Quantity,
+    Time,
+    Other(String),
+}
+
+impl From<EntityLabelCurrent> for EntityLabel {
+    fn from(current: EntityLabelCurrent) -> Self {
+        use EntityLabelCurrent as L;
+        match current {
+            L::Person => Self::Person,
+            L::Organization => Self::Organization,
+            L::Location => Self::Location,
+            L::Technology => Self::Technology,
+            L::Concept => Self::Concept,
+            L::Event => Self::Event,
+            L::Date => Self::Date,
+            L::Product => Self::Product,
+            L::Skill => Self::Skill,
+            L::Keyword => Self::Keyword,
+            L::Project => Self::Project,
+            L::Task => Self::Task,
+            L::Document => Self::Document,
+            L::Repository => Self::Repository,
+            L::Service => Self::Service,
+            L::Database => Self::Database,
+            L::Metric => Self::Metric,
+            L::Configuration => Self::Configuration,
+            L::Environment => Self::Environment,
+            L::Pipeline => Self::Pipeline,
+            L::Team => Self::Team,
+            L::Role => Self::Role,
+            L::Module => Self::Module,
+            L::Norp => Self::Norp,
+            L::Gpe => Self::Gpe,
+            L::Facility => Self::Facility,
+            L::Vehicle => Self::Vehicle,
+            L::Weapon => Self::Weapon,
+            L::Work => Self::Work,
+            L::Law => Self::Law,
+            L::Title => Self::Title,
+            L::Cyber => Self::Cyber,
+            L::Money => Self::Money,
+            L::Quantity => Self::Quantity,
+            L::Time => Self::Time,
+            L::Other(s) => Self::Other(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EntityLabel {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match EntityLabelWireGeneration::current() {
+            EntityLabelWireGeneration::Current => {
+                EntityLabelCurrent::deserialize(deserializer).map(Into::into)
+            }
+            EntityLabelWireGeneration::PreSchemaRollup => {
+                EntityLabelPreSchemaRollup::deserialize(deserializer).map(Into::into)
+            }
+        }
+    }
 }
 
 impl EntityLabel {
@@ -391,43 +637,64 @@ impl EntityLabel {
     }
 }
 
-/// Classify a tag string into a richer `EntityLabel`.
+/// The ontological class a curated identifier rule recognises in `tag`, or
+/// `None` when no rule fires.
 ///
-/// Tags are short, user-supplied descriptors (e.g. "production", "rocksdb",
-/// "config.toml"). This maps them onto the ontology so they participate in
-/// type-aware spreading activation and hierarchy matching during retrieval.
-/// Shared by every ingest path so a tag receives the same label whether it
-/// arrives via `remember`, an integration sync, or an `upsert`.
-pub fn classify_tag_label(tag: &str) -> EntityLabel {
+/// Tags are short descriptors that arrive with a memory (`"rocksdb"`,
+/// `"config.toml"`, `"auth-service"`). The rules below are a *curated identifier
+/// table*: each one recognises a naming convention that denotes a specific
+/// artifact — a named product, a file, a service. When one fires, the tag names
+/// a thing and the caller may treat it as an entity.
+///
+/// `None` is the honest answer for everything else, and it is load-bearing:
+/// [`crate::handlers::state::AppState::process_experience_into_graph`] admits a
+/// tag to the knowledge graph only when a rule here recognises it. A tag no rule
+/// recognises is a *keyword* — it describes the memory without naming anything —
+/// and keywords stay in `experience.tags` for search and `recall_by_tags`
+/// instead of becoming graph nodes.
+///
+/// Every rule matches on a whole tag or a whole trailing token, never on a bare
+/// substring. A substring rule silently reclassifies ordinary prose: `contains(
+/// "config")` turned the phrase "stobar configuration" into a `Configuration`
+/// entity on a corpus of aircraft-carrier documents, which is how a keyword
+/// matcher for developer tags ends up asserting an ontology over text it knows
+/// nothing about.
+pub fn recognised_tag_label(tag: &str) -> Option<EntityLabel> {
     let lower = tag.to_lowercase();
 
-    // Deployment / environment indicators
+    /// Whether `lower` is exactly `word`, or ends with `word` after a `-`, `_`
+    /// or space separator ("deploy-workflow" → "workflow", but "workflows" and
+    /// "workflow engine notes" → no match).
+    fn is_trailing_token(lower: &str, word: &str) -> bool {
+        if lower == word {
+            return true;
+        }
+        lower
+            .strip_suffix(word)
+            .is_some_and(|prefix| prefix.ends_with(['-', '_', ' ']))
+    }
+
+    // Named platforms and cloud providers. Deliberately excludes the deployment
+    // *lifecycle* words this list used to carry — "production", "staging",
+    // "dev", "development", "ci", "cd", "container". Those are English common
+    // nouns for a phase of work, not names of things: on a deployment log they
+    // read as environments, but on any other corpus they are ordinary prose, and
+    // classifying them assigns an ontological class to a word that denotes no
+    // referent at all. They fall through to `None` and stay keywords.
     if matches!(
         lower.as_str(),
-        "production"
-            | "staging"
-            | "dev"
-            | "development"
-            | "ci"
-            | "cd"
-            | "kubernetes"
-            | "k8s"
-            | "docker"
-            | "container"
-            | "aws"
-            | "gcp"
-            | "azure"
+        "kubernetes" | "k8s" | "docker" | "aws" | "gcp" | "azure"
     ) {
-        return EntityLabel::Environment;
+        return Some(EntityLabel::Environment);
     }
 
     // Pipeline / workflow indicators
-    if lower.contains("pipeline")
-        || lower.contains("workflow")
-        || lower.contains("ci-cd")
-        || lower.contains("cicd")
+    if is_trailing_token(&lower, "pipeline")
+        || is_trailing_token(&lower, "workflow")
+        || lower == "ci-cd"
+        || lower == "cicd"
     {
-        return EntityLabel::Pipeline;
+        return Some(EntityLabel::Pipeline);
     }
 
     // Database / storage indicators
@@ -448,7 +715,7 @@ pub fn classify_tag_label(tag: &str) -> EntityLabel {
         || lower.ends_with("-db")
         || lower.ends_with("_db")
     {
-        return EntityLabel::Database;
+        return Some(EntityLabel::Database);
     }
 
     // Service / API indicators (suffix-only to avoid "my-api-docs" false positives)
@@ -460,17 +727,17 @@ pub fn classify_tag_label(tag: &str) -> EntityLabel {
         || lower.ends_with("_server")
         || lower.ends_with("-daemon")
     {
-        return EntityLabel::Service;
+        return Some(EntityLabel::Service);
     }
 
     // Documentation indicators (check before module — README.md is a doc, not a module)
     if lower.ends_with(".md")
-        || lower.contains("readme")
-        || lower.contains("runbook")
+        || is_trailing_token(&lower, "readme")
+        || is_trailing_token(&lower, "runbook")
         || lower.ends_with("-rfc")
         || lower.ends_with("-spec")
     {
-        return EntityLabel::Document;
+        return Some(EntityLabel::Document);
     }
 
     // Configuration indicators
@@ -479,9 +746,9 @@ pub fn classify_tag_label(tag: &str) -> EntityLabel {
         || lower.ends_with(".yml")
         || lower.ends_with(".env")
         || lower.ends_with(".json")
-        || lower.contains("config")
+        || is_trailing_token(&lower, "config")
     {
-        return EntityLabel::Configuration;
+        return Some(EntityLabel::Configuration);
     }
 
     // Module / library indicators
@@ -492,24 +759,70 @@ pub fn classify_tag_label(tag: &str) -> EntityLabel {
         || lower.ends_with("-lib")
         || lower.ends_with("_lib")
     {
-        return EntityLabel::Module;
+        return Some(EntityLabel::Module);
     }
 
-    // Default: Concept — an honest "we did not recognise this".
+    // Nothing recognised the tag.
     //
-    // This used to fall through to `Technology`, which is a CLAIM, not a
-    // default: every unrecognised tag asserted a specific ontological class.
-    // The rules above are a dev-ops keyword matcher (kubernetes, postgres,
-    // ci-cd, …), so on any corpus that is not about infrastructure almost
-    // everything reaches this line — and the graph renders a uniform wall of
-    // "Technology" nodes under a legend that promises an ontology. A visibly
-    // wrong type is worse than a visibly absent one: it is indistinguishable
-    // from a confident correct answer.
+    // This used to fall through to a label — first `Technology`, then `Concept`
+    // — and either way the caller wrote a graph node for it. A label is a CLAIM,
+    // and the rules above are a curated table of developer naming conventions,
+    // so on any corpus that is not about infrastructure almost every tag reaches
+    // this line. `Technology` made the graph assert a class it could not
+    // support; `Concept` was honest about the type but still asserted that the
+    // string *is an entity*, which is the larger claim and the wrong one — YAKE
+    // keyphrases ("empty weight", "control system"), source filenames and
+    // taxonomy codes all arrive here.
     //
-    // `Concept` is the same label the NER path already uses for entities whose
-    // class it could not resolve (`NerEntityType::Misc`), so unrecognised
-    // surfaces from both paths now agree instead of disagreeing.
-    EntityLabel::Concept
+    // Returning `None` moves the decision to the caller, which declines to
+    // create a node at all. See the tag phase in
+    // `process_experience_into_graph`.
+    None
+}
+
+/// Move the label implied by `fine_type` to the front of `labels`.
+///
+/// Position 0 of `labels` is the entity's type everywhere it is rendered — the
+/// graph payload, the universe view, the MIF export and the UI legend all read
+/// `labels.first()`. But the merge in [`GraphMemory::add_entity`] orders labels
+/// by *recency*: the incoming mention's labels lead and the stored node's are
+/// appended behind them. Recency is not authority.
+///
+/// The consequence was a graph that rendered the weakest guess it held. An
+/// entity GLiNER had typed from the sentence it appeared in — `"Baltimore"`,
+/// fine type `city`, coarse `Gpe` — would be re-mentioned by a later phase that
+/// only pattern-matches a bare string (the tag phase, fact consolidation, an
+/// integration sync). That phase contributes a label of its own, it lands at
+/// position 0 because it was written last, and every surface downstream reports
+/// it as the entity's type. The typed answer survived in the vector, one
+/// position out of sight. Whole corpora rendered as a single class this way,
+/// and the histogram of `labels[0]` looked exactly like a typer that had
+/// collapsed — while the typer had in fact been right.
+///
+/// `fine_type` is the discriminator, because it is set only by the schema-driven
+/// typer (`crate::entity_type`) and never by a keyword rule. When it is present,
+/// its coarse rollup is by construction the typed answer for this entity, so it
+/// leads. When it is absent nothing here claims to know better, and the existing
+/// order stands.
+///
+/// Idempotent: re-applying it to an already-ordered vector is a no-op, so it is
+/// safe to run on every write.
+fn lead_with_fine_typed_label(entity: &mut EntityNode) {
+    let Some(fine) = entity.fine_type.as_deref() else {
+        return;
+    };
+    // An off-schema fine type has no defensible rollup — abstain rather than
+    // inventing `Other(..)` and promoting it over a real observed label.
+    let Some(coarse_id) = crate::entity_type::coarse_of(fine) else {
+        return;
+    };
+    let authoritative = EntityLabel::from_coarse_id(coarse_id);
+
+    if entity.labels.first() == Some(&authoritative) {
+        return;
+    }
+    entity.labels.retain(|label| label != &authoritative);
+    entity.labels.insert(0, authoritative);
 }
 
 /// Memory tier for edge consolidation
@@ -1131,11 +1444,52 @@ fn kb_identities_permit_merge(canonical: Option<&str>, member: Option<&str>) -> 
     }
 }
 
-/// Decode a stored `EntityNode`, tolerating legacy records written before trailing
-/// fields (e.g. `selectivity`, `fine_type`) existed. See [`crate::serialization::try_decode_compat`].
+/// Decode a stored `EntityNode`, tolerating both compatible-change classes the
+/// stored format has accumulated.
+///
+/// 1. **Missing trailing fields** (`selectivity`, `fine_type`, `kb_id`) —
+///    repaired by [`ENTITY_NODE_DEFAULT_SUFFIX`] via
+///    [`crate::serialization::try_decode_compat`].
+/// 2. **`EntityLabel`'s renumbered variants** — a node whose `labels` carry
+///    `Other(String)` written before 2026-07-11 encodes it at index 23, which
+///    today names the unit variant `Norp`. No suffix can repair that: the bytes
+///    are not missing, they are being read as the wrong field. See the
+///    wire-format note on [`EntityLabel`].
+///
+/// The second class is recovered by retrying under
+/// [`EntityLabelWireGeneration::PreSchemaRollup`]. The retry runs only after the
+/// current numbering has failed, so a node written today never pays for it, and
+/// the error surfaced on total failure is the current-numbering one.
+///
+/// A node recovered through the retry reports `needs_migration = true`, so
+/// callers that rewrite on migration put it back in today's numbering.
 fn decode_entity_node(data: &[u8]) -> Result<(EntityNode, bool)> {
-    crate::serialization::try_decode_compat::<EntityNode>(data, ENTITY_NODE_DEFAULT_SUFFIX)
+    let current_err = match crate::serialization::try_decode_compat::<EntityNode>(
+        data,
+        ENTITY_NODE_DEFAULT_SUFFIX,
+    ) {
+        Ok(decoded) => return Ok(decoded),
+        Err(e) => e,
+    };
+
+    let _generation = EntityLabelWireGeneration::PreSchemaRollup.enter();
+    match crate::serialization::try_decode_compat::<EntityNode>(data, ENTITY_NODE_DEFAULT_SUFFIX) {
+        Ok((entity, _)) => Ok((entity, true)),
+        Err(_) => Err(current_err),
+    }
 }
+
+/// [`decode_entity_node`] exposed to the read-only integrity scrub.
+///
+/// The scrub must classify graph nodes through the *same* decoder that serves
+/// reads — a second copy would drift, and then the scrub would be measuring a
+/// decoder nobody uses. Returns `(node, needs_migration)`.
+pub(crate) fn decode_entity_node_for_scrub(data: &[u8]) -> Result<(EntityNode, bool)> {
+    decode_entity_node(data)
+}
+
+/// Name of the column family holding entity nodes, for the read-only scrub.
+pub(crate) const ENTITIES_CF_NAME: &str = CF_ENTITIES;
 
 fn default_last_activated() -> DateTime<Utc> {
     Utc::now()
@@ -2541,6 +2895,19 @@ impl GraphMemory {
         &self.db
     }
 
+    /// An owned handle to the graph database, so a long read-only pass can run
+    /// without holding the `RwLock` that guards this `GraphMemory`.
+    ///
+    /// [`Self::get_db`] returns a borrow, which keeps the guard alive for the
+    /// duration of the pass. Graph writers take `.write()` on that lock, and
+    /// parking_lot prefers writers, so one multi-second scrub holding a read
+    /// guard would stall every subsequent reader behind the blocked writer.
+    /// RocksDB handles are internally synchronised; the lock is not what makes
+    /// this database safe to read. Used by [`crate::integrity`].
+    pub(crate) fn db_arc(&self) -> Arc<DB> {
+        Arc::clone(&self.db)
+    }
+
     // Column family accessors — cheap HashMap lookups on DB internals
     fn entities_cf(&self) -> &ColumnFamily {
         self.db
@@ -3042,7 +3409,18 @@ impl GraphMemory {
             last_seen_at: now,
             mention_count: 1,
             summary: String::new(),
-            attributes: HashMap::new(),
+            // Provenance, matching the phases in `process_experience_into_graph`
+            // (`ner`, `tag-declared`, `tag-identifier`, `acronym`, `issue-id`).
+            // These nodes are lemmas by design — the spine reuses one node per
+            // event type so repeated events collapse — so from the outside they
+            // look exactly like the keyphrase nodes the ingest now refuses, and
+            // without this marker an entity-quality audit cannot tell a
+            // deliberate event node from a leak.
+            attributes: {
+                let mut a = HashMap::new();
+                a.insert("source".to_string(), "causal-spine".to_string());
+                a
+            },
             name_embedding: None,
             salience: EntityExtractor::calculate_base_salience(&EntityLabel::Event, false),
             is_proper_noun: false,
@@ -3810,6 +4188,11 @@ impl GraphMemory {
             entity.mention_count = 1;
             is_new_entity = true;
         }
+
+        // Order the merged labels by authority before anything reads them.
+        // MUST run before the `kb::stamp` call below, which is a function of
+        // `labels` and therefore of which label leads.
+        lead_with_fine_typed_label(&mut entity);
 
         // Stamp the real-world identity. Free of extra I/O — the node is about to
         // be written anyway — and a pure function of (name, labels), so a
@@ -5672,6 +6055,9 @@ impl GraphMemory {
         let mut all_entities: Vec<TraversedEntity> = Vec::new();
         let mut all_edges = Vec::new();
         let mut edges_to_strengthen = Vec::new();
+        // Neighbours skipped because their stored node could not be decoded.
+        // Logged and summarised rather than propagated — see the skip site below.
+        let mut unreadable_neighbours = 0usize;
 
         visited_entities.insert(*start_uuid);
         if let Some(entity) = self.get_entity(start_uuid)? {
@@ -5737,12 +6123,28 @@ impl GraphMemory {
                         let next_hop = depth + 1;
                         let decay = hop_decay_factor.powi(next_hop as i32);
 
-                        if let Some(entity) = self.get_entity(&connected_uuid)? {
-                            all_entities.push(TraversedEntity {
+                        // A NEIGHBOUR that cannot be decoded costs the traversal
+                        // that one node, not the whole request. The starting
+                        // entity is different — it is what the caller asked for,
+                        // so `get_entity` there stays strict and the request
+                        // fails honestly. Here, propagating would let any single
+                        // unreadable node in the graph fail every traversal that
+                        // happens to reach it.
+                        match self.get_entity(&connected_uuid) {
+                            Ok(Some(entity)) => all_entities.push(TraversedEntity {
                                 entity,
                                 hop_distance: next_hop,
                                 decay_factor: decay,
-                            });
+                            }),
+                            Ok(None) => {}
+                            Err(e) => {
+                                unreadable_neighbours += 1;
+                                tracing::warn!(
+                                    uuid = %connected_uuid,
+                                    error = %e,
+                                    "traversal skipped a neighbour whose node could not be decoded"
+                                );
+                            }
                         }
                         next_level.push((connected_uuid, next_hop));
                     }
@@ -5770,6 +6172,15 @@ impl GraphMemory {
                     tracing::debug!("Failed to batch strengthen synapses: {}", e);
                 }
             }
+        }
+
+        if unreadable_neighbours > 0 {
+            tracing::warn!(
+                skipped = unreadable_neighbours,
+                start = %start_uuid,
+                "traversal completed with unreadable neighbours skipped — the \
+                 returned subgraph is incomplete"
+            );
         }
 
         Ok(GraphTraversal {
@@ -6295,7 +6706,7 @@ impl GraphMemory {
     /// flood (measured ~80% of graph edges, bypassing the ingest gates, unbounded
     /// with query volume — the OOM driver). Mirrors schema-gated consolidation:
     /// usage strengthens existing structure, it does not wire every co-activation.
-    fn record_memory_coactivation_impl(
+    pub(crate) fn record_memory_coactivation_impl(
         &self,
         memory_ids: &[Uuid],
         strengthen_only: bool,
@@ -7258,7 +7669,7 @@ impl GraphMemory {
         let mut orphaned_entity_ids = Vec::new();
         for entity_uuid in &orphan_candidates {
             let remaining = self.get_entity_relationships(entity_uuid)?;
-            if remaining.is_empty() {
+            if remaining.is_empty() && !self.is_typer_committed(entity_uuid) {
                 orphaned_entity_ids.push(entity_uuid.to_string());
                 if let Err(e) = self.delete_entity(entity_uuid) {
                     tracing::warn!("Failed to delete orphaned entity {}: {}", entity_uuid, e);
@@ -7490,6 +7901,34 @@ impl GraphMemory {
         Ok(stats)
     }
 
+    /// Whether the schema-driven typer committed a span for this entity.
+    ///
+    /// Used by the orphan sweeps to decide whether an edgeless entity should be
+    /// deleted. Losing every edge is not evidence that the entity does not
+    /// exist: an edge is a claim about a RELATIONSHIP and decays on its own
+    /// schedule, while the entity is a claim that the corpus names a thing —
+    /// and the typer made that claim from a committed span. Deleting the node
+    /// discards the extraction. The text still says "the Indian Navy
+    /// commissioned INS Vikrant"; after the sweep the graph no longer knows the
+    /// Indian Navy exists.
+    ///
+    /// This was invisible while the ingest admitted keyphrases as entities:
+    /// every real entity co-occurred with a crowd of tag nodes, so it always
+    /// kept an edge and never reached the orphan branch. Admitting only what an
+    /// authority vouches for makes the graph sparser, and on `defence-live` the
+    /// first maintenance cycle after a rebuild took it from 1,061 entities to
+    /// 774 — with the Indian Navy, Pinaka, Mazagon Dock and the Indian Ocean
+    /// among the losses.
+    ///
+    /// `fine_type` is the discriminator, the same one the label-authority fix
+    /// uses: it is set only by `crate::entity_type`'s schema, never by a keyword
+    /// rule and never by a caller. Entities without one — acronyms, causal-spine
+    /// event lemmas, caller-declared tags — stay collectable, so this narrows
+    /// the sweep rather than switching it off.
+    fn is_typer_committed(&self, uuid: &Uuid) -> bool {
+        matches!(self.get_entity(uuid), Ok(Some(e)) if e.fine_type.is_some())
+    }
+
     /// Flush pending maintenance from opportunistic pruning queues.
     ///
     /// Called every maintenance cycle (5 min). Instead of scanning all 34k+ edges,
@@ -7522,7 +7961,7 @@ impl GraphMemory {
         let mut orphaned_entity_ids = Vec::new();
         for entity_uuid in &orphan_candidates {
             let remaining = self.get_entity_relationships(entity_uuid)?;
-            if remaining.is_empty() {
+            if remaining.is_empty() && !self.is_typer_committed(entity_uuid) {
                 orphaned_entity_ids.push(entity_uuid.to_string());
                 if let Err(e) = self.delete_entity(entity_uuid) {
                     tracing::warn!("Failed to delete orphaned entity {}: {}", entity_uuid, e);
@@ -9994,6 +10433,145 @@ mod tests {
         }
     }
 
+    /// A named entity node carrying an explicit label set and fine type — the
+    /// shape the label-authority tests need.
+    fn typed_entity(name: &str, labels: Vec<EntityLabel>, fine_type: Option<&str>) -> EntityNode {
+        EntityNode {
+            labels,
+            fine_type: fine_type.map(str::to_string),
+            is_proper_noun: true,
+            ..universe_entity(name)
+        }
+    }
+
+    /// REGRESSION — the entity-typing collapse.
+    ///
+    /// A corpus of 1,008 defence entities rendered 831 of them as `Technology`
+    /// on a graph whose typer cannot emit that label at all: `Technology` is not
+    /// one of the 18 coarse classes `from_coarse_id` maps to. The typed answer
+    /// was present the whole time, one position behind a label contributed by a
+    /// later, weaker phase — and `labels.first()` is what every renderer reads.
+    ///
+    /// This is that sequence: GLiNER types "Baltimore" as a city, then a tag /
+    /// consolidation re-mention of the same surface arrives carrying a guess.
+    /// The guess must not become the entity's type.
+    #[test]
+    fn fine_typed_label_leads_after_an_untyped_re_mention() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(dir.path(), None).unwrap();
+
+        graph
+            .add_entity(typed_entity(
+                "Baltimore",
+                vec![EntityLabel::Gpe],
+                Some("city"),
+            ))
+            .unwrap();
+
+        // The re-mention: same surface, no fine type, a keyword-matched guess.
+        graph
+            .add_entity(typed_entity(
+                "Baltimore",
+                vec![EntityLabel::Technology],
+                None,
+            ))
+            .unwrap();
+
+        let stored = graph
+            .find_entity_by_name("Baltimore")
+            .unwrap()
+            .expect("Baltimore must exist after two mentions");
+
+        assert_eq!(
+            stored.fine_type.as_deref(),
+            Some("city"),
+            "the re-mention carried no fine type and must not have wiped one"
+        );
+        assert_eq!(
+            stored.labels.first(),
+            Some(&EntityLabel::Gpe),
+            "the fine-typed answer must lead the label vector; got {:?}",
+            stored.labels
+        );
+        assert!(
+            stored.labels.contains(&EntityLabel::Technology),
+            "ordering must not discard observed labels, only rank them: {:?}",
+            stored.labels
+        );
+    }
+
+    /// The promotion must not duplicate a label that is already present, and
+    /// must be stable under repeated writes — `add_entity` runs on every single
+    /// mention, so a non-idempotent rewrite would grow the vector without bound.
+    #[test]
+    fn label_authority_is_idempotent_across_re_mentions() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(dir.path(), None).unwrap();
+
+        for _ in 0..5 {
+            graph
+                .add_entity(typed_entity(
+                    "Bangalore",
+                    vec![EntityLabel::Technology],
+                    Some("city"),
+                ))
+                .unwrap();
+        }
+
+        let stored = graph
+            .find_entity_by_name("Bangalore")
+            .unwrap()
+            .expect("Bangalore must exist");
+
+        assert_eq!(stored.labels.first(), Some(&EntityLabel::Gpe));
+        assert_eq!(
+            stored.labels.len(),
+            2,
+            "five mentions must yield {{Gpe, Technology}}, not a growing vector: {:?}",
+            stored.labels
+        );
+        assert_eq!(
+            stored
+                .labels
+                .iter()
+                .filter(|l| **l == EntityLabel::Gpe)
+                .count(),
+            1,
+            "the promoted label must appear exactly once: {:?}",
+            stored.labels
+        );
+    }
+
+    /// An entity with no fine type carries no authority signal, so the helper
+    /// must leave its labels exactly as the merge produced them. Without this,
+    /// "order by authority" would quietly become "reorder everything".
+    #[test]
+    fn label_order_is_untouched_without_a_fine_type() {
+        let mut entity = typed_entity(
+            "unclassified thing",
+            vec![EntityLabel::Concept, EntityLabel::Technology],
+            None,
+        );
+        let before = entity.labels.clone();
+        lead_with_fine_typed_label(&mut entity);
+        assert_eq!(entity.labels, before);
+    }
+
+    /// A fine type that is not in the schema has no defensible coarse rollup.
+    /// Abstaining is the honest answer; promoting `Other("...")` over a real
+    /// observed label would be the same class of error this fix removes.
+    #[test]
+    fn off_schema_fine_type_does_not_reorder_labels() {
+        let mut entity = typed_entity(
+            "mystery",
+            vec![EntityLabel::Concept, EntityLabel::Person],
+            Some("not-a-real-schema-label"),
+        );
+        let before = entity.labels.clone();
+        lead_with_fine_typed_label(&mut entity);
+        assert_eq!(entity.labels, before);
+    }
+
     /// Build a graph with two entities joined by a generic edge of the given
     /// strength, plus a typed edge over the same pair when `also_typed`.
     fn universe_fixture(
@@ -10568,26 +11146,60 @@ mod tests {
     }
 
     #[test]
-    fn classify_tag_label_maps_known_categories() {
-        assert_eq!(classify_tag_label("production"), EntityLabel::Environment);
-        assert_eq!(classify_tag_label("rocksdb"), EntityLabel::Database);
-        assert_eq!(classify_tag_label("metrics-service"), EntityLabel::Service);
-        assert_eq!(classify_tag_label("README"), EntityLabel::Document);
+    fn recognised_tag_label_maps_known_categories() {
         assert_eq!(
-            classify_tag_label("config.toml"),
-            EntityLabel::Configuration
+            recognised_tag_label("rocksdb"),
+            Some(EntityLabel::Database),
+            "a named database product is an artifact"
         );
-        assert_eq!(classify_tag_label("router.rs"), EntityLabel::Module);
-        assert_eq!(classify_tag_label("ci-cd"), EntityLabel::Pipeline);
-        // Unknown → Technology fallback
-        // CHANGED: the fallthrough was `Technology`; it is now `Concept`.
-        // "widgetron" matches none of the rules above, and labelling an
-        // unrecognised surface `Technology` is an assertion the matcher cannot
-        // support — it made every unrecognised tag indistinguishable from a
-        // confidently-classified one, and rendered the graph as a flat wall of
-        // "Technology". `Concept` is what the NER path already emits for
-        // unresolved classes, so the two agree.
-        assert_eq!(classify_tag_label("widgetron"), EntityLabel::Concept);
+        assert_eq!(
+            recognised_tag_label("metrics-service"),
+            Some(EntityLabel::Service)
+        );
+        assert_eq!(recognised_tag_label("README"), Some(EntityLabel::Document));
+        assert_eq!(
+            recognised_tag_label("config.toml"),
+            Some(EntityLabel::Configuration)
+        );
+        assert_eq!(recognised_tag_label("router.rs"), Some(EntityLabel::Module));
+        assert_eq!(recognised_tag_label("ci-cd"), Some(EntityLabel::Pipeline));
+        assert_eq!(
+            recognised_tag_label("kubernetes"),
+            Some(EntityLabel::Environment)
+        );
+    }
+
+    #[test]
+    fn recognised_tag_label_abstains_on_prose() {
+        // CHANGED, deliberately: these used to be classified.
+        //
+        // "production" and "development" were in the Environment list. They are
+        // English common nouns for a phase of work — on a deployment log they
+        // read as environments, but the matcher cannot tell a deployment log
+        // from an aircraft-carrier document, and on the latter it was asserting
+        // that the word "development" names a thing. Same for the substring
+        // rules: `contains("config")` matched the prose phrase "stobar
+        // configuration" and `contains("readme")` matches any sentence about a
+        // readme.
+        for prose in [
+            "production",
+            "development",
+            "staging",
+            "container",
+            "stobar configuration",
+            "vls configurations",
+            "empty weight",
+            "control system",
+            "submarine",
+            "widgetron",
+            "62-kalyani-group.txt",
+        ] {
+            assert_eq!(
+                recognised_tag_label(prose),
+                None,
+                "no curated rule names {prose:?}, so it must not become an entity"
+            );
+        }
     }
 
     #[test]
@@ -10783,6 +11395,224 @@ mod tests {
             "re-mention without a fine type must preserve the existing one"
         );
         assert_eq!(merged.mention_count, 2);
+    }
+
+    #[test]
+    fn one_undecodable_neighbour_does_not_fail_the_whole_traversal() {
+        // The blast radius that turned a data-compatibility bug into an
+        // outage: a single node this build cannot read used to propagate its
+        // decode error out of `traverse_from_entity` (and out of `recall`'s
+        // graph leg), so one bad record in a 9,000-node graph failed EVERY
+        // request that walked past it. A traversal must lose that one node and
+        // keep the rest.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(dir.path(), None).unwrap();
+
+        let start = graph.add_entity(universe_entity("Dali")).unwrap();
+        let neighbour = graph.add_entity(universe_entity("Key Bridge")).unwrap();
+        let now = Utc::now();
+        graph
+            .add_relationship(RelationshipEdge {
+                uuid: Uuid::new_v4(),
+                from_entity: start,
+                to_entity: neighbour,
+                relation_type: RelationType::RelatedTo,
+                strength: 0.9,
+                created_at: now,
+                valid_at: now,
+                invalidated_at: None,
+                source_episode_id: None,
+                context: String::new(),
+                last_activated: now,
+                activation_count: 1,
+                ltp_status: LtpStatus::None,
+                activation_timestamps: None,
+                tier: EdgeTier::L1Working,
+                entity_confidence: None,
+                forman_curvature: None,
+                endpoint_selectivity: None,
+                provenance: Vec::new(),
+                promoted_at: None,
+            })
+            .unwrap();
+
+        // Poison the neighbour's stored bytes: a well-formed format tag over a
+        // payload no generation can decode. This stands in for a record written
+        // by a build whose layout this one does not know.
+        graph
+            .db
+            .put_cf(
+                graph.entities_cf(),
+                neighbour.as_bytes(),
+                [0x50u8, 0x02, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            )
+            .unwrap();
+
+        // A single-id read is still strict: asking for THIS node by id must
+        // fail rather than answer "no such entity".
+        assert!(
+            graph.get_entity(&neighbour).is_err(),
+            "a direct read of an undecodable node must fail honestly"
+        );
+
+        let traversal = graph
+            .traverse_from_entity(&start, 2)
+            .expect("an undecodable neighbour must not fail the traversal");
+
+        let names: Vec<&str> = traversal
+            .entities
+            .iter()
+            .map(|t| t.entity.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"Dali"),
+            "the readable start node must still be returned: {names:?}"
+        );
+        assert!(
+            !names.contains(&"Key Bridge"),
+            "the unreadable neighbour must be skipped, not fabricated: {names:?}"
+        );
+    }
+
+    #[test]
+    fn pre_rollup_other_label_decodes_from_hand_derived_bytes() {
+        // `EntityLabel::Other(String)` sat at DECLARATION INDEX 23 until
+        // c365eef3 (2026-07-11) inserted twelve variants above it and moved it
+        // to 35. These bytes are what a pre-07-11 build wrote and are derived by
+        // hand, NOT regenerated by this test — encoding with today's code would
+        // pass even if a future edit shifted encoder and decoder together, which
+        // is exactly the failure being pinned:
+        //   - byte 0 = 0x17 (23): the varint variant index of `Other` in the
+        //     PRE-ROLLUP declaration. Counting the pre-rollup variants in order
+        //     (Person=0, Organization=1, ..., Module=22) puts Other at 23.
+        //   - byte 1 = 0x04: varint length of the following UTF-8 string.
+        //   - bytes 2..=5 = "MISC".
+        // This is a real byte sequence: it is the label payload observed on
+        // live graph nodes that fail to decode under today's numbering.
+        let pre_rollup_other_misc: [u8; 6] = [0x17, 0x04, 0x4d, 0x49, 0x53, 0x43];
+
+        // Under today's numbering index 23 is the UNIT variant `Norp`, so the
+        // string is left in the buffer for the next field to misread — the
+        // decode "succeeds" here only because a bare label has no next field.
+        let as_current: EntityLabel =
+            crate::serialization::decode_raw(&pre_rollup_other_misc).unwrap();
+        assert_eq!(
+            as_current,
+            EntityLabel::Norp,
+            "index 23 names Norp today — this is the renumbering that broke the store"
+        );
+
+        let _generation = EntityLabelWireGeneration::PreSchemaRollup.enter();
+        let as_legacy: EntityLabel =
+            crate::serialization::decode_raw(&pre_rollup_other_misc).unwrap();
+        assert_eq!(
+            as_legacy,
+            EntityLabel::Other("MISC".to_string()),
+            "under the pre-rollup numbering index 23 is Other(String)"
+        );
+    }
+
+    #[test]
+    fn pre_rollup_entity_node_with_other_label_decodes() {
+        // A whole node as a pre-07-11 build wrote it: `Other(String)` at index
+        // 23, and none of the three trailing fields that came later. Both
+        // compatibility mechanisms have to cooperate — the generation retry for
+        // the label, the default suffix for the tail.
+        //
+        // The payload is assembled field by field rather than by serializing a
+        // replica struct, because today's encoder cannot produce the old label
+        // index at all — that byte has to be written by hand (see the
+        // derivation in `pre_rollup_other_label_decodes_from_hand_derived_bytes`).
+        let now = Utc::now();
+        let uuid = Uuid::new_v4();
+
+        // Head: uuid + name, then the hand-encoded labels vector.
+        let mut payload = postcard::to_allocvec(&uuid).unwrap();
+        payload.extend_from_slice(&postcard::to_allocvec("Baltimore Bridge").unwrap());
+        // labels: Vec length 1, then Other("MISC") at the PRE-ROLLUP index 23.
+        payload.extend_from_slice(&[0x01, 0x17, 0x04, 0x4d, 0x49, 0x53, 0x43]);
+        // Tail: everything after `labels`, in declaration order, stopping before
+        // `selectivity` / `fine_type` / `kb_id` (which did not exist yet).
+        payload.extend_from_slice(&postcard::to_allocvec(&now).unwrap());
+        payload.extend_from_slice(&postcard::to_allocvec(&now).unwrap());
+        payload.extend_from_slice(&postcard::to_allocvec(&7usize).unwrap());
+        payload.extend_from_slice(&postcard::to_allocvec("a pre-rollup node").unwrap());
+        payload
+            .extend_from_slice(&postcard::to_allocvec(&HashMap::<String, String>::new()).unwrap());
+        payload.extend_from_slice(&postcard::to_allocvec(&Option::<Vec<f32>>::None).unwrap());
+        payload.extend_from_slice(&postcard::to_allocvec(&0.75f32).unwrap());
+        payload.extend_from_slice(&postcard::to_allocvec(&true).unwrap());
+
+        // Wrap in the 2-byte format tag every non-Memory record carries.
+        let mut bytes = vec![0x50, 0x02];
+        bytes.extend_from_slice(&payload);
+
+        let (decoded, needs_migration) = decode_entity_node(&bytes)
+            .expect("a node written before the EntityLabel renumbering must still be readable");
+
+        assert_eq!(decoded.uuid, uuid);
+        assert_eq!(decoded.name, "Baltimore Bridge");
+        assert_eq!(
+            decoded.labels,
+            vec![EntityLabel::Other("MISC".to_string())],
+            "the pre-rollup label must come back as Other(\"MISC\"), not Norp"
+        );
+        assert_eq!(decoded.mention_count, 7);
+        assert_eq!(decoded.summary, "a pre-rollup node");
+        assert_eq!(
+            decoded.created_at, now,
+            "created_at must not absorb the label's string"
+        );
+        assert_eq!(decoded.selectivity, None);
+        assert_eq!(decoded.fine_type, None);
+        assert_eq!(decoded.kb_id, None);
+        assert!(
+            needs_migration,
+            "a node recovered through the legacy numbering must be flagged for rewrite"
+        );
+
+        // The mechanism must not leak: the guard inside decode_entity_node is
+        // scoped to that call, so the next decode is back on today's numbering.
+        assert_eq!(
+            EntityLabelWireGeneration::current(),
+            EntityLabelWireGeneration::Current,
+            "the decode generation must be restored when the guard drops"
+        );
+    }
+
+    #[test]
+    fn current_entity_node_is_unaffected_by_the_legacy_retry() {
+        // A node written today, carrying one of the variants that only exists
+        // AFTER the renumbering, must decode on the first attempt with no
+        // migration flag — the retry is a fallback, not a second opinion.
+        let now = Utc::now();
+        let node = EntityNode {
+            uuid: Uuid::new_v4(),
+            name: "Dali".to_string(),
+            labels: vec![EntityLabel::Vehicle, EntityLabel::Other("MISC".to_string())],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 2,
+            summary: "current-generation node".to_string(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.6,
+            is_proper_noun: true,
+            selectivity: Some(0.3),
+            fine_type: Some("vessel".to_string()),
+            kb_id: Some("Q123".to_string()),
+        };
+
+        let bytes = crate::serialization::encode(&node).unwrap();
+        let (decoded, needs_migration) = decode_entity_node(&bytes).unwrap();
+
+        assert_eq!(decoded.labels, node.labels);
+        assert_eq!(decoded.fine_type.as_deref(), Some("vessel"));
+        assert_eq!(decoded.kb_id.as_deref(), Some("Q123"));
+        assert!(
+            !needs_migration,
+            "a current-format node must not be flagged for rewrite"
+        );
     }
 
     #[test]
@@ -14170,8 +15000,12 @@ mod tests {
 
     #[test]
     fn test_provenance_cap_enforced() {
-        // Pin the cap low and deterministically so the test is hermetic.
-        std::env::set_var("SHODH_PROVENANCE_MAX_SOURCES", "3");
+        // Pin the cap low and deterministically so the test is hermetic. The
+        // guard restores the previous value: `provenance_max_sources()` reads
+        // the variable on every attestation, so leaving it at 3 silently capped
+        // every later test in the process.
+        let mut env = crate::test_support::ScopedEnv::acquire();
+        env.set("SHODH_PROVENANCE_MAX_SOURCES", "3");
 
         let temp_dir = tempfile::tempdir().unwrap();
         let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
@@ -14203,8 +15037,6 @@ mod tests {
                 .any(|p| p.source_episode_id == last_episode),
             "the just-added episode must never be dropped by the cap"
         );
-
-        std::env::remove_var("SHODH_PROVENANCE_MAX_SOURCES");
     }
 
     #[test]
@@ -14370,14 +15202,10 @@ mod tests {
         use crate::recall_harness::bridge_harness::generate_bridge_fixtures;
         use crate::recall_harness::runner::{build_manager, ingest_corpus, EVAL_USER};
 
-        // Deterministic single-threaded NER so the ingested topology is reproducible.
-        unsafe {
-            for (k, v) in [("SHODH_ONNX_THREADS", "1"), ("RAYON_NUM_THREADS", "1")] {
-                if std::env::var_os(k).is_none() {
-                    std::env::set_var(k, v);
-                }
-            }
-        }
+        // Deterministic single-threaded NER so the ingested topology is
+        // reproducible. The shared harness pin does exactly this and puts it
+        // back afterwards; a local copy did not.
+        let _harness_env = crate::recall_harness::runner::pin_harness_threads();
 
         let units: usize = std::env::var("SHODH_TOPO_MEASURE_UNITS")
             .ok()
@@ -14631,6 +15459,218 @@ mod tests {
         assert!(
             graph.get_relationship(&bridge_uuid).unwrap().is_none(),
             "with the feature off the bridge is pruned like any other edge"
+        );
+    }
+
+    // =========================================================================
+    // Orphan-sweep guard: an entity that loses every edge has not stopped
+    // existing.
+    //
+    // Both sweeps ("delete any entity left with zero relationships") run behind
+    // `is_typer_committed`. The rule was safe only by accident while keyphrases
+    // were admitted as entities: every real entity co-occurred with a crowd of
+    // tag nodes, so it always kept an edge and never reached the orphan branch.
+    // Once admission got stricter the graph went sparse and the first
+    // maintenance cycle after a `defence-live` rebuild took it from 1,061
+    // entities to 774, carrying off the Indian Navy, Pinaka, Mazagon Dock and
+    // the Indian Ocean.
+    //
+    // These two tests exist because the guard shipped unproven: it type-checked
+    // and the suite stayed green, but nothing had ever observed it PREVENT a
+    // deletion. An attempt to see it live via `/api/consolidate` on a freshly
+    // rebuilt profile watched the entity count hold — but the count held
+    // because `flush_pending_maintenance` returns before the sweep when nothing
+    // is queued for pruning, so the branch never executed. A count that does
+    // not move because the code never ran is not evidence, so each test below
+    // asserts the sweep DID run (an edge was actually pruned) and that the
+    // untyped entity was actually collected, before claiming the typed one was
+    // spared. Without the second half the guard could be disabling the sweep
+    // rather than narrowing it.
+    // =========================================================================
+
+    /// An entity the schema-driven typer committed a span for: `fine_type` is
+    /// set only by `crate::entity_type`'s schema, never by a keyword rule and
+    /// never by a caller. That is the discriminator the sweeps key on.
+    fn sweep_entity(name: &str, fine_type: Option<&str>, origin: DateTime<Utc>) -> EntityNode {
+        EntityNode {
+            uuid: Uuid::new_v4(),
+            name: name.to_string(),
+            labels: vec![EntityLabel::Organization],
+            created_at: origin,
+            last_seen_at: origin,
+            mention_count: 1,
+            summary: String::new(),
+            attributes: std::collections::HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: true,
+            selectivity: None,
+            fine_type: fine_type.map(str::to_string),
+            kb_id: None,
+        }
+    }
+
+    /// One typed entity, one untyped entity, and the single edge between them.
+    /// Pruning that edge orphans BOTH endpoints in the same sweep, so the two
+    /// outcomes are decided by the guard alone and by nothing else about the
+    /// fixture.
+    fn sweep_pair_fixture(
+        origin: DateTime<Utc>,
+        edge: impl FnOnce(Uuid, Uuid) -> RelationshipEdge,
+    ) -> (GraphMemory, tempfile::TempDir, Uuid, Uuid) {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(dir.path(), None).unwrap();
+
+        // `fine_type` present: the typer committed a span for this name.
+        let typed = graph
+            .add_entity(sweep_entity(
+                "Indian Navy",
+                Some("military_organization"),
+                origin,
+            ))
+            .unwrap();
+        // `fine_type` absent: an acronym / caller-declared tag / event lemma —
+        // still collectable, which is what keeps the sweep a sweep.
+        let untyped = graph.add_entity(sweep_entity("ins", None, origin)).unwrap();
+
+        graph.add_relationship(edge(typed, untyped)).unwrap();
+
+        // Read the raw CF, not `get_entity_relationships`: that read applies the
+        // strength filter and would itself queue the edge for pruning, which is
+        // the very thing each test drives deliberately.
+        assert_eq!(
+            graph.get_all_relationships().unwrap().len(),
+            1,
+            "fixture precondition: exactly one edge joins the pair"
+        );
+
+        (graph, dir, typed, untyped)
+    }
+
+    /// Sweep 1 of 2 — the full-scan decay sweep in `apply_decay_at`.
+    #[test]
+    fn decay_orphan_sweep_spares_typed_entity_and_still_collects_untyped() {
+        let origin = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let (graph, _dir, typed, untyped) =
+            sweep_pair_fixture(origin, |a, b| l2_edge(a, b, origin));
+
+        // 60 days clears the L2 min-prune age (30d) and floors the strength.
+        let result = graph.apply_decay_at(origin + Duration::days(60)).unwrap();
+
+        // The sweep RAN. Without this the survival assertion below is vacuous:
+        // an entity trivially survives a branch that never executed.
+        assert_eq!(
+            result.pruned_count, 1,
+            "the only edge must have been pruned — otherwise no entity ever \
+             became an orphan candidate and this test proves nothing"
+        );
+        assert!(
+            graph.get_entity_relationships(&typed).unwrap().is_empty(),
+            "the typed entity must actually be edgeless, i.e. it really did \
+             reach the orphan branch"
+        );
+
+        // The sweep still collects. The guard must NARROW the sweep, not switch
+        // it off — an untyped edgeless node is exactly what it is for.
+        assert!(
+            result.orphaned_entity_ids.contains(&untyped.to_string()),
+            "an untyped edgeless entity must still be reported as orphaned; \
+             got {:?}",
+            result.orphaned_entity_ids
+        );
+        assert!(
+            graph.get_entity(&untyped).unwrap().is_none(),
+            "an untyped edgeless entity must still be deleted"
+        );
+
+        // The guard. Losing every edge is not evidence the entity stopped
+        // existing: the edge is a claim about a RELATIONSHIP and decays on its
+        // own schedule; the entity is a claim that the corpus names a thing.
+        assert!(
+            !result.orphaned_entity_ids.contains(&typed.to_string()),
+            "a typer-committed entity must not be reported as orphaned; \
+             got {:?}",
+            result.orphaned_entity_ids
+        );
+        let survivor = graph
+            .get_entity(&typed)
+            .unwrap()
+            .expect("a typer-committed entity must survive losing every edge");
+        assert_eq!(survivor.name, "Indian Navy");
+        assert_eq!(
+            survivor.fine_type.as_deref(),
+            Some("military_organization"),
+            "the surviving node must keep the extraction that spared it"
+        );
+    }
+
+    /// Sweep 2 of 2 — the lazy queue-drain sweep in `flush_pending_maintenance`.
+    ///
+    /// This is the sweep production actually runs every maintenance cycle, and
+    /// the one whose queue only fills from opportunistic edge pruning during
+    /// reads. Driving it requires a read that finds a prunable edge first,
+    /// which is precisely why a `/api/consolidate` call against a freshly
+    /// rebuilt graph exercised nothing.
+    #[test]
+    fn lazy_orphan_sweep_spares_typed_entity_and_still_collects_untyped() {
+        let origin = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        // Strength far below L1_PRUNE_THRESHOLD (0.1) with `last_activated` at
+        // read time, so `effective_strength()` returns the raw strength and the
+        // queueing decision is independent of the wall clock.
+        let (graph, _dir, typed, untyped) = sweep_pair_fixture(origin, |a, b| RelationshipEdge {
+            strength: 0.001,
+            tier: EdgeTier::L1Working,
+            last_activated: Utc::now(),
+            ..l2_edge(a, b, origin)
+        });
+
+        // Populate the queues the way production does: a read that walks the
+        // entity's edges and finds one below its tier's prune threshold.
+        let visible = graph
+            .get_entity_relationships_limited(&typed, None)
+            .unwrap();
+        assert!(
+            visible.is_empty(),
+            "an edge below its prune threshold is filtered from the read result \
+             and queued — this is the only thing that fills the orphan queue"
+        );
+
+        let result = graph.flush_pending_maintenance().unwrap();
+
+        // The sweep RAN.
+        assert_eq!(
+            result.pruned_count, 1,
+            "the queued edge must have been deleted — an empty prune queue \
+             returns before the orphan branch, so the sweep would never execute"
+        );
+
+        // The sweep still collects.
+        assert!(
+            result.orphaned_entity_ids.contains(&untyped.to_string()),
+            "an untyped edgeless entity must still be reported as orphaned; \
+             got {:?}",
+            result.orphaned_entity_ids
+        );
+        assert!(
+            graph.get_entity(&untyped).unwrap().is_none(),
+            "an untyped edgeless entity must still be deleted"
+        );
+
+        // The guard.
+        assert!(
+            !result.orphaned_entity_ids.contains(&typed.to_string()),
+            "a typer-committed entity must not be reported as orphaned; \
+             got {:?}",
+            result.orphaned_entity_ids
+        );
+        let survivor = graph
+            .get_entity(&typed)
+            .unwrap()
+            .expect("a typer-committed entity must survive losing every edge");
+        assert_eq!(
+            survivor.fine_type.as_deref(),
+            Some("military_organization"),
+            "the surviving node must keep the extraction that spared it"
         );
     }
 }

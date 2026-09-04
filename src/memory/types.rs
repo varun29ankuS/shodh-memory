@@ -607,7 +607,21 @@ pub enum RelationshipType {
 /// Structured NER entity record preserving type classification and confidence.
 /// Used to carry NER results from handler through to graph insertion
 /// without losing type information (Person, Organization, Location, Misc).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+///
+/// # Wire format
+///
+/// `Deserialize` is hand-written rather than derived because this struct sits
+/// MID-PAYLOAD in the stored `Memory` record (`Experience::ner_entities` is
+/// followed by `cooccurrence_pairs`, `importance_override`, and then the whole
+/// of `MemoryFlat` after `experience`). Postcard is positional, so the
+/// [`fine_label`](Self::fine_label) field appended in July 2026 shifted every
+/// byte after each NER record in every memory written before it — the exact
+/// failure mode `Experience::toponyms`' doc comment warns about, except that
+/// the tail-suffix repair in `MEMORY_DEFAULT_SUFFIX` structurally cannot fix it
+/// (a suffix repairs a missing TAIL, not a hole in the middle).
+///
+/// See [`NerWireGeneration`] for how a record written before that field is read.
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct NerEntityRecord {
     pub text: String,
     /// NER type: "PER", "ORG", "LOC", "MISC"
@@ -624,6 +638,135 @@ pub struct NerEntityRecord {
     /// and the precise primary label survive. `None` on the rule-based path.
     #[serde(default)]
     pub fine_label: Option<String>,
+}
+
+/// Which generation of the [`NerEntityRecord`] wire format the current thread is
+/// decoding.
+///
+/// A positional format has no way to discover, from the bytes alone, that a
+/// nested struct gained a field. The only recoverable signal is that decoding
+/// the whole record under the current layout FAILS — so the decoder retries
+/// under the older layout, and this flag is how the outer decode tells the inner
+/// `Deserialize` impl which layout to expect.
+///
+/// A thread-local rather than a parameter because the choice has to reach a
+/// `Deserialize` impl nested ~4 levels inside a derived one, and serde offers no
+/// channel for that. It is deliberately narrow:
+///
+/// * only [`crate::memory::storage`]'s decode path sets it, via
+///   [`NerWireGeneration::enter`], which restores the previous value on drop;
+/// * the scope is a single synchronous `postcard::from_bytes` call, so it can
+///   never be held across an `await` or observed by another request;
+/// * it affects DEserialization only. Writing is always current-generation, so a
+///   record read through the legacy path and rewritten comes back in the current
+///   format (see `needs_migration` in `deserialize_memory`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NerWireGeneration {
+    /// `NerEntityRecord` as declared today, `fine_label` included.
+    Current,
+    /// The layout written before `fine_label` existed (July 2026): five fields,
+    /// ending at `end_char`. Reading one of these under [`Current`] consumes one
+    /// byte too many per record and desynchronises the rest of the payload.
+    ///
+    /// [`Current`]: NerWireGeneration::Current
+    PreFineLabel,
+}
+
+thread_local! {
+    static NER_WIRE_GENERATION: std::cell::Cell<NerWireGeneration> =
+        const { std::cell::Cell::new(NerWireGeneration::Current) };
+}
+
+/// Restores the previous [`NerWireGeneration`] when dropped.
+///
+/// Held by value for the duration of one decode attempt; see
+/// [`NerWireGeneration::enter`].
+#[must_use = "the generation is restored when this guard drops, so it must be held \
+              for the duration of the decode"]
+pub struct NerWireGenerationGuard(NerWireGeneration);
+
+impl NerWireGeneration {
+    /// Decode `NerEntityRecord` under this generation until the returned guard
+    /// drops.
+    pub fn enter(self) -> NerWireGenerationGuard {
+        let previous = NER_WIRE_GENERATION.with(|g| g.replace(self));
+        NerWireGenerationGuard(previous)
+    }
+
+    /// The generation the current thread is decoding under.
+    pub fn current() -> Self {
+        NER_WIRE_GENERATION.with(|g| g.get())
+    }
+}
+
+impl Drop for NerWireGenerationGuard {
+    fn drop(&mut self) {
+        NER_WIRE_GENERATION.with(|g| g.set(self.0));
+    }
+}
+
+/// `NerEntityRecord` exactly as it is declared today. Deriving the impl on a
+/// twin keeps the current path byte-identical to the derived one it replaced.
+#[derive(Deserialize)]
+#[serde(rename = "NerEntityRecord")]
+struct NerEntityRecordCurrent {
+    text: String,
+    entity_type: String,
+    confidence: f32,
+    #[serde(default)]
+    start_char: Option<usize>,
+    #[serde(default)]
+    end_char: Option<usize>,
+    #[serde(default)]
+    fine_label: Option<String>,
+}
+
+/// `NerEntityRecord` as written before `fine_label` existed.
+#[derive(Deserialize)]
+#[serde(rename = "NerEntityRecord")]
+struct NerEntityRecordPreFineLabel {
+    text: String,
+    entity_type: String,
+    confidence: f32,
+    #[serde(default)]
+    start_char: Option<usize>,
+    #[serde(default)]
+    end_char: Option<usize>,
+}
+
+impl<'de> Deserialize<'de> for NerEntityRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match NerWireGeneration::current() {
+            NerWireGeneration::Current => {
+                let r = NerEntityRecordCurrent::deserialize(deserializer)?;
+                Ok(Self {
+                    text: r.text,
+                    entity_type: r.entity_type,
+                    confidence: r.confidence,
+                    start_char: r.start_char,
+                    end_char: r.end_char,
+                    fine_label: r.fine_label,
+                })
+            }
+            NerWireGeneration::PreFineLabel => {
+                let r = NerEntityRecordPreFineLabel::deserialize(deserializer)?;
+                Ok(Self {
+                    text: r.text,
+                    entity_type: r.entity_type,
+                    confidence: r.confidence,
+                    start_char: r.start_char,
+                    end_char: r.end_char,
+                    // The record predates the field. `None` is what it means:
+                    // no fine label was ever recorded, and inventing one would
+                    // give the graph a schema leaf nothing ever asserted.
+                    fine_label: None,
+                })
+            }
+        }
+    }
 }
 
 /// Raw per-episode surprise components, computed at ingest from graph
@@ -661,6 +804,172 @@ pub struct SurpriseComponents {
 
 /// Episode-metadata key under which [`SurpriseComponents`] is stored as JSON.
 pub const SURPRISE_METADATA_KEY: &str = "shodh.surprise";
+
+/// Which write path put a memory in the store.
+///
+/// # Why this is server-observed, never caller-declared
+///
+/// Before this field existed, the only way to guess where a memory came from
+/// was `Experience::tags` — but tags are the MERGED set of request tags, NER
+/// surfaces and YAKE keyphrases, so a `source:hook` tag is a string some writer
+/// chose to include, not provenance the store holds. A caller could claim any
+/// of it, and half the memories in a real store (every server-generated
+/// lifecycle echo) carry no such tag at all.
+///
+/// So the value here is decided by the handler that performed the write, from
+/// what the *server* knows: which endpoint ran. It is never read out of a
+/// request body, and there is deliberately no way for a client to set it.
+/// Caller-declared identity already has its own fields — `Memory::agent_id`,
+/// `Memory::actor_id`, and `RichContext::source_type` — and mixing a claim into
+/// an authority field is exactly how `labels.first()` came to report a type no
+/// typer can emit.
+///
+/// # Wire format: APPEND ONLY
+///
+/// This enum is encoded by postcard as its declaration index (a varint), inside
+/// `MemoryFlat`. Reordering variants, or removing one, silently re-points every
+/// stored record at a different origin. New variants go at the END, and
+/// [`MemoryOrigin::Unknown`] must stay at index 0 so its postcard encoding is
+/// the single byte `0x00` that `MEMORY_DEFAULT_SUFFIX` supplies for records
+/// written before the field existed.
+///
+/// # `Unknown` is not a backfill target
+///
+/// Every memory written before this field existed reads as `Unknown`, and stays
+/// that way. The information was never recorded, so there is nothing to
+/// recover: a migration that inferred an origin from tags or content would be
+/// manufacturing provenance, which is worse than admitting there is none. No
+/// code path assigns `Unknown` to a NEW write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryOrigin {
+    /// The record predates the field, or was recovered by a legacy decoder that
+    /// never carried one. Honest absence — see the type doc.
+    #[default]
+    Unknown,
+    /// `POST /api/remember` — a single memory a client explicitly asked to
+    /// store. This covers the Claude Code hooks, the MCP server and the CLI
+    /// alike: all three are plain HTTP clients of this endpoint, so the server
+    /// cannot and does not distinguish them here.
+    Api,
+    /// `POST /api/remember/batch` (alias `/api/batch_remember`).
+    BatchApi,
+    /// `POST /api/upsert` — external-id linked write with update semantics.
+    Upsert,
+    /// The server segmented and stored text the caller never asked to store:
+    /// `POST /api/proactive_context` with `auto_ingest` (which defaults to
+    /// TRUE), covering both the caller's own context and the previous
+    /// assistant response, plus the same auto-ingest inside the Python
+    /// binding's `proactive_context`.
+    AutoIngest,
+    /// Mined out of a live conversation stream by `StreamingManager`, which
+    /// buffers messages and decides for itself which turns are worth keeping.
+    /// Reached over the `/api/stream` WebSocket and over the Zenoh stream key.
+    ConversationStream,
+    /// An echo memory the server writes itself when a todo is created,
+    /// updated, completed or commented on (`/api/todos/*`).
+    TodoLifecycle,
+    /// The session digest the server writes when a context window is compacted
+    /// (`/api/sessions/context-compressed`).
+    SessionSummary,
+    /// `POST /api/import/mif` — imported from a Memory Interchange Format
+    /// document. Note this is the origin of the IMPORT, not of whatever wrote
+    /// the memory before it was exported: MIF carries no origin field, so a
+    /// round trip through export/import legitimately reads as `MifImport`.
+    MifImport,
+    /// The Linear connector — `POST /webhook/linear` or `POST /api/sync/linear`.
+    LinearConnector,
+    /// The GitHub connector — `POST /webhook/github` or `POST /api/sync/github`.
+    GithubConnector,
+    /// The Zenoh robotics transport (`zenoh` feature), which accepts remembers
+    /// off the wire without going through axum. The Zenoh analogue of [`Self::Api`].
+    Zenoh,
+    /// A mission-start or mission-end memory the Zenoh transport composes when
+    /// a robot announces a mission boundary. The Zenoh analogue of
+    /// [`Self::TodoLifecycle`]: the publisher asked to start a mission, not to
+    /// store a memory.
+    ZenohMission,
+    /// The in-process Python binding (`python` feature), which calls
+    /// `MemorySystem::remember` directly with no HTTP hop.
+    PythonApi,
+    /// Corpus seeding by the recall benchmark harness. These memories exist to
+    /// be measured against, and giving them their own origin is what lets an
+    /// eval store be told apart from a user's — which `Unknown` would not do,
+    /// since here the write path IS known.
+    RecallHarness,
+    /// A registered source connector wrote this — the ingestion subsystem
+    /// walked a source it was configured to read and produced this memory
+    /// without anyone asking for it individually.
+    ///
+    /// One variant covers every source kind on purpose. The origin answers
+    /// "the server's ingestion subsystem wrote this"; *which* source did is a
+    /// fact about a registry row that can be renamed, reconfigured or deleted,
+    /// so it lives in `Experience::metadata` under `shodh.source.id` /
+    /// `shodh.source.kind` where it can change without rewriting a stored
+    /// memory's provenance.
+    Connector,
+}
+
+impl MemoryOrigin {
+    /// Stable wire name, matching the JSON `rename_all = "snake_case"` output.
+    ///
+    /// Written out by hand rather than derived from `Debug` so that renaming a
+    /// variant in Rust cannot silently change the API contract or the accepted
+    /// filter values.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Api => "api",
+            Self::BatchApi => "batch_api",
+            Self::Upsert => "upsert",
+            Self::AutoIngest => "auto_ingest",
+            Self::ConversationStream => "conversation_stream",
+            Self::TodoLifecycle => "todo_lifecycle",
+            Self::SessionSummary => "session_summary",
+            Self::MifImport => "mif_import",
+            Self::LinearConnector => "linear_connector",
+            Self::GithubConnector => "github_connector",
+            Self::Zenoh => "zenoh",
+            Self::ZenohMission => "zenoh_mission",
+            Self::PythonApi => "python_api",
+            Self::RecallHarness => "recall_harness",
+            Self::Connector => "connector",
+        }
+    }
+
+    /// Every variant, in declaration (and therefore postcard-discriminant)
+    /// order. The single list [`Self::parse`] and the tests both read from, so
+    /// a variant added without a wire name cannot pass unnoticed.
+    pub const ALL: &'static [Self] = &[
+        Self::Unknown,
+        Self::Api,
+        Self::BatchApi,
+        Self::Upsert,
+        Self::AutoIngest,
+        Self::ConversationStream,
+        Self::TodoLifecycle,
+        Self::SessionSummary,
+        Self::MifImport,
+        Self::LinearConnector,
+        Self::GithubConnector,
+        Self::Zenoh,
+        Self::ZenohMission,
+        Self::PythonApi,
+        Self::RecallHarness,
+        Self::Connector,
+    ];
+
+    /// Parse a wire name back into an origin, for read-path filtering.
+    ///
+    /// Case-insensitive and tolerant of `-` in place of `_`, because these
+    /// values arrive as query-string parameters typed by humans. Returns `None`
+    /// for anything unrecognised so the caller can reject the request rather
+    /// than silently returning the wrong slice of the store.
+    pub fn parse(s: &str) -> Option<Self> {
+        let normalized = s.trim().to_ascii_lowercase().replace('-', "_");
+        Self::ALL.iter().copied().find(|o| o.as_str() == normalized)
+    }
+}
 
 /// Raw experience data to be stored (ENHANCED with smart defaults)
 ///
@@ -911,6 +1220,44 @@ pub struct Experience {
     /// records written before it existed.
     #[serde(skip)]
     pub toponyms: Vec<Toponym>,
+
+    // =========================================================================
+    // DECLARED ENTITIES (names the CALLER asserted, not names anything inferred)
+    // =========================================================================
+    /// Entity names supplied by whoever wrote the memory — `tags` on the
+    /// `remember` request, the names an integration hands over with a record.
+    ///
+    /// Kept separate from [`entities`](Self::entities) and [`tags`](Self::tags)
+    /// because those two are *merged* lists: `remember` concatenates the
+    /// caller's tags, the NER surfaces and the YAKE keyphrases into one vector
+    /// and writes it to both. After that merge nothing downstream can tell "the
+    /// user told us this is an entity" from "a statistical keyphrase extractor
+    /// produced this string", and the knowledge graph was admitting both on the
+    /// same authority — which is how filenames and phrases like "empty weight"
+    /// became entities. This field is the provenance that merge destroys.
+    ///
+    /// It is deliberately NOT part of the search surface: `tags` still carries
+    /// everything, so BM25, the tag index and `recall_by_tags` are unaffected.
+    /// The only consumer is graph admission, where an assertion by the caller is
+    /// one of the three authorities that can put a node in the graph (the other
+    /// two being a committed typer span and the curated identifier table).
+    ///
+    /// `#[serde(skip)]` for the same reason as [`toponyms`](Self::toponyms) —
+    /// see that field's note. It is carried at the tail of `MemoryFlat`.
+    #[serde(skip)]
+    pub declared_entities: Vec<String>,
+
+    /// Which write path stored this memory. See [`MemoryOrigin`].
+    ///
+    /// `#[serde(skip)]` for exactly the reason spelled out on `toponyms` above:
+    /// `Experience` is only ever serialized as field 2 of 21 inside
+    /// `MemoryFlat`, so a new field here lands MID-payload and shifts every
+    /// field after it on old records — a decode that succeeds and returns
+    /// garbage rather than failing. The value is carried as the last field of
+    /// `MemoryFlat`, where `decode_raw_compat` can default it, and is restored
+    /// onto the experience by `Memory`'s `Deserialize` impl.
+    #[serde(skip)]
+    pub origin: MemoryOrigin,
 }
 
 /// A place mentioned in a memory's content, resolved to coordinates.
@@ -1067,6 +1414,14 @@ impl Experience {
                 delta.fields_filled.push(name);
             }
         };
+        // A duplicate write's tags are a second caller asserting the same names.
+        // Unioned like every other additive field: the second write can add an
+        // assertion but its silence cannot retract the first one's.
+        union_strings(
+            &mut self.declared_entities,
+            &incoming.declared_entities,
+            "declared_entities",
+        );
         union_strings(
             &mut self.temporal_refs,
             &incoming.temporal_refs,
@@ -1123,6 +1478,14 @@ impl Experience {
         if toponyms_added {
             delta.fields_filled.push("toponyms");
         }
+
+        // `origin` is deliberately NOT merged, and must never be. It records
+        // which write path FIRST stored this content; a later duplicate
+        // arriving down a different path (an MCP retry, an auto-ingest that
+        // happens to re-say the same sentence, a MIF re-import) did not create
+        // the memory and does not get to relabel where it came from. This
+        // omission is the whole first-write-wins guarantee, so it is stated
+        // here rather than left as an absence for someone to "fix".
 
         let mut media_added = false;
         for media in &incoming.media_refs {
@@ -1290,6 +1653,11 @@ impl Default for Experience {
             cooccurrence_pairs: Vec::new(),
             importance_override: None,
             toponyms: Vec::new(),
+            declared_entities: Vec::new(),
+            // Deliberately Unknown: `Default` is what every construction site
+            // that does NOT know its write path falls back to (legacy decoders,
+            // test fixtures). A write path that DOES know stamps it explicitly.
+            origin: MemoryOrigin::Unknown,
         }
     }
 }
@@ -1424,20 +1792,60 @@ pub struct Memory {
     /// Memories flow: Working → Session → LongTerm → Archive
     pub tier: MemoryTier,
 
-    /// Entity references - bidirectional links to GraphMemory
-    /// Populated during record() via entity extraction
-    /// Enables spreading activation without graph lookup
+    /// Entity references — a denormalized copy of the graph links for this
+    /// memory.
+    ///
+    /// NOT POPULATED IN PRODUCTION, and never has been. The field and its only
+    /// writer ([`Memory::add_entity_ref`]) were introduced together and the
+    /// writer has had no non-test caller since; every production construction
+    /// path sets `Vec::new()`, and a live store returns 0 populated rows out of
+    /// 200. The doc comment that used to sit here claimed it was "populated
+    /// during record() via entity extraction" — it is not, and four consumers
+    /// silently produced nothing for as long as it said so.
+    ///
+    /// The graph is the authority: `process_experience_into_graph` writes an
+    /// `EpisodicNode` whose `uuid` is this memory's `id` and whose
+    /// `entity_refs` are the resolved entity UUIDs. Production callers must
+    /// resolve through `MemorySystem::memory_entity_ids`, not read this field.
+    ///
+    /// It is retained rather than deleted because `MemoryFlat` is encoded
+    /// positionally by postcard and this is field 9 of 22: removing it shifts
+    /// every field after it, so every stored record would decode successfully
+    /// and return garbage. Legacy records that carry values still round-trip
+    /// through `Memory::from_legacy`, and the resolver unions them in.
     pub entity_refs: Vec<EntityRef>,
 
-    /// Retrieval tracking ID - set when memory is retrieved
-    /// Used for Hebbian feedback loop (reinforce_recall)
+    /// Retrieval tracking ID.
+    ///
+    /// ALWAYS `None` in production. Its only writer is
+    /// [`Memory::mark_retrieved`], which no non-test code calls. The previous
+    /// comment here claimed this drives "the Hebbian feedback loop
+    /// (reinforce_recall)"; it does not, and there is no route by which it
+    /// could — `MemorySystem::reinforce_recall` takes an explicit
+    /// `&[MemoryId]` from its caller and never reads this field.
+    ///
+    /// Retained for the same positional-wire-format reason as `entity_refs`
+    /// (field 11 of 22 in `MemoryFlat`).
     pub last_retrieval_id: Option<Uuid>,
 
     // ==========================================================================
     // Multi-tenancy support for enterprise deployments
+    //
+    // All three are CALLER-DECLARED identity: the writer states who it is, and
+    // the server stores the claim without verifying it. Server-observed facts
+    // about a write belong elsewhere. They are `None` on every row of a real
+    // store today, but for different reasons — `agent_id` and `run_id` are
+    // accepted by `POST /api/remember` and persisted end to end, and read as
+    // null only because no shipped client (hooks, MCP, TUI, python, UI) sends
+    // them. `actor_id` had no request field and no write path at all until it
+    // was wired alongside them.
     // ==========================================================================
+    /// The agent that wrote this memory, as declared by the writer.
     pub agent_id: Option<String>,
+    /// The run/session of the writing agent, as declared by the writer.
     pub run_id: Option<String>,
+    /// The human or upstream principal the writer acted on behalf of, as
+    /// declared by the writer.
     pub actor_id: Option<String>,
 
     // Similarity score (only populated in search results, not stored)
@@ -1660,7 +2068,13 @@ impl Memory {
         self.version > 1
     }
 
-    /// Add entity reference (bidirectional link to graph)
+    /// Add an entity reference to the denormalized [`Self::entity_refs`] copy.
+    ///
+    /// No production path calls this and none should: the graph owns this
+    /// relation, and a second copy on the memory drifts the moment entity
+    /// canonicalization merges two nodes. It exists so tests can construct
+    /// records in the legacy shape and pin the positional wire format that
+    /// still carries the field.
     pub fn add_entity_ref(&mut self, entity_id: Uuid, name: String, relation: String) {
         // Avoid duplicates
         if !self.entity_refs.iter().any(|r| r.entity_id == entity_id) {
@@ -1689,7 +2103,11 @@ impl Memory {
         self.related_todo_ids.contains(todo_id)
     }
 
-    /// Get entity IDs for graph operations
+    /// Entity IDs from the denormalized [`Self::entity_refs`] copy ONLY.
+    ///
+    /// Returns `[]` for every memory this product has written. Production
+    /// callers want `MemorySystem::memory_entity_ids`, which resolves through
+    /// the graph; this accessor is kept for tests that pin the stored field.
     pub fn entity_ids(&self) -> Vec<Uuid> {
         self.entity_refs.iter().map(|r| r.entity_id).collect()
     }
@@ -1705,7 +2123,13 @@ impl Memory {
         self.metadata.lock().activation *= decay_factor;
     }
 
-    /// Set retrieval tracking ID for Hebbian feedback
+    /// Set [`Self::last_retrieval_id`].
+    ///
+    /// No non-test code calls this, and nothing reads the field it sets.
+    /// Reinforcement (`MemorySystem::reinforce_recall`) is driven by an
+    /// explicit `&[MemoryId]` supplied by the caller, so a stored retrieval
+    /// marker has no consumer. Kept so tests can populate the field the
+    /// positional wire format still carries.
     pub fn mark_retrieved(&mut self, retrieval_id: Uuid) {
         self.last_retrieval_id = Some(retrieval_id);
         // Also record access
@@ -2081,11 +2505,39 @@ struct MemoryFlat {
     /// to a wire format without shifting every field written after it. See
     /// [`Experience::toponyms`] for the full reasoning, and
     /// `MEMORY_DEFAULT_SUFFIX` in `storage.rs` for the decoder side.
-    ///
-    /// MUST remain the last field. Anything appended after it has to extend the
-    /// default suffix too.
     #[serde(default)]
     toponyms: Vec<Toponym>,
+    /// Entity names the caller asserted. Logically part of `Experience` and
+    /// exposed there; carried here for the same positional-format reason as
+    /// `toponyms`.
+    ///
+    /// # This position is load-bearing, not stylistic
+    ///
+    /// `declared_entities` and `origin` were appended on two branches developed
+    /// in parallel, each as "the last field". They shipped in this order because
+    /// a build carrying `declared_entities` — and NOT `origin` — had already
+    /// written live records before the two met. Those records' tails end with
+    /// this Vec, so it has to be read second and `origin` third. Swapping them
+    /// would make every such record read this Vec's length varint as the
+    /// `MemoryOrigin` discriminant and shift everything after it.
+    ///
+    /// The `MEMORY_DEFAULT_SUFFIX` bytes cannot catch that mistake — all three
+    /// tail defaults encode as `0x00`, so the suffix is order-agnostic and only
+    /// this declaration order decides which stored byte becomes which field.
+    /// What catches it is
+    /// `memory_missing_its_tail_fields_is_defaulted_in_declaration_order` in
+    /// `storage.rs`, which truncates a real encoding one tail field at a time.
+    #[serde(default)]
+    declared_entities: Vec<String>,
+    /// Which write path stored this memory. Logically part of `Experience` and
+    /// exposed there; carried here for the same positional-format reason as
+    /// `toponyms`. See [`Experience::origin`] and [`MemoryOrigin`].
+    ///
+    /// MUST remain the last field. Anything appended after it has to extend
+    /// `MEMORY_DEFAULT_SUFFIX` in `storage.rs` too, appending the new field's
+    /// postcard default AFTER this one's.
+    #[serde(default)]
+    origin: MemoryOrigin,
 }
 
 impl Serialize for Memory {
@@ -2126,6 +2578,8 @@ impl Serialize for Memory {
             // format; `Experience::toponyms` is `#[serde(skip)]` precisely so it
             // is carried here exactly once.
             toponyms: self.experience.toponyms.clone(),
+            declared_entities: self.experience.declared_entities.clone(),
+            origin: self.experience.origin,
         };
         flat.serialize(serializer)
     }
@@ -2141,6 +2595,11 @@ impl<'de> Deserialize<'de> for Memory {
         // Put the tail-carried toponyms back where they belong on the domain
         // type. Records written before the field existed decode as empty.
         flat.experience.toponyms = flat.toponyms;
+        flat.experience.declared_entities = flat.declared_entities;
+        // Same for the origin. A record written before the field existed
+        // decodes as `Unknown`, which is the honest answer — nothing infers one
+        // from tags or content on the way past.
+        flat.experience.origin = flat.origin;
         Ok(Memory {
             id: flat.id,
             experience: flat.experience,
@@ -2517,6 +2976,28 @@ pub struct Query {
     /// recall harness sets lower modes to attribute quality deltas to
     /// specific stages. See `LayerMode` docs.
     pub layers: LayerMode,
+
+    // === Read-Only Recall ===
+    /// Per-query request for a NON-MUTATING recall: no access-count
+    /// persistence, no co-retrieval/coactivation edges, no Hebbian edge
+    /// strengthening (graph leg included), no interference records, and no
+    /// stale-vector cleanup. Default `false` — reinforcement-on-read stays on,
+    /// unchanged.
+    ///
+    /// This is the per-request sibling of the process-wide
+    /// `SHODH_RECALL_READONLY` pin the eval harness sets. The pin is a process
+    /// property and cannot express "this one request must not learn" inside a
+    /// server serving concurrent callers, which is what a reviewer needs to run
+    /// the same query twice and compare: on the default path the second answer
+    /// comes from a corpus the first query altered.
+    ///
+    /// Carrying it on `Query` rather than plumbing a parameter means every
+    /// entry point that already takes a `Query` — `recall`,
+    /// `recall_with_diagnostics`, `paginated_recall`, the graph leg — honours it
+    /// for free, and the compiler audits each mutation site that must consult
+    /// it. Read it through `crate::memory::recall_is_readonly`, never directly:
+    /// that function is the single gate, and it ORs this flag with the env pin.
+    pub read_only: bool,
 }
 
 /// Paginated search results with metadata for "load more" patterns (SHO-69)
@@ -2600,6 +3081,7 @@ impl Default for Query {
             retrieval_mode: RetrievalMode::Hybrid,
             offset: 0,
             layers: LayerMode::Full,
+            read_only: false,
         }
     }
 }
@@ -2864,6 +3346,12 @@ impl QueryBuilder {
 
     pub fn retrieval_mode(mut self, mode: RetrievalMode) -> Self {
         self.query.retrieval_mode = mode;
+        self
+    }
+
+    /// Request a non-mutating recall — see [`Query::read_only`].
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.query.read_only = read_only;
         self
     }
 
@@ -3485,6 +3973,24 @@ pub struct RetrievalStats {
     /// Per-memory score attribution (only when debug=true)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_attributions: Option<Vec<ScoreAttribution>>,
+
+    /// Graph seeds this query could not use because their stored node failed to
+    /// decode.
+    ///
+    /// Zero is the normal case and is omitted from the response. A non-zero
+    /// value means the answer is INCOMPLETE in a specific, nameable way: the
+    /// query's entity resolved to a node in the name index, but the node's bytes
+    /// could not be read by this build, so the graph leg ran without that seed.
+    /// The names are in the WARN log; this is the count the caller gets, and it
+    /// exists so a degraded answer is never indistinguishable from a complete
+    /// one. Previously the same condition failed the whole request with a 500.
+    #[serde(default, skip_serializing_if = "crate::memory::types::is_zero_usize")]
+    pub unreadable_graph_nodes: usize,
+}
+
+/// `skip_serializing_if` helper: omit a count that is zero.
+pub(crate) fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
 }
 
 /// Per-stage timing breakdown in microseconds.
@@ -3869,6 +4375,15 @@ impl TodoStatus {
             _ => None,
         }
     }
+
+    /// Whether this status means the todo has left the working set.
+    ///
+    /// Done and Cancelled are already treated as one class everywhere that
+    /// matters — overdue counting, the default list filter, dependency
+    /// unblocking — and both carry a settlement time in `completed_at`.
+    pub fn is_settled(&self) -> bool {
+        matches!(self, TodoStatus::Done | TodoStatus::Cancelled)
+    }
 }
 
 /// Todo priority (Linear-style)
@@ -3924,6 +4439,21 @@ impl TodoPriority {
     }
 }
 
+/// Number of days in a calendar month (handles leap years).
+fn days_in_month(year: i32, month: u32) -> u32 {
+    use chrono::{Datelike, NaiveDate};
+
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .and_then(|first_of_next| first_of_next.pred_opt())
+        .map(|last| last.day())
+        .unwrap_or(28)
+}
+
 /// Recurrence pattern for repeating todos
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -3938,7 +4468,139 @@ pub enum Recurrence {
     EveryNDays { n: u32 },
 }
 
+/// Weekday abbreviations in `Recurrence::Weekly`'s numbering (0 = Sunday).
+const WEEKDAY_NAMES: [&str; 7] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+
+/// Parse a weekday token into `Recurrence::Weekly`'s numbering (0 = Sunday).
+fn parse_weekday(token: &str) -> Option<u8> {
+    match token {
+        "0" | "sun" | "sunday" => Some(0),
+        "1" | "mon" | "monday" => Some(1),
+        "2" | "tue" | "tues" | "tuesday" => Some(2),
+        "3" | "wed" | "weds" | "wednesday" => Some(3),
+        "4" | "thu" | "thur" | "thurs" | "thursday" => Some(4),
+        "5" | "fri" | "friday" => Some(5),
+        "6" | "sat" | "saturday" => Some(6),
+        _ => None,
+    }
+}
+
 impl Recurrence {
+    /// Human-writable forms this pattern accepts, quoted in every rejection so
+    /// a caller that guesses wrong is told what to send instead.
+    pub const PATTERN_FORMS: &'static str = "daily | weekly | weekly:mon,wed,fri \
+         (or weekly:1,3,5, 0=Sunday) | monthly | monthly:15 (1-31) | every 3 days (1-3650)";
+
+    /// Longest interval `EveryNDays` accepts. `next_occurrence` adds the
+    /// interval to a timestamp and chrono panics on an out-of-range date, so
+    /// this is a guard rail rather than a preference — ten years is well past
+    /// any real recurring task and nowhere near the overflow.
+    pub const MAX_INTERVAL_DAYS: u32 = 3650;
+
+    /// Parse a recurrence pattern. Every variant is reachable from here.
+    ///
+    /// Case-insensitive; `_`, `-` and spaces are interchangeable, so both
+    /// `every_3_days` and `every 3 days` parse. The bare words `daily`,
+    /// `weekly` (Mon-Fri) and `monthly` (day 1) keep the meanings they have
+    /// always had, so existing clients are unaffected.
+    ///
+    /// The error is a short reason, not a full sentence: callers add their own
+    /// framing (the HTTP layer appends [`Recurrence::PATTERN_FORMS`]).
+    pub fn from_pattern(s: &str) -> Result<Self, String> {
+        let lowered = s.trim().to_lowercase().replace(['_', '-'], " ");
+        let normalized = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        let (head, arg) = match normalized.split_once(':') {
+            Some((head, arg)) => (head.trim(), Some(arg.trim())),
+            None => (normalized.as_str(), None),
+        };
+
+        match (head, arg) {
+            ("daily", None) => Ok(Recurrence::Daily),
+
+            // The long-standing default: the working week.
+            ("weekly", None) => Ok(Recurrence::Weekly {
+                days: vec![1, 2, 3, 4, 5],
+            }),
+            ("weekly", Some(list)) => {
+                let mut days = Vec::new();
+                for token in list.split(',') {
+                    let token = token.trim();
+                    let day =
+                        parse_weekday(token).ok_or_else(|| format!("unknown weekday '{token}'"))?;
+                    days.push(day);
+                }
+                // `next_occurrence` scans for the first day greater than today,
+                // so an unsorted list would pick the wrong one.
+                days.sort_unstable();
+                days.dedup();
+                if days.is_empty() {
+                    return Err("no weekdays given".to_string());
+                }
+                Ok(Recurrence::Weekly { days })
+            }
+
+            // The long-standing default: the first of the month.
+            ("monthly", None) => Ok(Recurrence::Monthly { day: 1 }),
+            ("monthly", Some(day)) => {
+                let parsed: u8 = day
+                    .parse()
+                    .map_err(|_| format!("'{day}' is not a day of the month"))?;
+                if !(1..=31).contains(&parsed) {
+                    return Err("day of month must be 1-31".to_string());
+                }
+                Ok(Recurrence::Monthly { day: parsed })
+            }
+
+            // "every 3 days" / "every_3_days" / "every 1 day"
+            (head, None) => {
+                let interval = head
+                    .strip_prefix("every ")
+                    .and_then(|rest| rest.strip_suffix(" days").or(rest.strip_suffix(" day")))
+                    .ok_or_else(|| "unrecognised pattern".to_string())?;
+                let n: u32 = interval
+                    .parse()
+                    .map_err(|_| format!("'{interval}' is not a whole number"))?;
+                if n == 0 {
+                    return Err(
+                        "an interval of 0 days would repeat forever on the same day".to_string()
+                    );
+                }
+                if n > Self::MAX_INTERVAL_DAYS {
+                    return Err(format!(
+                        "interval must be at most {} days",
+                        Self::MAX_INTERVAL_DAYS
+                    ));
+                }
+                Ok(Recurrence::EveryNDays { n })
+            }
+
+            _ => Err("unrecognised pattern".to_string()),
+        }
+    }
+
+    /// Render back into a pattern [`Recurrence::from_pattern`] accepts.
+    ///
+    /// Interchange formats (MIF export) store this rather than the `Debug`
+    /// rendering, which no parser reads.
+    pub fn to_pattern(&self) -> String {
+        match self {
+            Recurrence::Daily => "daily".to_string(),
+            Recurrence::Weekly { days } => {
+                if days.is_empty() {
+                    return "weekly".to_string();
+                }
+                let names: Vec<&str> = days
+                    .iter()
+                    .map(|d| WEEKDAY_NAMES[(*d as usize).min(6)])
+                    .collect();
+                format!("weekly:{}", names.join(","))
+            }
+            Recurrence::Monthly { day } => format!("monthly:{day}"),
+            Recurrence::EveryNDays { n } => format!("every {n} days"),
+        }
+    }
+
     /// Calculate the next due date from a given date
     pub fn next_occurrence(&self, from: DateTime<Utc>) -> DateTime<Utc> {
         use chrono::{Datelike, Duration};
@@ -3965,14 +4627,25 @@ impl Recurrence {
                 from + Duration::days(days_until)
             }
             Recurrence::Monthly { day } => {
-                let target_day = (*day).min(28) as u32; // Cap at 28 to avoid month overflow
-                let mut next = from;
-                // Move to next month if we're past the target day
-                if from.day() >= target_day {
-                    next = from + Duration::days(32); // Jump to next month
+                use chrono::{NaiveDate, TimeZone};
+
+                let target = (*day).clamp(1, 31) as u32;
+                let (mut year, mut month) = (from.year(), from.month());
+                // On or past the target day, the next occurrence is next month.
+                if from.day() >= target {
+                    if month == 12 {
+                        year += 1;
+                        month = 1;
+                    } else {
+                        month += 1;
+                    }
                 }
-                // Set to target day
-                next.with_day(target_day).unwrap_or(next)
+                // A month shorter than the target fires on its last day rather
+                // than sliding into the following month.
+                let last_day = days_in_month(year, month);
+                NaiveDate::from_ymd_opt(year, month, target.min(last_day))
+                    .map(|d| Utc.from_utc_datetime(&d.and_time(from.time())))
+                    .unwrap_or(from)
             }
             Recurrence::EveryNDays { n } => from + Duration::days(*n as i64),
         }
@@ -4219,9 +4892,7 @@ impl Todo {
     /// Check if todo is overdue
     pub fn is_overdue(&self) -> bool {
         if let Some(due) = &self.due_date {
-            Utc::now() > *due
-                && self.status != TodoStatus::Done
-                && self.status != TodoStatus::Cancelled
+            Utc::now() > *due && !self.status.is_settled()
         } else {
             false
         }
@@ -4231,8 +4902,7 @@ impl Todo {
     pub fn overdue_seconds(&self) -> Option<i64> {
         if let Some(due) = &self.due_date {
             let now = Utc::now();
-            if now > *due && self.status != TodoStatus::Done && self.status != TodoStatus::Cancelled
-            {
+            if now > *due && !self.status.is_settled() {
                 return Some((now - *due).num_seconds());
             }
         }
@@ -4249,11 +4919,43 @@ impl Todo {
         }
     }
 
+    /// Apply a status transition, keeping `completed_at` honest.
+    ///
+    /// Settlement is the server's business, not each client's: entering a
+    /// settled state (Done or Cancelled) stamps the settlement time, and
+    /// leaving one clears it, so a reopened todo cannot go on reporting how
+    /// long it "took". Moving between two settled states keeps the original
+    /// stamp — the todo settled when it settled.
+    ///
+    /// Every write path that changes a todo's status must go through here.
+    pub fn apply_status(&mut self, status: TodoStatus) {
+        let now = Utc::now();
+        let was_settled = self.status.is_settled();
+        self.status = status;
+
+        if self.status.is_settled() {
+            if !was_settled {
+                self.completed_at = Some(now);
+            }
+        } else {
+            // Unconditional: an unsettled todo has no completion time, and a
+            // legacy row carrying one is exactly the bug this closes.
+            self.completed_at = None;
+        }
+
+        self.updated_at = now;
+    }
+
     /// Mark as completed
     pub fn complete(&mut self) {
-        self.status = TodoStatus::Done;
-        self.completed_at = Some(Utc::now());
-        self.updated_at = Utc::now();
+        self.apply_status(TodoStatus::Done);
+        // `/complete` is an explicit "this is done, now". A todo that was
+        // already Done but never stamped (rows written before settlement was
+        // owned by the server) gets its stamp from that action rather than
+        // from a guess about when it originally happened.
+        if self.completed_at.is_none() {
+            self.completed_at = Some(self.updated_at);
+        }
     }
 
     /// Create next recurrence if applicable
@@ -5394,6 +6096,144 @@ mod tests {
             stored.metadata.get("operator").map(String::as_str),
             Some("kestrel"),
             "new keys are added"
+        );
+    }
+
+    // ── todo settlement and recurrence ──────────────────────────────────
+
+    fn at(y: i32, m: u32, d: u32) -> DateTime<Utc> {
+        use chrono::TimeZone;
+        Utc.with_ymd_and_hms(y, m, d, 9, 30, 0).unwrap()
+    }
+
+    /// `Monthly { day }` was only ever reachable as `day: 1`, so its date math
+    /// was never exercised: it capped the target at 28 and advanced by "+32
+    /// days", which skips February entirely. Now that a client can ask for
+    /// day 31, the next occurrence has to land in the very next month, on the
+    /// last day of that month when it is shorter than the target.
+    #[test]
+    fn monthly_recurrence_lands_in_the_next_month() {
+        let r = Recurrence::Monthly { day: 31 };
+        assert_eq!(
+            r.next_occurrence(at(2026, 1, 31)),
+            at(2026, 2, 28),
+            "January 31 must roll to February, clamped to the month's last day"
+        );
+        assert_eq!(
+            r.next_occurrence(at(2028, 1, 31)),
+            at(2028, 2, 29),
+            "a leap February has a 29th"
+        );
+        assert_eq!(
+            Recurrence::Monthly { day: 15 }.next_occurrence(at(2026, 3, 2)),
+            at(2026, 3, 15),
+            "a target still ahead in this month fires this month"
+        );
+        assert_eq!(
+            Recurrence::Monthly { day: 15 }.next_occurrence(at(2026, 12, 20)),
+            at(2027, 1, 15),
+            "December rolls the year over"
+        );
+    }
+
+    /// Entering a settled state stamps the settlement time; leaving one clears
+    /// it. Before this, `completed_at` was written only by `complete()` and
+    /// never cleared, so a reopened todo kept reporting how long it "took".
+    #[test]
+    fn status_transitions_keep_completed_at_honest() {
+        let mut todo = Todo::new("u".to_string(), "Ship the thing".to_string());
+        assert!(todo.completed_at.is_none());
+
+        todo.apply_status(TodoStatus::Done);
+        let settled_at = todo.completed_at.expect("entering Done must stamp");
+
+        // Moving between settled states must not move the stamp: the
+        // settlement happened when it happened.
+        todo.apply_status(TodoStatus::Cancelled);
+        assert_eq!(
+            todo.completed_at,
+            Some(settled_at),
+            "moving between settled states keeps the original settlement time"
+        );
+
+        todo.apply_status(TodoStatus::InProgress);
+        assert!(
+            todo.completed_at.is_none(),
+            "reopening must clear the settlement time"
+        );
+
+        todo.apply_status(TodoStatus::Cancelled);
+        assert!(
+            todo.completed_at.is_some(),
+            "cancelling settles the todo and must stamp it"
+        );
+
+        // A legacy row that is Done with no stamp gets one from an explicit
+        // /complete — an action taken now, not a guess about the past.
+        let mut legacy = Todo::new("u".to_string(), "Legacy done row".to_string());
+        legacy.status = TodoStatus::Done;
+        legacy.complete();
+        assert!(
+            legacy.completed_at.is_some(),
+            "complete() must always leave a stamp behind"
+        );
+    }
+
+    /// `MemoryOrigin::ALL` is the single list the parser, the API's accepted-value
+    /// message and the tests all read from, and it claims to be in *declaration*
+    /// order — which is postcard-discriminant order, which is what is on disk.
+    ///
+    /// A variant appended to the enum but forgotten in `ALL` is invisible: the
+    /// exhaustive `as_str` match forces a wire name, but nothing forces the list.
+    /// The list then stops one short, `parse("connector")` returns `None`, and
+    /// `?origin=` silently rejects a value the store is actively writing. Worse,
+    /// a variant *inserted* rather than appended re-points every stored record.
+    /// Both are caught by pinning each entry's encoded discriminant to its index.
+    #[test]
+    fn memory_origin_all_is_in_wire_discriminant_order() {
+        for (index, origin) in MemoryOrigin::ALL.iter().enumerate() {
+            assert!(
+                index < 128,
+                "the single-byte varint assumption below stops holding at 128 variants"
+            );
+            let encoded = crate::serialization::encode_raw(origin).expect("encode origin");
+            assert_eq!(
+                encoded,
+                vec![index as u8],
+                concat!(
+                    "MemoryOrigin::ALL[{}] ({}) does not encode as that discriminant: ",
+                    "ALL is out of step with the enum's declaration order, which is ",
+                    "the order every stored record was written in"
+                ),
+                index,
+                origin.as_str()
+            );
+            assert_eq!(
+                MemoryOrigin::parse(origin.as_str()),
+                Some(*origin),
+                "wire name {:?} does not parse back to its own variant",
+                origin.as_str()
+            );
+        }
+
+        let mut names: Vec<&str> = MemoryOrigin::ALL.iter().map(|o| o.as_str()).collect();
+        names.sort_unstable();
+        let unique = names.len();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            unique,
+            "two origins share a wire name, so one of them can never be filtered for"
+        );
+
+        assert_eq!(
+            MemoryOrigin::ALL.last().copied(),
+            Some(MemoryOrigin::Connector),
+            concat!(
+                "new origins are APPENDED; if Connector is no longer last, a variant ",
+                "was added ahead of it and every record written as Connector now ",
+                "reads as something else"
+            )
         );
     }
 }

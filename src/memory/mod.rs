@@ -28,6 +28,7 @@ pub mod replay;
 pub mod retrieval;
 pub mod segmentation;
 pub mod sessions;
+pub mod sources;
 pub mod storage;
 pub mod temporal_facts;
 pub mod todo_formatter;
@@ -50,23 +51,43 @@ use crate::metrics::{
     EMBEDDING_CACHE_QUERY_SIZE,
 };
 
+/// Parse the `SHODH_EVAL_NOW` override, if present and well-formed.
+fn eval_now_override() -> Option<chrono::DateTime<chrono::Utc>> {
+    std::env::var("SHODH_EVAL_NOW").ok().and_then(|raw| {
+        chrono::DateTime::parse_from_rfc3339(&raw)
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+    })
+}
+
 /// Query-time scoring clock. `SHODH_EVAL_NOW` (RFC3339) freezes it for the
 /// recall harness: repeat passes minutes apart see different `Utc::now() -
 /// created_at` recency components, which is enough to flip near-tie ranks
-/// (smoke-094). The env value is parsed once per process; when unset
-/// (production), every call returns the live clock.
+/// (smoke-094). When unset (production), every call returns the live clock.
+///
+/// PRODUCTION caches the parse in a `OnceLock` — the value cannot change under
+/// a running server and this is on the per-candidate scoring path.
+///
+/// TESTS deliberately do NOT cache. A process-lifetime cache is unrestorable
+/// state: whichever test touched `scoring_now()` first would decide the clock
+/// for the entire `cargo test` process, so a harness test that ran early froze
+/// every later recency assertion at [`recall_harness::runner::HARNESS_CLOCK_ANCHOR`]
+/// — two months in the past — and no amount of env restoring could undo it.
+/// Re-reading per call makes the harness's env pin scoped to the pin's lifetime,
+/// which is what every other determinism variable already does. The extra
+/// `env::var` per call costs nothing at test scale.
+#[cfg(not(test))]
 pub(crate) fn scoring_now() -> chrono::DateTime<chrono::Utc> {
     static PINNED: std::sync::OnceLock<Option<chrono::DateTime<chrono::Utc>>> =
         std::sync::OnceLock::new();
     PINNED
-        .get_or_init(|| {
-            std::env::var("SHODH_EVAL_NOW").ok().and_then(|raw| {
-                chrono::DateTime::parse_from_rfc3339(&raw)
-                    .ok()
-                    .map(|dt| dt.with_timezone(&chrono::Utc))
-            })
-        })
+        .get_or_init(eval_now_override)
         .unwrap_or_else(chrono::Utc::now)
+}
+
+#[cfg(test)]
+pub(crate) fn scoring_now() -> chrono::DateTime<chrono::Utc> {
+    eval_now_override().unwrap_or_else(chrono::Utc::now)
 }
 
 /// `SHODH_COMPANION_MULTIHOP_GATE=1` — enable provenance-driven multi-hop
@@ -83,23 +104,120 @@ fn companion_gate_enabled() -> bool {
 /// persistence, no co-retrieval/coactivation edge creation, no Hebbian edge
 /// strengthening anywhere in the recall path (including the graph leg's
 /// spreading-activation traversal in `graph_retrieval.rs`). Set by the eval
-/// harness (`pin_harness_threads`, `recall_eval` binary startup): eval repeats
+/// harness (`recall_eval` binary startup; the in-process harness now sets
+/// `Query::read_only` instead of writing this variable): eval repeats
 /// measure variance, not learning curves, and FLAT fusion made graph magnitude
 /// load-bearing, so first-repeat usage writes were shifting later repeats'
 /// rankings (L1 smoke non-determinism, PR #325 checks). Production default
 /// (flag unset): writes on, unchanged.
 ///
-/// This is the SINGLE SOURCE OF TRUTH for the gate. Every recall-path mutation
-/// site — in this module or a sibling (`graph_retrieval`, etc.) — must check
-/// this function rather than re-deriving the env check ad hoc, or a new write
-/// site can silently reintroduce the same measurement-integrity bug (see the
-/// graph-leg Hebbian strengthening fix this function's introduction shipped
-/// alongside: spreading activation was calling `batch_strengthen_synapses`
-/// unconditionally, bypassing the gate entirely).
-pub(crate) fn recall_readonly() -> bool {
+/// This env pin is PROCESS-WIDE. Mutation sites must not read it directly —
+/// they call [`recall_is_readonly`], which ORs it with the per-request
+/// `Query::read_only` flag. A process property cannot express "this one request
+/// must not learn" inside a server handling concurrent callers, which is what a
+/// caller needs to reproduce a result.
+fn recall_readonly_env() -> bool {
     std::env::var("SHODH_RECALL_READONLY")
         .map(|v| v == "1")
         .unwrap_or(false)
+}
+
+/// Whether this recall must perform NO usage writes.
+///
+/// This is the SINGLE SOURCE OF TRUTH for the gate. Every recall-path mutation
+/// site — in this module or a sibling (`graph_retrieval`, etc.) — must check
+/// this function rather than re-deriving the decision ad hoc, or a new write
+/// site can silently reintroduce the same measurement-integrity bug (see the
+/// graph-leg Hebbian strengthening fix this function's introduction shipped
+/// alongside: spreading activation was calling `batch_strengthen_synapses`
+/// unconditionally, bypassing the gate entirely; and the stale-vector cleanup
+/// in `semantic_retrieve_inner`, which was soft-deleting vectors during a
+/// "read-only" recall).
+///
+/// True when EITHER source asks for it:
+/// - `SHODH_RECALL_READONLY=1` — the process-wide pin the `recall_eval` binary
+///   sets at startup, where the whole process IS the harness. Eval repeats
+///   measure variance, not learning curves. The in-process harness reads this
+///   variable to decide, but sets `Query::read_only` rather than writing it:
+///   inside `cargo test` a process-wide write is visible to every other thread
+///   for the whole run, and a lock around the writer cannot stop that.
+/// - `Query::read_only` — the per-request flag a caller sets to get a
+///   reproducible answer without altering the corpus it read from.
+///
+/// The OR is deliberate and one-way: a per-request `read_only: false` can never
+/// re-enable writes under a process that pinned them off, so no request can
+/// contaminate an eval run.
+///
+/// Production default (pin unset, flag unset) is `false`: reinforcement on read
+/// stays on, unchanged.
+pub(crate) fn recall_is_readonly(query: &Query) -> bool {
+    recall_readonly_env() || query.read_only
+}
+
+/// Process-global lock for every code path that mutates the harness
+/// determinism env (`SHODH_RECALL_READONLY`, `SHODH_EVAL_NOW`,
+/// `SHODH_ONNX_THREADS`, `RAYON_NUM_THREADS`) — including
+/// `recall_harness::runner::pin_harness_threads`, which sets the last three
+/// process-wide. (`SHODH_RECALL_READONLY` is read there, never written — it
+/// changes what concurrently running code does, and a lock cannot exclude a
+/// reader.)
+///
+/// `env::set_var`/`remove_var` are not thread-safe against concurrent readers on
+/// other test threads, and `recall_is_readonly` re-reads the env on every call
+/// rather than caching it. This is deliberately ONE lock for the whole crate:
+/// module-local mutexes in each test file would not exclude each other, so a
+/// test asserting "the pin is unset" could still be raced by a test in a sibling
+/// module setting it.
+///
+/// NOT `#[cfg(test)]`: `pin_harness_threads` takes it in every build so the
+/// harness's env mutation is self-contained rather than relying on each of its
+/// callers to remember a guard. It is uncontended in the `recall_eval` binary
+/// and never taken by the server.
+///
+/// REENTRANT on purpose. A test may legitimately pin the read-only flag and then
+/// call a harness suite entry point, which pins the same set again; a plain
+/// `Mutex` would deadlock that composition, and "don't nest" is exactly the kind
+/// of rule that dies at the next contributor. Restores still unwind LIFO, so the
+/// outer pin's value is the one that survives.
+pub(crate) static RECALL_ENV_LOCK: parking_lot::ReentrantMutex<()> =
+    parking_lot::const_reentrant_mutex(());
+
+/// Holds [`RECALL_ENV_LOCK`] and pins `SHODH_RECALL_READONLY` to an EXPLICIT
+/// value for the duration of a test, restoring the previous value on drop.
+///
+/// Pins `"0"` rather than removing the variable. `recall_readonly_env` treats
+/// unset and `"0"` identically, so this changes nothing about what is being
+/// tested; it states the intent, and it is what the surviving writer of this
+/// variable — the `recall_eval` binary's only-if-unset startup pin — cannot
+/// override. The in-process harness no longer writes the variable at all: it
+/// reads it once and threads `Query::read_only`.
+#[cfg(test)]
+pub(crate) struct RecallEnvPin {
+    _lock: parking_lot::ReentrantMutexGuard<'static, ()>,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl RecallEnvPin {
+    pub(crate) fn pin(value: &str) -> Self {
+        let lock = RECALL_ENV_LOCK.lock();
+        let previous = std::env::var_os("SHODH_RECALL_READONLY");
+        std::env::set_var("SHODH_RECALL_READONLY", value);
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for RecallEnvPin {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(v) => std::env::set_var("SHODH_RECALL_READONLY", v),
+            None => std::env::remove_var("SHODH_RECALL_READONLY"),
+        }
+    }
 }
 
 use crate::constants::{
@@ -161,7 +279,7 @@ pub use crate::memory::segmentation::{
 };
 pub use crate::memory::sessions::{
     Session, SessionDigest, SessionEvent, SessionId, SessionStats, SessionStatus, SessionStore,
-    SessionStoreStats, SessionSummary, TemporalContext, TimeOfDay,
+    SessionSummary, TemporalContext, TimeOfDay, UserSessionStats,
 };
 pub use crate::memory::temporal_facts::{EventType, ResolvedTime, TemporalFact, TemporalFactStore};
 pub use crate::memory::todos::{ProjectStats, TodoStore, UserTodoStats};
@@ -377,6 +495,58 @@ fn tokenize_words(text: &str) -> HashSet<&str> {
     text.split(|c: char| !c.is_alphanumeric() && c != '\'')
         .filter(|w| w.len() >= 3)
         .collect()
+}
+
+/// Re-order runs of adjacent candidates that the score comparison could not
+/// separate, using memory CONTENT as the key.
+///
+/// WHY THIS EXISTS. `MemoryId` is a v4 uuid minted during ingest, so ordering
+/// genuine ties by id is deterministic within one store and a random
+/// permutation between two ingests of the same corpus. That second case is
+/// exactly the comparison the recall harness's determinism guards make — RH-11
+/// runs the suite twice against fresh storage, and RH-12 (`--repeats N`) gives
+/// every repeat its own storage directory and its own ingest — so any ranking
+/// decision that a uuid settles is a coin flip from the guard's point of view.
+/// Where such a decision also TRUNCATES, it changes which memories are
+/// returned at all, not merely their order.
+///
+/// Content is the retrieval path's one repeat-stable per-memory key: it is a
+/// pure function of the corpus, and `remember()` dedups on a content hash
+/// (#109), so it is unique per store. The id fallback therefore only orders
+/// candidates whose content is byte-identical, where either order is
+/// equivalent by construction.
+///
+/// `items` must already be sorted, with `tied` reporting whether two elements
+/// compared equal under that sort. Content is fetched ONLY inside runs of two
+/// or more, so a tie-free list costs one linear scan and no lookups.
+fn order_ties_by_content<T>(
+    items: &mut [T],
+    tied: impl Fn(&T, &T) -> bool,
+    id_of: impl Fn(&T) -> MemoryId,
+    get_content: impl Fn(&MemoryId) -> Option<String>,
+) {
+    let mut i = 0;
+    while i < items.len() {
+        let mut j = i + 1;
+        while j < items.len() && tied(&items[i], &items[j]) {
+            j += 1;
+        }
+        if j - i > 1 {
+            let mut contents: std::collections::HashMap<MemoryId, String> =
+                std::collections::HashMap::with_capacity(j - i);
+            for it in &items[i..j] {
+                let id = id_of(it);
+                contents
+                    .entry(id.clone())
+                    .or_insert_with(|| get_content(&id).unwrap_or_default());
+            }
+            items[i..j].sort_by(|a, b| {
+                let (ia, ib) = (id_of(a), id_of(b));
+                contents[&ia].cmp(&contents[&ib]).then_with(|| ia.cmp(&ib))
+            });
+        }
+        i = j;
+    }
 }
 
 /// Char-safe prefix of `s` containing at most `max_chars` characters.
@@ -1540,18 +1710,26 @@ impl MemorySystem {
         ))
     }
 
-    /// Remember with agent context for multi-agent systems
+    /// Remember with caller-declared write identity.
     ///
-    /// Same as `remember` but tracks which agent created the memory,
-    /// enabling agent-specific retrieval and hierarchical memory tracking.
+    /// Same as `remember` but records who wrote the memory: the agent, its
+    /// run, and the principal it acted for. All three are claims the caller
+    /// makes about itself and are stored unverified — see the field docs on
+    /// [`Memory::agent_id`].
+    ///
+    /// `actor_id` was added to this signature rather than left as the
+    /// hardcoded `None` it had been since the initial release: the field is
+    /// persisted by `Memory` and served by `/api/memory/{id}`, so it was a
+    /// storable, readable value that nothing could ever set.
     pub fn remember_with_agent(
         &self,
         experience: Experience,
         created_at: Option<chrono::DateTime<chrono::Utc>>,
         agent_id: Option<String>,
         run_id: Option<String>,
+        actor_id: Option<String>,
     ) -> Result<MemoryId> {
-        self.remember_with_agent_detailed(experience, created_at, agent_id, run_id)
+        self.remember_with_agent_detailed(experience, created_at, agent_id, run_id, actor_id)
             .map(|outcome| outcome.id)
     }
 
@@ -1562,6 +1740,7 @@ impl MemorySystem {
         created_at: Option<chrono::DateTime<chrono::Utc>>,
         agent_id: Option<String>,
         run_id: Option<String>,
+        actor_id: Option<String>,
     ) -> Result<RememberOutcome> {
         // IDEMPOTENCY (issue #109): Content hash dedup + enrichment merge,
         // through the same single implementation `remember()` uses.
@@ -1603,14 +1782,14 @@ impl MemorySystem {
             }
         }
 
-        // Create memory with agent context
+        // Create memory with caller-declared write identity
         let memory = Arc::new(Memory::new(
             memory_id.clone(),
             experience,
             importance,
             agent_id,
             run_id,
-            None, // actor_id
+            actor_id,
             created_at,
         ));
 
@@ -1679,14 +1858,15 @@ impl MemorySystem {
     /// - Semantic search: Uses embeddings + vector similarity across ALL tiers
     /// - Non-semantic search: Uses importance * temporal decay
     /// - Zero shortcuts, no TODOs, enterprise-grade
-    /// SHODH_RECALL_READONLY=1 — recall performs no usage writes (access-count
-    /// persistence, co-retrieval edge creation). Delegates to the module-level
-    /// `recall_readonly()` (single source of truth — every recall-path mutation
-    /// site, including sibling modules like `graph_retrieval`, must check the
-    /// same function, not re-derive the env check ad hoc). See that function's
-    /// doc for the full rationale.
-    fn recall_readonly() -> bool {
-        recall_readonly()
+    /// Whether this recall performs no usage writes (access-count persistence,
+    /// co-retrieval edge creation, Hebbian strengthening, interference records,
+    /// stale-vector cleanup). Delegates to the module-level
+    /// `recall_is_readonly()` — the single source of truth, which every
+    /// recall-path mutation site including sibling modules like
+    /// `graph_retrieval` must check rather than re-deriving the decision.
+    /// See that function's doc for the full rationale.
+    fn recall_readonly(query: &Query) -> bool {
+        recall_is_readonly(query)
     }
 
     /// Harvest provenance companions for the already-ranked `memories`.
@@ -2163,7 +2343,7 @@ impl MemorySystem {
         // Update access counts (in-memory) + record consolidation events, then
         // persist all candidates' access bumps in ONE batched write instead of a
         // full re-index per candidate (the dominant old read-path cost).
-        if !Self::recall_readonly() {
+        if !Self::recall_readonly(query) {
             let mut access_refs: Vec<(&Memory, f32)> = Vec::with_capacity(memories.len());
             for memory in &memories {
                 let before =
@@ -2190,15 +2370,23 @@ impl MemorySystem {
         // Populate prediction cache for VTA/dopamine-inspired feedback error weighting.
         // Uses importance as the prediction signal — "how useful we think this memory is."
         // When feedback arrives later, the prediction error scales learning rate.
-        for memory in &memories {
-            self.prediction_cache
-                .insert(memory.id.clone(), memory.importance());
+        //
+        // In-memory, but still a usage write: `process_feedback` reads this
+        // cache to weight how strongly a later signal is applied, so a
+        // "read-only" recall was changing the learning that followed it. Gated
+        // like its two neighbours. Under the flag the reader falls back to its
+        // 0.5 baseline, which is what an unrecalled memory already gets.
+        if !Self::recall_readonly(query) {
+            for memory in &memories {
+                self.prediction_cache
+                    .insert(memory.id.clone(), memory.importance());
+            }
         }
 
         // Increment and persist retrieval counter
         // Sibling of the access-count/coactivation gate above: also a usage
         // write, so read-only recall must skip it too.
-        if !Self::recall_readonly() {
+        if !Self::recall_readonly(query) {
             if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
                 self.stats.write().total_retrievals = count;
             }
@@ -2256,8 +2444,19 @@ impl MemorySystem {
         let criteria = storage::SearchCriteria::ByTags(tags.to_vec());
         let mut memories = self.advanced_search(criteria)?;
         memories.truncate(limit);
-        if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
-            self.stats.write().total_retrievals = count;
+        // Persisted usage write on a read path — same gate as every other one.
+        // This entry point takes no `Query`, which is why it was missed when
+        // the read-only pin went in: the pin followed the `Query` paths.
+        //
+        // With no `Query` there is no per-request `read_only` flag to consult,
+        // so this consults the process-wide pin directly rather than
+        // `recall_is_readonly`. That is the whole gate available here — a
+        // caller who needs per-request read-only semantics must come through a
+        // `Query` path.
+        if !recall_readonly_env() {
+            if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
+                self.stats.write().total_retrievals = count;
+            }
         }
         Ok(memories)
     }
@@ -2274,8 +2473,12 @@ impl MemorySystem {
         let criteria = storage::SearchCriteria::ByDate { start, end };
         let mut memories = self.advanced_search(criteria)?;
         memories.truncate(limit);
-        if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
-            self.stats.write().total_retrievals = count;
+        // Same persisted usage write, same gate — see `recall_by_tags`, including
+        // why this consults the process-wide pin rather than `recall_is_readonly`.
+        if !recall_readonly_env() {
+            if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
+                self.stats.write().total_retrievals = count;
+            }
         }
         Ok(memories)
     }
@@ -2355,7 +2558,7 @@ impl MemorySystem {
                 let results = self.retriever.search(query, query.max_results)?;
                 // Sibling of the access-count/coactivation gates elsewhere in this
                 // function: also a usage write, so read-only recall must skip it too.
-                if !Self::recall_readonly() {
+                if !Self::recall_readonly(query) {
                     if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
                         tracing::debug!("Retrieval count: {count}");
                     }
@@ -3238,9 +3441,21 @@ impl MemorySystem {
                             }
                         }
                     }
-                    // Strength desc -> bridge name asc: `take(graph_expand_k)` below cuts
-                    // a plateau of equal-strength neighbours, and the BM25 query text must
-                    // not depend on which one the graph happened to yield first.
+                    // Strength alone is not a TOTAL order, and this sort
+                    // TRUNCATES: when two neighbours tie on edge strength and
+                    // only one fits in `graph_expand_k`, a stable sort keeps
+                    // whichever the edge walk happened to reach first, so the
+                    // bridge set — and with it the BM25 expansion and the final
+                    // rank list — depends on traversal order rather than on the
+                    // graph's content. Ties are not rare: edges are born at a
+                    // fixed tier weight, so a young graph has many at exactly
+                    // the same strength.
+                    //
+                    // Name breaks the tie because it is unique among the
+                    // candidates (`seen` dedups on the lowercased name) and is a
+                    // property of the graph rather than of how it was walked.
+                    // Same reasoning as the `all_entities` sort in
+                    // `process_experience_into_graph`.
                     scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                     graph_bridges = scored
                         .into_iter()
@@ -3453,6 +3668,17 @@ impl MemorySystem {
                     sa_stats.graph_candidates,
                 );
 
+                // Carry the graph leg's degradation count out to the caller. The
+                // leg now skips a query seed whose stored node this build cannot
+                // decode instead of failing the request, and a skipped seed
+                // changes the ANSWER — so the count has to leave this function,
+                // not just the log. Everything else in `sa_stats` is recomputed
+                // by the fusion stages below from their own candidate sets; this
+                // is the one fact only the graph leg knows.
+                if let Some(s) = stats.as_mut() {
+                    s.unreadable_graph_nodes += sa_stats.unreadable_graph_nodes;
+                }
+
                 // Map ActivatedMemory → (MemoryId, activation, hebbian_factor) for RRF fusion
                 let mut r: Vec<(MemoryId, f32, f32)> = activated_memories
                     .into_iter()
@@ -3586,6 +3812,11 @@ impl MemorySystem {
             prospective_signals: query.prospective_signals.clone(),
             recency_weight: query.recency_weight,
             layers: query.layers,
+            // Carried over, not defaulted: this derived query is what
+            // `matches_filters` and the vector leg see, and dropping the flag
+            // here would be exactly the kind of silent re-enable the gate
+            // exists to prevent.
+            read_only: query.read_only,
         };
 
         // ===========================================================================
@@ -4092,8 +4323,57 @@ impl MemorySystem {
                         .filter(|(_, (b, _))| *b > 0.0)
                         .map(|(id, (b, _))| (id, *b))
                         .collect();
-                    by_vec.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-                    by_bm.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+                    // `agreement` below is the top-k10 OVERLAP of these two
+                    // lists, so membership at the k10 boundary is a feature
+                    // VALUE — and this feature feeds a logistic gate whose
+                    // output (`t`) multiplies the entire vector leg. A
+                    // `MemoryId` tie-break lets two ingests of the same corpus
+                    // take different top-10s out of one exact score tie and
+                    // land on a different `t`, moving every vector-driven score
+                    // by a percent-level factor rather than a rounding error —
+                    // far too coarse for any downstream quantisation to absorb.
+                    // Order by the OTHER leg's score first (repeat-stable and
+                    // already in hand), then by content.
+                    let other_leg = |id: &MemoryId, want_bm25: bool| -> f32 {
+                        let (b, v) = hybrid_components
+                            .get(id)
+                            .copied()
+                            .unwrap_or((0.0f32, 0.0f32));
+                        if want_bm25 {
+                            b
+                        } else {
+                            v
+                        }
+                    };
+                    by_vec.sort_by(|a, b| {
+                        b.1.total_cmp(&a.1)
+                            .then_with(|| other_leg(b.0, true).total_cmp(&other_leg(a.0, true)))
+                            .then_with(|| a.0.cmp(b.0))
+                    });
+                    by_bm.sort_by(|a, b| {
+                        b.1.total_cmp(&a.1)
+                            .then_with(|| other_leg(b.0, false).total_cmp(&other_leg(a.0, false)))
+                            .then_with(|| a.0.cmp(b.0))
+                    });
+                    order_ties_by_content(
+                        &mut by_vec,
+                        |a, b| {
+                            a.1.to_bits() == b.1.to_bits()
+                                && other_leg(a.0, true).to_bits() == other_leg(b.0, true).to_bits()
+                        },
+                        |x| (*x.0).clone(),
+                        &get_content,
+                    );
+                    order_ties_by_content(
+                        &mut by_bm,
+                        |a, b| {
+                            a.1.to_bits() == b.1.to_bits()
+                                && other_leg(a.0, false).to_bits()
+                                    == other_leg(b.0, false).to_bits()
+                        },
+                        |x| (*x.0).clone(),
+                        &get_content,
+                    );
                     let peak = |xs: &[(&MemoryId, f32)]| -> f32 {
                         if xs.is_empty() {
                             return 1.0;
@@ -4810,11 +5090,61 @@ impl MemorySystem {
             }
 
             let mut res: Vec<_> = fused.into_iter().collect();
-            // Score desc; tie-break by MemoryId for stable rerank-budget cutoff.
-            // The cutoff at `rerank_budget` makes order at the boundary semantically
-            // important — without tie-break, equal-score boundary candidates can swap
-            // in/out of the rerank window across runs.
-            res.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            // This order is load-bearing twice: it picks the `rerank_budget`
+            // window below, and it feeds the `res.truncate(query.max_results)`
+            // that FIXES MEMBERSHIP of the returned top-k. Everything after that
+            // truncation re-orders what survived; nothing can re-admit a
+            // candidate the cut dropped. So the order has to be total and a pure
+            // function of repeat-stable data, or the last returned slot is
+            // decided by something that is not the query.
+            //
+            // `score desc, MemoryId asc` was neither:
+            //
+            //  * NO QUANTISATION. The final `memories` sort at the end of
+            //    `recall` rounds to 1e-6 before comparing, precisely because the
+            //    upstream f32 reductions wobble below that. This cut compared
+            //    raw, so two candidates the final ranking would call TIED were
+            //    separated here on sub-ULP noise — the cut and the final sort
+            //    disagreed about what "tied" means, and the cut won because it
+            //    runs first and discards.
+            //  * NO REPEAT-STABLE KEY. `MemoryId` is a per-ingest v4 uuid, so on
+            //    a genuine tie the surviving candidate was chosen by a value
+            //    that differs between two ingests of the same corpus.
+            //
+            // Both legs' component scores are already in hand and are pure
+            // functions of content and query, so they break most ties for free;
+            // `order_ties_by_content` resolves whatever is still tied.
+            let q6 = |s: f32| (s * 1.0e6).round();
+            let comp = |id: &MemoryId| {
+                hybrid_components
+                    .get(id)
+                    .copied()
+                    .unwrap_or((0.0f32, 0.0f32))
+            };
+            let order_fused = |res: &mut Vec<(MemoryId, f32)>| {
+                res.sort_by(|a, b| {
+                    let (ba, va) = comp(&a.0);
+                    let (bb, vb) = comp(&b.0);
+                    q6(b.1)
+                        .total_cmp(&q6(a.1))
+                        .then_with(|| bb.total_cmp(&ba))
+                        .then_with(|| vb.total_cmp(&va))
+                        .then_with(|| a.0.cmp(&b.0))
+                });
+                order_ties_by_content(
+                    res,
+                    |a, b| {
+                        let (ba, va) = comp(&a.0);
+                        let (bb, vb) = comp(&b.0);
+                        q6(a.1).to_bits() == q6(b.1).to_bits()
+                            && ba.to_bits() == bb.to_bits()
+                            && va.to_bits() == vb.to_bits()
+                    },
+                    |x| x.0.clone(),
+                    &get_content,
+                );
+            };
+            order_fused(&mut res);
             let rerank_budget = query.max_results * 2;
 
             // RH-8 gate: ontological rerank only runs in `PlusRerank` and above.
@@ -4884,9 +5214,10 @@ impl MemorySystem {
                             onto_intent.expected_labels
                         );
                     }
-                    // Re-sort after boosting since ranks may have changed.
-                    // Tie-break by MemoryId — same rationale as the pre-rerank sort above.
-                    res.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                    // Re-sort after boosting since ranks may have changed. Same
+                    // total, repeat-stable order as the pre-rerank sort above —
+                    // this one still feeds the membership-fixing truncation.
+                    order_fused(&mut res);
                 }
             }
 
@@ -4945,6 +5276,11 @@ impl MemorySystem {
         let mut cache_hits = 0;
         let mut storage_fetches = 0;
         let mut filtered_out = 0;
+        // Candidates skipped because their record could not be read. Counted
+        // separately from `filtered_out` (a deliberate exclusion) because a
+        // non-zero value here means results are silently incomplete and the
+        // storage underneath needs looking at.
+        let mut unreadable_records = 0;
 
         // Layer 5: Unified scoring with hebbian + recency + emotional + feedback signals
         // All signals are multiplicative on the base score to preserve RRF ranking.
@@ -5270,9 +5606,21 @@ impl MemorySystem {
                 continue;
             }
 
-            // Cold path: Fetch from RocksDB storage (expensive deserialization)
-            match self.retriever.get_from_storage(&memory_id) {
-                Ok(memory) => {
+            // Cold path: Fetch from RocksDB storage (expensive deserialization).
+            //
+            // The three outcomes are deliberately NOT collapsed. Removing the
+            // index entry unindexes a live memory permanently — `remove_memory`
+            // drops the id mapping AND calls `storage.delete_vector_mapping`,
+            // so the removal outlives a restart while the record itself stays
+            // in RocksDB, reachable by nothing. That is only ever correct when
+            // the memory is genuinely gone, which is exactly what `Ok(None)`
+            // (and only `Ok(None)`) attests to. An `Err` — transient IO, a
+            // locked or unreadable file, a record that does not decode — is an
+            // inconclusive read, never proof of absence: we skip the candidate
+            // and leave the index alone, matching the tolerance the scanning
+            // paths already apply to individual bad records.
+            match self.retriever.get_from_storage_opt(&memory_id) {
+                Ok(Some(memory)) => {
                     // CRITICAL FIX: Apply filters before adding to results
                     if self.retriever.matches_filters(&memory, &vector_query) {
                         // Reuse unified scoring (includes feedback_multiplier)
@@ -5288,13 +5636,46 @@ impl MemorySystem {
                         filtered_out += 1;
                     }
                 }
+                Ok(None) => {
+                    tracing::warn!(
+                        memory_id = %memory_id.0,
+                        "recall: vector index points at a memory RocksDB reports \
+                         absent — cleaning up the orphaned index entry"
+                    );
+                    self.retriever.remove_memory(&memory_id);
+                }
                 Err(e) => {
+                    // An Err here is an INCONCLUSIVE read, not proof the memory
+                    // is gone, so nothing is deleted — the index entry stays and
+                    // the candidate is skipped for this query only.
+                    //
+                    // Two branches arrived at this site from different
+                    // directions and the stricter rule wins. One made the
+                    // cleanup that used to run here consult the read-only gate,
+                    // because unindexing a memory is a WRITE on the read path
+                    // (it soft-deletes the vectors in Vamana and drops the
+                    // memory's vector mapping) and a recall that promises not to
+                    // alter the corpus must not perform it. The other removed
+                    // the cleanup outright. Removing it outright subsumes the
+                    // gate — there is no longer a write to gate — and is the
+                    // safer rule for an independent reason: `deserialize_memory`
+                    // now retries an unreadable record under an older
+                    // `NerEntityRecord` layout, so a record that errors on one
+                    // build can decode on the next. Deleting its index entry
+                    // would have made that repair unreachable for exactly the
+                    // records it exists to rescue.
+                    //
+                    // A genuine orphan still gets collected: the `Ok(None)` arm
+                    // above is RocksDB positively reporting the memory absent,
+                    // which is proof, and it removes the entry.
+                    unreadable_records += 1;
                     tracing::warn!(
                         memory_id = %memory_id.0,
                         error = %e,
-                        "Stale vector reference — cleaning up orphaned index entry"
+                        "recall: memory record could not be read — skipping this \
+                         candidate and KEEPING its index entry; an inconclusive \
+                         read is not proof the memory is gone"
                     );
-                    self.retriever.remove_memory(&memory_id);
                 }
             }
 
@@ -5325,8 +5706,16 @@ impl MemorySystem {
             cache_hits,
             storage_fetches,
             filtered_out,
+            unreadable_records,
             "recall [layer:5] memory fetch + unified scoring"
         );
+        if unreadable_records > 0 {
+            tracing::warn!(
+                unreadable_records,
+                "recall returned incomplete results: some candidate records \
+                 could not be read; their index entries were kept"
+            );
+        }
         if let Some(ref mut s) = stats {
             s.stage_timings
                 .get_or_insert_with(StageTiming::default)
@@ -5446,7 +5835,7 @@ impl MemorySystem {
             // (eval repeats) must not teach the detector (the records feed
             // Layer 4.6's boosts on future queries; the third write class
             // behind the L1 smoke cross-repeat divergence).
-            let record_state = !Self::recall_readonly();
+            let record_state = !Self::recall_readonly(query);
             let competition_result = self
                 .interference_detector
                 .write()
@@ -5489,8 +5878,16 @@ impl MemorySystem {
                 );
             }
 
-            // Persist interference records from retrieval competition
-            {
+            // Persist interference records from retrieval competition.
+            //
+            // Gated on `record_state` like the accumulation above. It was not:
+            // read-only recall suppressed the ACCUMULATION but still ran this
+            // block, so it wrote the detector's records and the global event
+            // count to RocksDB on a path that promises no writes. Suppressing
+            // the accumulation and then persisting anyway is the worst of both
+            // — the write happens, and what it writes is a snapshot of state
+            // this recall was told not to update.
+            if record_state {
                 let detector = self.interference_detector.read();
                 let affected_ids = detector.get_affected_ids_from_competition(&competition_result);
                 if !affected_ids.is_empty() {
@@ -5516,7 +5913,7 @@ impl MemorySystem {
         // RH-8 gate: access count mutates persistent state — only in `Full` mode.
         // Bump in-memory + record events, then persist all candidates' access
         // updates in ONE batched write rather than a full re-index per candidate.
-        if layer_full && !Self::recall_readonly() {
+        if layer_full && !Self::recall_readonly(query) {
             let mut access_refs: Vec<(&Memory, f32)> = Vec::with_capacity(memories.len());
             for memory in &memories {
                 let before =
@@ -5534,7 +5931,7 @@ impl MemorySystem {
         // participate in coactivation (biological: "neurons that fire together
         // wire together" but suppressed neurons don't fire).
         // RH-8 gate: Hebbian coactivation mutates graph state — only in `Full` mode.
-        if layer_full && !Self::recall_readonly() && memories.len() >= 2 {
+        if layer_full && !Self::recall_readonly(query) && memories.len() >= 2 {
             if let Some(graph) = &self.graph_memory {
                 let memory_uuids: Vec<uuid::Uuid> = memories.iter().map(|m| m.id.0).collect();
                 match graph.read().record_memory_coactivation(&memory_uuids) {
@@ -5567,7 +5964,7 @@ impl MemorySystem {
         // RH-8 gate: retrieval counter mutates persistent state — only in `Full` mode.
         // Also a usage write, so read-only recall must skip it (sibling of the
         // access-count/coactivation gates above).
-        if layer_full && !Self::recall_readonly() {
+        if layer_full && !Self::recall_readonly(query) {
             if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
                 self.stats.write().total_retrievals = count;
             }
@@ -6652,11 +7049,86 @@ impl MemorySystem {
     // Memory-Edge Tier Coupling Methods
     // =========================================================================
 
+    /// Graph entity ids a memory refers to, resolved against an already-held
+    /// graph read guard.
+    ///
+    /// [`Memory::entity_refs`] is the field this looks like it should read, and
+    /// it is empty on every memory this product has ever written: the method
+    /// that pushes to it has had no non-test caller since the field was
+    /// introduced, every constructor sets `Vec::new()`, and a live store returns
+    /// 0 populated rows out of 200.
+    ///
+    /// The authority is the graph. `process_experience_into_graph` writes an
+    /// [`crate::graph_memory::EpisodicNode`] whose `uuid` IS the memory's own
+    /// UUID and whose `entity_refs` are the resolved entity ids — and entity
+    /// canonicalization keeps that side current, whereas a denormalized copy on
+    /// the memory would drift the moment two entities merged.
+    ///
+    /// The stored field is still unioned in, because `Memory::from_legacy`
+    /// faithfully restores it for any record that carries one. The field itself
+    /// stays: it sits at position 9 of the 22 positional fields in `MemoryFlat`,
+    /// so removing it would shift every field after it and turn every stored
+    /// record into a decode that succeeds and returns garbage.
+    fn entity_ids_from_graph(
+        graph: &crate::graph_memory::GraphMemory,
+        memory: &Memory,
+    ) -> Vec<Uuid> {
+        let mut ids: Vec<Uuid> = memory.entity_refs.iter().map(|r| r.entity_id).collect();
+
+        if let Ok(Some(episode)) = graph.get_episode(&memory.id.0) {
+            for uuid in episode.entity_refs {
+                if !ids.contains(&uuid) {
+                    ids.push(uuid);
+                }
+            }
+        }
+
+        ids
+    }
+
+    /// Graph entity ids a memory refers to. See [`Self::entity_ids_from_graph`]
+    /// for why this does not simply read `Memory::entity_refs`.
+    ///
+    /// Takes the graph read lock itself, so callers that already hold it must
+    /// use [`Self::entity_ids_from_graph`] instead.
+    pub fn memory_entity_ids(&self, memory: &Memory) -> Vec<Uuid> {
+        match &self.graph_memory {
+            Some(graph) => Self::entity_ids_from_graph(&graph.read(), memory),
+            None => memory.entity_refs.iter().map(|r| r.entity_id).collect(),
+        }
+    }
+
     /// Calculate graph-adjusted importance threshold for tier promotion (Direction 3).
     ///
     /// Well-connected memories (many L2+ edges) get a discount on the promotion threshold.
     /// Isolated memories (entities but no edges) get a penalty.
     /// Memories with no entities are unaffected (no graph context to evaluate).
+    ///
+    /// The entity set is resolved through the graph rather than read off
+    /// `memory.entity_refs`. That field is empty for every memory in
+    /// production, so the guard below used to return `base_threshold`
+    /// unconditionally and everything after it was unreachable — this whole
+    /// direction of the memory-edge tier coupling has been inert since it
+    /// shipped.
+    ///
+    /// # Why the lock is taken with `try_read`
+    ///
+    /// Reviving this path moved the graph acquisition to BEFORE the early
+    /// return, and that turned a promotion heuristic into a re-entrancy hazard.
+    /// `remember()` reaches here on its own thread — `remember` →
+    /// `consolidate_if_needed` → `promote_working_to_session` → here — so any
+    /// caller holding the graph WRITE lock and then calling `remember` blocks
+    /// forever on a lock its own thread owns (`parking_lot::RwLock` is not
+    /// re-entrant). While the early return was unreachable that could not
+    /// happen, because the lock was never taken; the moment it became
+    /// reachable, it could.
+    ///
+    /// A tier-promotion decision must never block on the graph. When the lock
+    /// is unavailable this returns the UNADJUSTED threshold, which is neither a
+    /// discount nor a penalty — the same answer the memory got before this
+    /// direction was revived — and consolidation re-evaluates it on the next
+    /// cycle. Contention costs one cycle of adjustment; blocking would cost the
+    /// process.
     fn graph_adjusted_threshold(&self, memory: &Memory, base_threshold: f32) -> f32 {
         use crate::constants::*;
 
@@ -6665,15 +7137,23 @@ impl MemorySystem {
             None => return base_threshold,
         };
 
-        if memory.entity_refs.is_empty() {
+        let Some(graph_guard) = graph.try_read() else {
+            tracing::debug!(
+                memory_id = %memory.id.0,
+                "tier promotion: graph busy, using the unadjusted threshold for this cycle"
+            );
+            return base_threshold;
+        };
+        let entity_ids = Self::entity_ids_from_graph(&graph_guard, memory);
+
+        if entity_ids.is_empty() {
             return base_threshold;
         }
 
-        let graph_guard = graph.read();
         let mut l2_plus_count = 0usize;
 
-        for entity_ref in &memory.entity_refs {
-            if let Ok(edges) = graph_guard.get_entity_relationships(&entity_ref.entity_id) {
+        for entity_id in &entity_ids {
+            if let Ok(edges) = graph_guard.get_entity_relationships(entity_id) {
                 for edge in &edges {
                     if matches!(
                         edge.tier,
@@ -6772,6 +7252,11 @@ impl MemorySystem {
     /// When graph decay prunes edges and leaves entities orphaned, the memories
     /// referencing those entities get a small importance boost to prevent immediate
     /// decay death. This gives them one more maintenance cycle to prove value.
+    ///
+    /// "References" is resolved through the graph, not read off
+    /// `memory.entity_refs` — that field is empty for every memory in
+    /// production, so this boost had never fired for anyone. See
+    /// [`Self::entity_ids_from_graph`].
     pub fn compensate_orphaned_memories(&self, orphaned_entity_ids: &[String]) -> Result<usize> {
         use crate::constants::ORPHAN_COMPENSATORY_BOOST;
 
@@ -6790,12 +7275,28 @@ impl MemorySystem {
             self.session_memory.read().all_memories(),
         ];
 
+        // One guard for the whole scan rather than one acquisition per memory.
+        let graph_guard = self.graph_memory.as_ref().map(|g| g.read());
+
+        // `remember()` puts the SAME `Arc<Memory>` in working memory and — when
+        // importance clears `importance_threshold` — in session memory too, so
+        // the two tiers overlap. Without this set such a memory receives the
+        // boost twice and is counted twice. That was latent for as long as this
+        // loop body was unreachable; activating it made it observable.
+        let mut seen: std::collections::HashSet<MemoryId> = std::collections::HashSet::new();
+
         for memories in &tiers {
             for memory in memories {
-                let entity_count = memory
-                    .entity_refs
+                if !seen.insert(memory.id.clone()) {
+                    continue;
+                }
+                let entity_ids = match &graph_guard {
+                    Some(graph) => Self::entity_ids_from_graph(graph, memory),
+                    None => memory.entity_refs.iter().map(|r| r.entity_id).collect(),
+                };
+                let entity_count = entity_ids
                     .iter()
-                    .filter(|e| orphaned_set.contains(e.entity_id.to_string().as_str()))
+                    .filter(|id| orphaned_set.contains(id.to_string().as_str()))
                     .count();
                 if entity_count > 0 {
                     let new_importance =
@@ -7620,10 +8121,18 @@ impl MemorySystem {
         memory_id: &MemoryId,
         parent_id: Option<MemoryId>,
     ) -> Result<()> {
-        // Update the persistent copy in long-term storage
-        let mut memory = self.long_term_memory.get(memory_id)?;
-        memory.set_parent(parent_id.clone());
-        self.long_term_memory.update(&memory)?;
+        // Update the persistent copy in long-term storage.
+        //
+        // Read-modify-write under `storage.modify`, not inline: handlers call
+        // this while holding only a `.read()` guard on the MemorySystem (see
+        // `handlers/remember.rs`'s async parent resolution, and
+        // `zenoh_transport/handlers.rs`), so two writers to the same memory run
+        // concurrently and an inline get/mutate/update would drop whichever
+        // read first.
+        let memory = self
+            .long_term_memory
+            .modify(memory_id, |m| m.set_parent(parent_id.clone()))?
+            .ok_or_else(|| anyhow::anyhow!("Memory not found: {memory_id:?}"))?;
 
         // Also update the in-memory tier copy (working or session) so reads
         // reflect the parent_id immediately without waiting for tier promotion
@@ -10946,6 +11455,50 @@ mod companion_injection_tests {
         );
     }
 
+    /// `remember()` must not block on a graph lock.
+    ///
+    /// It reaches the graph indirectly — `remember` → `consolidate_if_needed` →
+    /// `promote_working_to_session` → `graph_adjusted_threshold` — and
+    /// `parking_lot::RwLock` is not re-entrant, so a caller holding the WRITE
+    /// lock on its own thread would block forever on its own lock. That is
+    /// exactly what `respects_injection_cap` above does while seeding, which is
+    /// why it hung the entire lib suite the moment the tier-coupling path
+    /// stopped being inert and started taking the lock for real.
+    ///
+    /// This test exists because the failure mode is a HANG, and a hang is
+    /// indistinguishable from a slow test in a suite — it reports nothing, it
+    /// just never finishes. Asserting the call RETURNS converts that silence
+    /// into a named failure. The watchdog thread is the assertion: without it
+    /// a regression would hang this test too, and prove nothing.
+    #[test]
+    fn remember_does_not_block_while_the_graph_write_lock_is_held() {
+        let (system, _t) = setup();
+        let system = Arc::new(system);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = {
+            let system = Arc::clone(&system);
+            std::thread::spawn(move || {
+                let graph = system.graph_memory().expect("graph wired");
+                let _held = graph.write();
+                // The write lock is held across this call, on this same thread.
+                let id = remember_with_entities(&system, "Written under the graph lock.", &["A"]);
+                let _ = tx.send(id);
+            })
+        };
+
+        // Generous relative to a real remember (tens of milliseconds), tight
+        // relative to "forever".
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
+        assert!(
+            outcome.is_ok(),
+            "remember() blocked while the graph write lock was held — a read on \
+             the tier-promotion path has become re-entrant against its own \
+             caller; see graph_adjusted_threshold"
+        );
+        worker.join().expect("writer thread panicked");
+    }
+
     /// No provenance on the incident edges → nothing to harvest (no-op).
     #[test]
     fn no_op_when_provenance_empty() {
@@ -11251,6 +11804,931 @@ mod fact_extraction_flag_tests {
         assert!(
             !flag(&system),
             "everything eligible was processed; the flag must be consumed"
+        );
+    }
+}
+
+/// Read-only recall on the PRODUCTION path.
+///
+/// `SHODH_RECALL_READONLY` insulates the eval harness, but it is a property of
+/// the process: a server handling concurrent callers cannot use it to answer one
+/// request without learning. So a reviewer who ran the same query twice against
+/// the real product got the second answer from a corpus the first query had
+/// altered — defensible as design, but it meant the word *reproducible* could
+/// not be used without a caveat. `Query::read_only` is the per-request sibling
+/// that removes the caveat, without changing the default.
+///
+/// These tests are written against the failure mode a flag invites: an ignored
+/// flag also leaves state byte-identical, because so does an inert pipeline.
+/// Each one therefore drives BOTH arms on the SAME fixture in the SAME run — the
+/// read-only arm must change nothing and the default arm must change something,
+/// or neither assertion means anything.
+#[cfg(test)]
+mod readonly_recall_tests {
+    use super::*;
+    use crate::graph_memory::GraphMemory;
+    use crate::memory::types::Experience;
+
+    /// Everything a recall could persist about the memories it read, in a form
+    /// that compares exactly: access counts, importance bits and last-accessed
+    /// per memory, every graph edge's strength bits and activation count, and
+    /// the global retrieval counter. Bits rather than floats — "byte-identical"
+    /// is the claim being made.
+    #[derive(Debug, PartialEq, Eq)]
+    struct UsageSnapshot {
+        memories: Vec<(String, u32, u32, i64)>,
+        edges: Vec<(String, u32, u32)>,
+        retrievals: usize,
+    }
+
+    fn snapshot(system: &MemorySystem, graph: &GraphMemory, ids: &[MemoryId]) -> UsageSnapshot {
+        let mut memories: Vec<(String, u32, u32, i64)> = ids
+            .iter()
+            .map(|id| {
+                // Read through storage, not the cache: the claim is about what
+                // survives a restart.
+                let m = system.long_term_memory.get(id).expect("stored memory");
+                (
+                    id.0.to_string(),
+                    m.access_count(),
+                    m.importance().to_bits(),
+                    m.last_accessed().timestamp_micros(),
+                )
+            })
+            .collect();
+        memories.sort();
+
+        let mut edges: Vec<(String, u32, u32)> = graph
+            .get_all_relationships()
+            .expect("relationships")
+            .into_iter()
+            .map(|e| (e.uuid.to_string(), e.strength.to_bits(), e.activation_count))
+            .collect();
+        edges.sort();
+
+        UsageSnapshot {
+            memories,
+            edges,
+            retrievals: system
+                .long_term_memory
+                .get_retrieval_count()
+                .expect("retrieval count"),
+        }
+    }
+
+    /// A system with a graph attached and three memories about one subject, so a
+    /// single query returns several results and the co-activation / access-bump
+    /// writes have something to act on.
+    fn seeded_system() -> (
+        MemorySystem,
+        Arc<parking_lot::RwLock<GraphMemory>>,
+        Vec<MemoryId>,
+        tempfile::TempDir,
+    ) {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = MemoryConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            working_memory_size: 50,
+            session_memory_size_mb: 50,
+            max_heap_per_user_mb: 200,
+            auto_compress: false,
+            compression_age_days: 1,
+            importance_threshold: 0.0,
+        };
+        let mut system = MemorySystem::new(config, None).expect("memory system");
+        let graph = Arc::new(parking_lot::RwLock::new(
+            GraphMemory::new(&temp_dir.path().join("graph"), None).expect("graph"),
+        ));
+        system.set_graph_memory(graph.clone());
+
+        let ids: Vec<MemoryId> = [
+            "The Indian Navy commissioned INS Vikrant at Cochin Shipyard.",
+            "The Indian Navy inducted the Pinaka rocket artillery system.",
+            "Mazagon Dock delivered a submarine to the Indian Navy.",
+        ]
+        .into_iter()
+        .map(|content| {
+            system
+                .remember(
+                    Experience {
+                        content: content.to_string(),
+                        entities: vec!["Indian Navy".to_string()],
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .expect("remember")
+        })
+        .collect();
+
+        // Mint one memory<->memory co-retrieval edge so the snapshot's edge
+        // half is not vacuous. Co-activation is strengthen-only by default —
+        // it reinforces edges that already exist and never mints all-pairs
+        // `CoRetrieved` — so with no seeded edge the graph stays empty and
+        // "edge weights unchanged" would hold for the wrong reason.
+        //
+        // Calls the impl with `strengthen_only = false` rather than setting
+        // `SHODH_COACT_STRENGTHEN_ONLY=0`: the env var is read process-wide by
+        // every concurrent test, so mutating it here would make an unrelated
+        // recall mint edges — the same race class as the harness pin, pointed
+        // the other way. Passing the parameter is why the impl takes one.
+        let minted = graph
+            .read()
+            .record_memory_coactivation_impl(&[ids[0].0, ids[1].0], false)
+            .expect("seed co-retrieval edge");
+        assert_eq!(minted, 1, "fixture must seed exactly one co-retrieval edge");
+
+        (system, graph, ids, temp_dir)
+    }
+
+    fn navy_query(read_only: bool) -> Query {
+        Query {
+            query_text: Some("Indian Navy".to_string()),
+            max_results: 5,
+            read_only,
+            ..Query::default()
+        }
+    }
+
+    /// Two identical read-only recalls must leave importance, access counts,
+    /// last-accessed timestamps, edge weights and the retrieval counter exactly
+    /// as they were — and a third recall with the flag off must move them, which
+    /// is what makes the first two assertions mean something.
+    #[test]
+    fn read_only_recall_leaves_persisted_usage_state_byte_identical() {
+        // The process-wide pin is explicitly OFF: the claim is that the
+        // per-request flag ALONE suppresses the writes. With the pin on, the
+        // read-only half would pass for the wrong reason and the default half
+        // would fail.
+        let _env = RecallEnvPin::pin("0");
+
+        let (system, graph, ids, _dir) = seeded_system();
+
+        let baseline = snapshot(&system, &graph.read(), &ids);
+        assert_eq!(
+            baseline.edges.len(),
+            1,
+            "the snapshot must actually carry an edge, or its edge-weight half \
+             is vacuous"
+        );
+
+        let first = system
+            .recall(&navy_query(true))
+            .expect("read-only recall #1");
+        assert!(
+            first.len() >= 2,
+            "the fixture must return several memories or the access-count and \
+             co-activation writes have nothing to act on and this test is \
+             vacuous; got {}",
+            first.len()
+        );
+        let after_first = snapshot(&system, &graph.read(), &ids);
+        assert_eq!(
+            baseline, after_first,
+            "read_only=true must leave persisted usage state byte-identical \
+             after recall #1"
+        );
+
+        let second = system
+            .recall(&navy_query(true))
+            .expect("read-only recall #2");
+        let after_second = snapshot(&system, &graph.read(), &ids);
+        assert_eq!(
+            baseline, after_second,
+            "read_only=true must leave persisted usage state byte-identical \
+             after recall #2 — two identical read-only recalls must see the \
+             same corpus"
+        );
+
+        // The results themselves must also be reproducible: identical state is
+        // only half of what a caller running the same query twice needs.
+        let ranked =
+            |r: &[SharedMemory]| -> Vec<String> { r.iter().map(|m| m.id.0.to_string()).collect() };
+        assert_eq!(
+            ranked(&first),
+            ranked(&second),
+            "two read-only recalls of the same query must return the same ranking"
+        );
+
+        // Non-vacuity: same pipeline, same fixture, flag off, DOES learn.
+        // Without this the test would pass against a flag nobody reads.
+        //
+        // Checked immediately before the call: if some other test has pinned the
+        // process-wide variable behind our back, say THAT rather than blaming
+        // the flag. This exact failure — "the default path must still count the
+        // retrieval (0 -> 0)" — was the harness smoke-suite test leaking its
+        // pin, twice, before `HarnessEnvGuard` and this explicit "0" pin.
+        assert_eq!(
+            std::env::var("SHODH_RECALL_READONLY").as_deref(),
+            Ok("0"),
+            "another test clobbered the process-wide read-only pin; the \
+             assertion below would fail for that reason, not because \
+             read_only=false stopped reinforcing"
+        );
+        system.recall(&navy_query(false)).expect("default recall");
+        let after_default = snapshot(&system, &graph.read(), &ids);
+        assert_ne!(
+            baseline, after_default,
+            "read_only=false (product default) must still reinforce what it \
+             read — if this passes, the read-only assertions above proved only \
+             that the recall path writes nothing at all"
+        );
+    }
+
+    /// The companion, stated as a product guarantee rather than as a control:
+    /// adding the flag must not have quietly turned reinforcement-on-read off
+    /// for every existing caller. Access counts still rise, the retrieval
+    /// counter still advances.
+    #[test]
+    fn default_recall_still_reinforces_what_it_read() {
+        let _env = RecallEnvPin::pin("0");
+
+        let (system, graph, ids, _dir) = seeded_system();
+
+        let before = snapshot(&system, &graph.read(), &ids);
+        assert_eq!(
+            std::env::var("SHODH_RECALL_READONLY").as_deref(),
+            Ok("0"),
+            "another test clobbered the process-wide read-only pin; the \
+             assertions below would fail for that reason, not because the \
+             default path stopped reinforcing"
+        );
+        let results = system.recall(&navy_query(false)).expect("default recall");
+        assert!(
+            results.len() >= 2,
+            "fixture must return several memories; got {}",
+            results.len()
+        );
+        let after = snapshot(&system, &graph.read(), &ids);
+
+        assert!(
+            after.retrievals > before.retrievals,
+            "the default path must still count the retrieval ({} -> {})",
+            before.retrievals,
+            after.retrievals
+        );
+
+        let recalled: std::collections::HashSet<String> =
+            results.iter().map(|m| m.id.0.to_string()).collect();
+        let bumped = after
+            .memories
+            .iter()
+            .zip(before.memories.iter())
+            .filter(|((id, after_count, _, _), (_, before_count, _, _))| {
+                recalled.contains(id) && after_count > before_count
+            })
+            .count();
+        assert_eq!(
+            bumped,
+            recalled.len(),
+            "every memory the default path returned must have its access count \
+             bumped and persisted — before={:?} after={:?}",
+            before.memories,
+            after.memories
+        );
+
+        // Hebbian co-activation: the seeded memory<->memory edge must have been
+        // strengthened, not merely left alone.
+        assert_ne!(
+            before.edges, after.edges,
+            "the default path must still strengthen the co-retrieval edge \
+             between memories returned together — before={:?} after={:?}",
+            before.edges, after.edges
+        );
+    }
+}
+
+#[cfg(test)]
+mod memory_entity_resolution_tests {
+    //! `Memory::entity_refs` is never populated on any production write path —
+    //! every constructor sets `Vec::new()`, and the one method that pushes to it
+    //! has no non-test caller. The graph, however, records exactly this
+    //! information: `process_experience_into_graph` writes an `EpisodicNode`
+    //! whose `uuid` IS the memory id and whose `entity_refs` are the resolved
+    //! graph entity UUIDs.
+    //!
+    //! These tests pin the consumers to the graph rather than to the empty
+    //! field. Each one sets up the episode the way the handler layer does and
+    //! asserts on behaviour that was previously unreachable.
+
+    use super::*;
+    use crate::graph_memory::{
+        EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode, GraphMemory, LtpStatus,
+        RelationType, RelationshipEdge,
+    };
+    use crate::memory::types::Experience;
+    use std::collections::HashMap as StdHashMap;
+
+    fn setup() -> (MemorySystem, tempfile::TempDir) {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = MemoryConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            working_memory_size: 50,
+            session_memory_size_mb: 50,
+            max_heap_per_user_mb: 200,
+            auto_compress: false,
+            compression_age_days: 1,
+            importance_threshold: 0.0,
+        };
+        let mut system = MemorySystem::new(config, None).expect("memory system");
+        let graph = GraphMemory::new(&temp_dir.path().join("graph"), None).expect("graph");
+        system.set_graph_memory(Arc::new(parking_lot::RwLock::new(graph)));
+        (system, temp_dir)
+    }
+
+    fn add_entity(graph: &GraphMemory, name: &str) -> uuid::Uuid {
+        let now = chrono::Utc::now();
+        graph
+            .add_entity(EntityNode {
+                uuid: uuid::Uuid::new_v4(),
+                name: name.to_string(),
+                labels: vec![EntityLabel::Concept],
+                created_at: now,
+                last_seen_at: now,
+                mention_count: 1,
+                summary: String::new(),
+                attributes: StdHashMap::new(),
+                name_embedding: None,
+                salience: 1.0,
+                is_proper_noun: true,
+                selectivity: None,
+                fine_type: None,
+                kb_id: None,
+            })
+            .expect("add entity")
+    }
+
+    fn add_l2_edge(graph: &GraphMemory, from: uuid::Uuid, to: uuid::Uuid) {
+        let now = chrono::Utc::now();
+        graph
+            .add_relationship(RelationshipEdge {
+                uuid: uuid::Uuid::new_v4(),
+                from_entity: from,
+                to_entity: to,
+                relation_type: RelationType::CoOccurs,
+                strength: 1.0,
+                created_at: now,
+                valid_at: now,
+                invalidated_at: None,
+                source_episode_id: None,
+                context: String::new(),
+                last_activated: now,
+                activation_count: 1,
+                ltp_status: LtpStatus::None,
+                tier: EdgeTier::L2Episodic,
+                activation_timestamps: None,
+                entity_confidence: None,
+                forman_curvature: None,
+                endpoint_selectivity: None,
+                provenance: Vec::new(),
+                promoted_at: None,
+            })
+            .expect("add edge");
+    }
+
+    /// Mirror `process_experience_into_graph`: the episode's uuid IS the memory
+    /// id, and its `entity_refs` are the resolved graph entity UUIDs.
+    fn link_memory_to_entities(graph: &GraphMemory, id: &MemoryId, refs: Vec<uuid::Uuid>) {
+        let now = chrono::Utc::now();
+        graph
+            .add_episode(EpisodicNode {
+                uuid: id.0,
+                name: format!("Memory {}", &id.0.to_string()[..8]),
+                content: String::new(),
+                valid_at: now,
+                created_at: now,
+                entity_refs: refs,
+                source: EpisodeSource::Message,
+                metadata: StdHashMap::new(),
+            })
+            .expect("add episode");
+    }
+
+    /// `importance_override` is pinned well below 1.0 so the compensatory boost
+    /// has headroom — `compensate_orphaned_memories` caps at 1.0, so a memory
+    /// that scored 1.0 on its own would show no movement even with a correct
+    /// fix and the assertion would be measuring the cap, not the behaviour.
+    fn remember(system: &MemorySystem, content: &str) -> MemoryId {
+        system
+            .remember(
+                Experience {
+                    content: content.to_string(),
+                    importance_override: Some(0.5),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("remember")
+    }
+
+    fn working_memory_for(system: &MemorySystem, id: &MemoryId) -> SharedMemory {
+        system
+            .working_memory
+            .read()
+            .all_memories()
+            .into_iter()
+            .find(|m| &m.id == id)
+            .expect("memory is in working tier after remember")
+    }
+
+    /// `graph_adjusted_threshold` short-circuits on `memory.entity_refs.is_empty()`,
+    /// which is ALWAYS true in production — so the whole edge-count discount
+    /// below that guard is unreachable code and tier promotion has never been
+    /// graph-aware.
+    ///
+    /// Mutation that turns this red again: restore the
+    /// `if memory.entity_refs.is_empty() { return base_threshold; }` guard.
+    #[test]
+    fn graph_adjusted_threshold_discounts_a_well_connected_memory() {
+        let (system, _dir) = setup();
+        let graph = system.graph_memory().expect("graph wired").clone();
+
+        let (alpha, beta, gamma) = {
+            let g = graph.read();
+            let alpha = add_entity(&g, "alpha");
+            let beta = add_entity(&g, "beta");
+            let gamma = add_entity(&g, "gamma");
+            add_l2_edge(&g, alpha, beta);
+            add_l2_edge(&g, alpha, gamma);
+            add_l2_edge(&g, beta, gamma);
+            (alpha, beta, gamma)
+        };
+
+        let id = remember(&system, "A memory whose entities are richly connected.");
+        link_memory_to_entities(&graph.read(), &id, vec![alpha, beta, gamma]);
+
+        let memory = working_memory_for(&system, &id);
+        assert!(
+            memory.entity_refs.is_empty(),
+            "precondition: no production path populates Memory::entity_refs"
+        );
+
+        let base = 0.50_f32;
+        let adjusted = system.graph_adjusted_threshold(&memory, base);
+        assert!(
+            adjusted < base,
+            "a memory with three L2 edges must get a promotion discount, got \
+             {adjusted} against base {base}"
+        );
+    }
+
+    /// The other half of the same guard: a memory that HAS entities but no
+    /// strong edges is supposed to be penalised. That branch was equally
+    /// unreachable.
+    #[test]
+    fn graph_adjusted_threshold_penalises_an_isolated_memory() {
+        let (system, _dir) = setup();
+        let graph = system.graph_memory().expect("graph wired").clone();
+
+        let lonely = add_entity(&graph.read(), "lonely");
+        let id = remember(&system, "A memory whose single entity has no edges.");
+        link_memory_to_entities(&graph.read(), &id, vec![lonely]);
+
+        let memory = working_memory_for(&system, &id);
+        let base = 0.50_f32;
+        let adjusted = system.graph_adjusted_threshold(&memory, base);
+        assert!(
+            adjusted > base,
+            "a memory with entities but no L2+ edges must be penalised, got \
+             {adjusted} against base {base}"
+        );
+    }
+
+    /// A memory the graph knows nothing about has no graph context to judge, so
+    /// the base threshold must be returned unchanged. This is the branch that
+    /// the empty-field short-circuit made look correct for every memory.
+    #[test]
+    fn graph_adjusted_threshold_is_neutral_without_an_episode() {
+        let (system, _dir) = setup();
+        let id = remember(&system, "A memory the graph never saw.");
+        let memory = working_memory_for(&system, &id);
+
+        let base = 0.50_f32;
+        assert_eq!(system.graph_adjusted_threshold(&memory, base), base);
+    }
+
+    /// `compensate_orphaned_memories` scans working and session memories for
+    /// references to orphaned entities via `memory.entity_refs` — always empty,
+    /// so the compensatory boost has never fired for anyone.
+    ///
+    /// Mutation that turns this red again: read `memory.entity_refs` instead of
+    /// resolving the memory's entities through the graph.
+    ///
+    /// The exact-boost assertion is a second, independent guard. `remember()`
+    /// files one `Arc<Memory>` into both working and session memory, so the
+    /// two-tier scan sees it twice; before the dedup this reported
+    /// `compensated == 2` and applied the boost twice. Removing the `seen` set
+    /// turns this red.
+    #[test]
+    fn orphan_compensation_finds_entities_through_the_graph() {
+        let (system, _dir) = setup();
+        let graph = system.graph_memory().expect("graph wired").clone();
+
+        let orphan = add_entity(&graph.read(), "orphaned-entity");
+        let id = remember(&system, "A memory that mentions the orphaned entity.");
+        link_memory_to_entities(&graph.read(), &id, vec![orphan]);
+
+        let memory = working_memory_for(&system, &id);
+        let before = memory.importance();
+
+        let compensated = system
+            .compensate_orphaned_memories(&[orphan.to_string()])
+            .expect("compensate");
+
+        assert_eq!(
+            compensated, 1,
+            "the memory referencing the orphaned entity was compensated {compensated} times, \
+             expected exactly once"
+        );
+
+        let expected = before + crate::constants::ORPHAN_COMPENSATORY_BOOST as f32;
+        let actual = memory.importance();
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "importance moved by the wrong amount: {before} -> {actual}, expected {expected}"
+        );
+    }
+
+    /// Compensation must not fire for a memory that does not reference the
+    /// orphaned entity — otherwise the "fix" would just boost everything.
+    #[test]
+    fn orphan_compensation_ignores_unrelated_memories() {
+        let (system, _dir) = setup();
+        let graph = system.graph_memory().expect("graph wired").clone();
+
+        let (orphan, unrelated) = {
+            let g = graph.read();
+            (add_entity(&g, "orphaned-entity"), add_entity(&g, "other"))
+        };
+        let id = remember(&system, "A memory about something else entirely.");
+        link_memory_to_entities(&graph.read(), &id, vec![unrelated]);
+
+        let memory = working_memory_for(&system, &id);
+        let before = memory.importance();
+
+        let compensated = system
+            .compensate_orphaned_memories(&[orphan.to_string()])
+            .expect("compensate");
+
+        assert_eq!(compensated, 0, "an unrelated memory was compensated");
+        assert_eq!(memory.importance(), before);
+    }
+}
+
+#[cfg(test)]
+mod unreadable_record_index_tests {
+    //! The cold read path used to collapse three different outcomes of
+    //! `get_from_storage` into one: "RocksDB says this key does not exist",
+    //! "RocksDB failed to read", and "the bytes are there but do not decode".
+    //! All three landed in the same `Err` arm, whose only action was
+    //! `retriever.remove_memory(...)` — which drops the memory's vector ids
+    //! from the id mapping AND calls `storage.delete_vector_mapping`, so the
+    //! removal survives a restart.
+    //!
+    //! That made a *transient* read failure permanently unindex a live memory:
+    //! the record is still in RocksDB, but nothing points at it any more.
+    //! Deleting an index entry must require proof of absence.
+
+    use super::*;
+    use crate::memory::types::Experience;
+
+    /// A value too short for even the most permissive entry in the 17-path
+    /// legacy fallback chain (`MinimalMemory`, the shortest, needs 16 bytes
+    /// of UUID before it reads anything else). Longer garbage is NOT reliably
+    /// undecodable — the fallback chain will happily reinterpret it — so the
+    /// test pins the one shape that is guaranteed to reach the error arm.
+    const UNDECODABLE_BYTES: &[u8] = &[0x01];
+
+    fn setup() -> (MemorySystem, tempfile::TempDir) {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = MemoryConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            working_memory_size: 50,
+            session_memory_size_mb: 50,
+            max_heap_per_user_mb: 200,
+            auto_compress: false,
+            compression_age_days: 30,
+            importance_threshold: 0.0,
+        };
+        let system = MemorySystem::new(config, None).expect("memory system");
+        (system, temp_dir)
+    }
+
+    fn remember(system: &MemorySystem, content: &str) -> MemoryId {
+        system
+            .remember(
+                Experience {
+                    content: content.to_string(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("remember")
+    }
+
+    /// Force the cold path: the fetch loop checks working then session memory
+    /// before touching RocksDB, so a just-written memory would never reach the
+    /// storage read this test is about.
+    fn evict_from_caches(system: &MemorySystem, id: &MemoryId) {
+        let _ = system.working_memory.write().remove(id);
+        let _ = system.session_memory.write().remove(id);
+    }
+
+    fn recall_text(system: &MemorySystem, text: &str) {
+        let query = Query {
+            query_text: Some(text.to_string()),
+            max_results: 10,
+            ..Default::default()
+        };
+        let _ = system.recall(&query).expect("recall");
+    }
+
+    /// THE decisive test: a record that cannot be read is not evidence that the
+    /// memory is gone, so the index entry must survive. Writing undecodable
+    /// bytes at the key reproduces the same `Err` the read path sees for a
+    /// transient RocksDB IO failure — `MemoryStorage::get` funnels both into
+    /// one `Err`, which is precisely the conflation under test.
+    #[test]
+    fn unreadable_record_does_not_drop_the_index_entry() {
+        let (system, _tmp) = setup();
+        let id = remember(&system, "The quarterly revenue report is due on Friday.");
+        assert!(
+            system.retriever.get_indexed_memory_ids().contains(&id),
+            "precondition: the memory should be in the vector index"
+        );
+        evict_from_caches(&system, &id);
+
+        // Corrupt the stored bytes in place: the key EXISTS, the value is
+        // undecodable. `db.get` succeeds, `deserialize_memory` fails.
+        system
+            .long_term_memory
+            .db()
+            .put(id.0.as_bytes(), UNDECODABLE_BYTES)
+            .expect("write undecodable bytes");
+
+        recall_text(&system, "quarterly revenue report");
+
+        assert!(
+            system.retriever.get_indexed_memory_ids().contains(&id),
+            "an unreadable record was treated as proof of absence and the live \
+             memory was permanently unindexed"
+        );
+    }
+
+    /// The other half of the discrimination: a key RocksDB positively reports
+    /// as absent IS proof, and the orphaned index entry must still be cleaned
+    /// up. Without this the fix would just disable the cleanup.
+    #[test]
+    fn genuinely_absent_record_still_drops_the_index_entry() {
+        let (system, _tmp) = setup();
+        let id = remember(&system, "The quarterly revenue report is due on Friday.");
+        assert!(system.retriever.get_indexed_memory_ids().contains(&id));
+        evict_from_caches(&system, &id);
+
+        // Delete the record only — deliberately NOT via `forget`, so the vector
+        // index keeps pointing at a key that no longer exists.
+        system
+            .long_term_memory
+            .db()
+            .delete(id.0.as_bytes())
+            .expect("delete record");
+
+        recall_text(&system, "quarterly revenue report");
+
+        assert!(
+            !system.retriever.get_indexed_memory_ids().contains(&id),
+            "a genuinely absent record left its orphaned index entry behind"
+        );
+    }
+
+    /// `get_opt` is the seam the read path uses to tell the two apart, so pin
+    /// its contract directly: absence is `Ok(None)`, an undecodable record is
+    /// `Err` — never `Ok(None)`.
+    #[test]
+    fn get_opt_reports_absence_and_unreadability_differently() {
+        let (system, _tmp) = setup();
+        let id = remember(&system, "A memory that will be corrupted.");
+
+        let missing = MemoryId(uuid::Uuid::new_v4());
+        assert!(
+            matches!(system.long_term_memory.get_opt(&missing), Ok(None)),
+            "a key that was never written must read back as Ok(None)"
+        );
+
+        system
+            .long_term_memory
+            .db()
+            .put(id.0.as_bytes(), UNDECODABLE_BYTES)
+            .expect("write undecodable bytes");
+        assert!(
+            system.long_term_memory.get_opt(&id).is_err(),
+            "an undecodable record must be an error, not a report of absence"
+        );
+    }
+}
+
+#[cfg(test)]
+mod recall_readonly_write_gate_tests {
+    //! `recall_is_readonly()` is documented as the single source of truth for
+    //! "recall performs NO usage writes". Three recall-path writes were never
+    //! wired to it:
+    //!
+    //! * `recall_by_tags` and `recall_by_date` each increment and PERSIST the
+    //!   retrieval counter. Neither takes a `Query`, so neither ever looked at
+    //!   the gate — the pin covered the semantic path only. With no `Query`
+    //!   they consult `recall_readonly_env()` (the process-wide pin) directly;
+    //!   there is no per-request flag to OR in.
+    //! * `prediction_cache.insert` in the non-semantic recall path sat between
+    //!   two gated blocks and was itself ungated. It is not persisted, but it
+    //!   is read later by `process_feedback` to weight learning, so a
+    //!   "read-only" recall still changed how a subsequent feedback signal was
+    //!   applied.
+    //!
+    //! Each test asserts the gate holds AND, with the flag unset, that the
+    //! write still happens — the feature is gated, not deleted.
+
+    use super::*;
+    use crate::memory::types::Experience;
+
+    fn setup() -> (MemorySystem, tempfile::TempDir) {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = MemoryConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            working_memory_size: 50,
+            session_memory_size_mb: 50,
+            max_heap_per_user_mb: 200,
+            auto_compress: false,
+            compression_age_days: 30,
+            importance_threshold: 0.0,
+        };
+        let system = MemorySystem::new(config, None).expect("memory system");
+        (system, temp_dir)
+    }
+
+    fn remember_tagged(system: &MemorySystem, content: &str, tag: &str) -> MemoryId {
+        system
+            .remember(
+                Experience {
+                    content: content.to_string(),
+                    tags: vec![tag.to_string()],
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("remember")
+    }
+
+    fn retrieval_count(system: &MemorySystem) -> usize {
+        system
+            .long_term_memory
+            .get_retrieval_count()
+            .expect("retrieval count")
+    }
+
+    #[test]
+    fn recall_by_tags_respects_the_readonly_gate() {
+        let (system, _tmp) = setup();
+        remember_tagged(&system, "Deploy checklist for the release.", "release");
+
+        let before = {
+            let _pin = RecallEnvPin::pin("1");
+            let before = retrieval_count(&system);
+            let hits = system
+                .recall_by_tags(&["release".to_string()], 10)
+                .expect("recall_by_tags");
+            assert_eq!(hits.len(), 1, "the tagged memory should be found");
+            assert_eq!(
+                retrieval_count(&system),
+                before,
+                "recall_by_tags persisted a usage write under SHODH_RECALL_READONLY"
+            );
+            before
+        };
+
+        // Production default: the counter still moves. Pinned to an explicit
+        // "0" rather than removing the variable — `recall_readonly_env` treats
+        // the two identically, but the explicit value states the intent and
+        // survives any only-if-unset writer.
+        {
+            let _pin = RecallEnvPin::pin("0");
+            let _ = system
+                .recall_by_tags(&["release".to_string()], 10)
+                .expect("recall_by_tags");
+            assert_eq!(
+                retrieval_count(&system),
+                before + 1,
+                "gating the write also disabled it when the flag is unset"
+            );
+        }
+    }
+
+    #[test]
+    fn recall_by_date_respects_the_readonly_gate() {
+        let (system, _tmp) = setup();
+        remember_tagged(&system, "Deploy checklist for the release.", "release");
+
+        let start = chrono::Utc::now() - chrono::Duration::days(1);
+        let end = chrono::Utc::now() + chrono::Duration::days(1);
+
+        let before = {
+            let _pin = RecallEnvPin::pin("1");
+            let before = retrieval_count(&system);
+            let hits = system
+                .recall_by_date(start, end, 10)
+                .expect("recall_by_date");
+            assert_eq!(hits.len(), 1, "the memory should be inside the date range");
+            assert_eq!(
+                retrieval_count(&system),
+                before,
+                "recall_by_date persisted a usage write under SHODH_RECALL_READONLY"
+            );
+            before
+        };
+
+        {
+            let _pin = RecallEnvPin::pin("0");
+            let _ = system
+                .recall_by_date(start, end, 10)
+                .expect("recall_by_date");
+            assert_eq!(
+                retrieval_count(&system),
+                before + 1,
+                "gating the write also disabled it when the flag is unset"
+            );
+        }
+    }
+
+    #[test]
+    fn prediction_cache_is_not_populated_when_readonly() {
+        let (system, _tmp) = setup();
+        let id = remember_tagged(&system, "Deploy checklist for the release.", "release");
+
+        // The non-semantic recall path (no query_text) is where the ungated
+        // `prediction_cache.insert` lives.
+        let query = Query {
+            tags: Some(vec!["release".to_string()]),
+            max_results: 10,
+            ..Default::default()
+        };
+
+        {
+            let _pin = RecallEnvPin::pin("1");
+            let hits = system.recall(&query).expect("recall");
+            assert!(!hits.is_empty(), "the tagged memory should be recalled");
+            assert!(
+                system.prediction_cache.get(&id).is_none(),
+                "a read-only recall seeded the prediction cache, which later \
+                 weights feedback learning"
+            );
+        }
+
+        {
+            let _pin = RecallEnvPin::pin("0");
+            let _ = system.recall(&query).expect("recall");
+            assert!(
+                system.prediction_cache.get(&id).is_some(),
+                "gating the insert also disabled it when the flag is unset"
+            );
+        }
+    }
+
+    /// This site sits between two `recall_is_readonly(query)` gates and its
+    /// comment says it is "gated like its two neighbours", so the per-request
+    /// flag has to reach it too — not just the process-wide pin. The branch
+    /// that added the gate here predated `Query::read_only` and could only
+    /// express the env half; this pins the other half.
+    #[test]
+    fn prediction_cache_honours_the_per_request_readonly_flag() {
+        let (system, _tmp) = setup();
+        let id = remember_tagged(&system, "Deploy checklist for the release.", "release");
+
+        // Pin the PROCESS gate off, so the only thing that can suppress the
+        // write is the per-request flag.
+        let _pin = RecallEnvPin::pin("0");
+
+        let read_only = Query {
+            tags: Some(vec!["release".to_string()]),
+            max_results: 10,
+            read_only: true,
+            ..Default::default()
+        };
+        let hits = system.recall(&read_only).expect("recall");
+        assert!(!hits.is_empty(), "the tagged memory should be recalled");
+        assert!(
+            system.prediction_cache.get(&id).is_none(),
+            "a `read_only: true` request seeded the prediction cache — the \
+             per-request flag does not reach this write site"
+        );
+
+        let writing = Query {
+            read_only: false,
+            ..read_only.clone()
+        };
+        let _ = system.recall(&writing).expect("recall");
+        assert!(
+            system.prediction_cache.get(&id).is_some(),
+            "the write is gone rather than gated: an ordinary request no \
+             longer seeds the prediction cache"
         );
     }
 }

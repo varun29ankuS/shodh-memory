@@ -106,7 +106,9 @@ export function EntityDetail() {
         {cluster ? (
           <Field label="Cluster">
             <p className="text-[12px]">
-              {cluster.longTail ? "long tail" : cluster.label}
+              {/* `label` already accounts for a mixed bucket (universe.ts) — it
+                  never names one after a single member. */}
+              {cluster.label}
               <span className="text-muted-foreground/70"> · {cluster.size} entities</span>
             </p>
           </Field>

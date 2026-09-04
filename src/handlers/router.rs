@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use super::state::MultiUserMemoryManager;
 use super::{
-    ab_testing, anomalies, compression, consolidation, crud, export, facts, files, graph, health,
-    integrations, lineage, mif, recall, remember, search, sessions, todos, users, visualization,
-    webhooks,
+    ab_testing, anomalies, audit, compression, consolidation, crud, export, facts, files, graph,
+    health, history, integrations, integrity, lineage, mif, recall, remember, search, sessions,
+    sources, todos, users, visualization, webhooks,
 };
 
 /// Application state type alias
@@ -128,6 +128,12 @@ pub fn build_protected_routes(state: AppState) -> Router {
         // =================================================================
         .route("/api/memory/{memory_id}", get(crud::get_memory))
         .route("/api/memories/{memory_id}", get(crud::get_memory)) // Cloudflare compat alias
+        // Read side of the audit trail that ~23 `log_event` sites have been
+        // writing all along, scoped to one memory.
+        .route(
+            "/api/memory/{memory_id}/history",
+            get(history::get_memory_history),
+        )
         .route("/api/memory/{memory_id}", put(crud::update_memory))
         .route("/api/memory/{memory_id}", delete(crud::delete_memory))
         .route("/api/forget/{memory_id}", delete(crud::delete_memory)) // OpenAPI alias
@@ -145,6 +151,50 @@ pub fn build_protected_routes(state: AppState) -> Router {
         .route("/api/forget/pattern", post(crud::forget_by_pattern))
         .route("/api/forget/tags", post(crud::forget_by_tags))
         .route("/api/forget/date", post(crud::forget_by_date))
+        // =================================================================
+        // AUDIT TRAIL
+        //
+        // Read side of the `audit` column family that ~23 `log_event` call
+        // sites have been writing to all along. Authenticated and user-scoped
+        // like the other namespace reads.
+        // =================================================================
+        .route("/api/audit/{user_id}", get(audit::get_audit_trail))
+        // =================================================================
+        // SOURCES (INGESTION REGISTRY)
+        //
+        // The durable list of things that produce data for this store, plus
+        // each one's cursor and run history. `POST .../run` is the only way to
+        // start ingestion in this phase - there is no scheduler yet, so a
+        // source runs when someone asks it to.
+        // =================================================================
+        .route("/api/sources", post(sources::create_source))
+        .route("/api/sources/{user_id}", get(sources::list_sources))
+        .route(
+            "/api/sources/{user_id}/{source_id}",
+            get(sources::get_source),
+        )
+        .route(
+            "/api/sources/{user_id}/{source_id}",
+            delete(sources::delete_source),
+        )
+        // POST alias for update, following the todos block: MCP and TUI
+        // clients only speak POST.
+        .route(
+            "/api/sources/{user_id}/{source_id}/update",
+            post(sources::update_source),
+        )
+        .route(
+            "/api/sources/{user_id}/{source_id}/run",
+            post(sources::trigger_run),
+        )
+        .route(
+            "/api/sources/{user_id}/{source_id}/runs",
+            get(sources::list_runs),
+        )
+        .route(
+            "/api/sources/{user_id}/{source_id}/items",
+            get(sources::list_items),
+        )
         // =================================================================
         // USER MANAGEMENT
         // =================================================================
@@ -183,6 +233,19 @@ pub fn build_protected_routes(state: AppState) -> Router {
             post(consolidation::cleanup_corrupted),
         )
         .route("/api/storage/migrate", post(consolidation::migrate_legacy))
+        // Read-only wire-level scrub: classifies every stored record as clean,
+        // legacy-generation, undecodable, or decoding-into-implausible-values.
+        // Complementary to /api/index/verify, which only compares membership
+        // between storage and the vector index and cannot see a record that
+        // decodes successfully into the wrong thing.
+        // GET is a read of the last known verdict and starts nothing; POST
+        // runs a fresh sweep. Both file into the same ledger, so a scheduled
+        // run and a manual one are indistinguishable to the reader except by
+        // the `source` field.
+        .route(
+            "/api/integrity/scrub",
+            post(integrity::scrub).get(integrity::last_scrub),
+        )
         // =================================================================
         // CONSOLIDATION & BACKUPS
         // =================================================================

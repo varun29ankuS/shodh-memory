@@ -34,7 +34,9 @@ pub mod fs_matcher;
 pub mod gazetteer;
 pub mod graph_memory;
 pub mod handlers;
+pub mod ingest;
 pub mod integrations;
+pub mod integrity;
 pub mod kb;
 pub mod local_ipc;
 pub mod memory;
@@ -54,6 +56,8 @@ pub mod similarity;
 pub mod streaming;
 pub mod system_memory;
 pub mod telemetry;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod token_estimation;
 pub mod tracing_setup;
 pub mod validation;

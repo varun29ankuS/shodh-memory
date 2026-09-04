@@ -113,7 +113,14 @@ pub async fn linear_webhook(
     let experience = Experience {
         content: content.clone(),
         experience_type: ExperienceType::Task,
+        // The webhook's tags ARE its entity assertions — repository,
+        // issue number, labels, assignee, milestone. Declaring them is
+        // what puts them in the knowledge graph: `entities` alone is a
+        // storage/search list, and the graph admits nodes by authority.
         entities: tags.clone(),
+        declared_entities: tags.clone(),
+        // Linear pushed this issue event; the server composed the content.
+        origin: crate::memory::types::MemoryOrigin::LinearConnector,
         ..Default::default()
     };
 
@@ -207,7 +214,14 @@ pub async fn linear_sync(
         let experience = Experience {
             content,
             experience_type: ExperienceType::Task,
+            // The webhook's tags ARE its entity assertions — repository,
+            // issue number, labels, assignee, milestone. Declaring them is
+            // what puts them in the knowledge graph: `entities` alone is a
+            // storage/search list, and the graph admits nodes by authority.
+            declared_entities: tags.clone(),
             entities: tags,
+            // Operator-initiated bulk pull from Linear.
+            origin: crate::memory::types::MemoryOrigin::LinearConnector,
             ..Default::default()
         };
 
@@ -351,7 +365,14 @@ pub async fn github_webhook(
     let experience = Experience {
         content: content.clone(),
         experience_type: ExperienceType::Task,
+        // The webhook's tags ARE its entity assertions — repository,
+        // issue number, labels, assignee, milestone. Declaring them is
+        // what puts them in the knowledge graph: `entities` alone is a
+        // storage/search list, and the graph admits nodes by authority.
         entities: tags.clone(),
+        declared_entities: tags.clone(),
+        // GitHub pushed this issue/PR event; the server composed the content.
+        origin: crate::memory::types::MemoryOrigin::GithubConnector,
         ..Default::default()
     };
 
@@ -446,7 +467,14 @@ pub async fn github_sync(
             let experience = Experience {
                 content,
                 experience_type: ExperienceType::Task,
+                // The webhook's tags ARE its entity assertions — repository,
+                // issue number, labels, assignee, milestone. Declaring them is
+                // what puts them in the knowledge graph: `entities` alone is a
+                // storage/search list, and the graph admits nodes by authority.
+                declared_entities: tags.clone(),
                 entities: tags,
+                // Operator-initiated bulk pull from GitHub.
+                origin: crate::memory::types::MemoryOrigin::GithubConnector,
                 ..Default::default()
             };
 
@@ -504,7 +532,14 @@ pub async fn github_sync(
             let experience = Experience {
                 content,
                 experience_type: ExperienceType::Task,
+                // The webhook's tags ARE its entity assertions — repository,
+                // issue number, labels, assignee, milestone. Declaring them is
+                // what puts them in the knowledge graph: `entities` alone is a
+                // storage/search list, and the graph admits nodes by authority.
+                declared_entities: tags.clone(),
                 entities: tags,
+                // Operator-initiated bulk pull from GitHub.
+                origin: crate::memory::types::MemoryOrigin::GithubConnector,
                 ..Default::default()
             };
 

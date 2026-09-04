@@ -172,8 +172,9 @@ pub fn try_decode_compat<T: DeserializeOwned>(
 ///
 /// The tolerance mechanism [`try_decode_compat`] documents, factored out for
 /// callers whose payload has already been unwrapped from an envelope that
-/// provided format discrimination — SHO v2 records, where `unwrap_sho` has
-/// verified the magic, version byte and CRC32 before handing over the payload.
+/// provided format discrimination — SHO v2 records, where [`read_sho_envelope`]
+/// has verified the magic, version byte and CRC32 before handing over the
+/// payload.
 ///
 /// `default_suffix` is the postcard encoding of the default values for the
 /// field(s) added since the older records were written, in declaration order.
@@ -243,32 +244,85 @@ pub fn wrap_sho_v2(payload: &[u8]) -> Vec<u8> {
     buf
 }
 
-/// Unwrap a SHO envelope, returning `(version, payload)`.
+/// The state of a stored record's SHO envelope, as read off the wire.
 ///
-/// Returns `None` if the data does not have a valid SHO header
-/// (less than 8 bytes or missing magic).
-pub fn unwrap_sho(data: &[u8]) -> Option<(u8, &[u8])> {
-    if data.len() < 8 || &data[0..3] != STORAGE_MAGIC {
-        return None;
+/// The two failure states are kept apart deliberately, and that separation is
+/// the entire contract of this type. An envelope that is *absent* is a record
+/// written before the SHO cutover: it is legitimate, and its caller should try
+/// the legacy decode chain. An envelope that is *present but does not match its
+/// own checksum* is damaged data, and handing it to the legacy chain is the
+/// worst thing a reader can do with it — that chain ends in
+/// `try_raw_memory_parse`, which fabricates a `Memory` out of any twenty-one
+/// bytes it is given. Collapsing the two states into one `None`, as this
+/// function used to, laundered the only corruption signal the format has into a
+/// decode attempt by the code most likely to invent a plausible wrong answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShoEnvelope<'a> {
+    /// No SHO magic. A pre-envelope record; the legacy chain is the right
+    /// answer for it.
+    Absent,
+    /// SHO magic present, but the record is shorter than the smallest possible
+    /// envelope (magic + version + 4-byte CRC). There is no payload to check a
+    /// checksum against, so this is a truncated envelope, not a pre-envelope
+    /// record.
+    Truncated { len: usize },
+    /// A complete envelope whose CRC32 disagrees with its own bytes. The record
+    /// on disk is not what the writer wrote.
+    ChecksumMismatch { stored: u32, computed: u32 },
+    /// A complete envelope whose checksum verifies.
+    Valid { version: u8, payload: &'a [u8] },
+}
+
+impl ShoEnvelope<'_> {
+    /// True for the two states that mean "these bytes are damaged".
+    ///
+    /// Neither may be handed to a fallback decoder.
+    pub fn is_corrupt(&self) -> bool {
+        matches!(
+            self,
+            ShoEnvelope::Truncated { .. } | ShoEnvelope::ChecksumMismatch { .. }
+        )
+    }
+}
+
+/// Read a SHO envelope, distinguishing "no envelope" from "corrupt envelope".
+///
+/// The version byte lives inside the CRC-covered region, so the checksum
+/// verdict is deliberately NOT gated on the version being one this build knows:
+/// a corrupted version byte would then launder the record straight past the
+/// check that exists to catch it.
+pub fn read_sho_envelope(data: &[u8]) -> ShoEnvelope<'_> {
+    if data.len() < STORAGE_MAGIC.len() || &data[0..STORAGE_MAGIC.len()] != STORAGE_MAGIC {
+        return ShoEnvelope::Absent;
+    }
+    if data.len() < SHO_HEADER_LEN + SHO_TRAILER_LEN {
+        tracing::warn!(
+            len = data.len(),
+            "SHO envelope truncated below its own header — rejecting"
+        );
+        return ShoEnvelope::Truncated { len: data.len() };
     }
     let version = data[3];
-    let payload_end = data.len() - 4;
-    let stored_crc = u32::from_le_bytes([
+    let payload_end = data.len() - SHO_TRAILER_LEN;
+    let stored = u32::from_le_bytes([
         data[payload_end],
         data[payload_end + 1],
         data[payload_end + 2],
         data[payload_end + 3],
     ]);
-    let computed_crc = crc32_simple(&data[..payload_end]);
-    if stored_crc != computed_crc {
+    let computed = crc32_simple(&data[..payload_end]);
+    if stored != computed {
         tracing::warn!(
-            stored_crc = format_args!("{stored_crc:08x}"),
-            computed_crc = format_args!("{computed_crc:08x}"),
+            stored_crc = format_args!("{stored:08x}"),
+            computed_crc = format_args!("{computed:08x}"),
             "SHO envelope checksum mismatch — rejecting corrupted payload"
         );
-        return None;
+        return ShoEnvelope::ChecksumMismatch { stored, computed };
     }
-    Some((version, &data[4..payload_end]))
+    ShoEnvelope::Valid {
+        version,
+        payload: &data[SHO_HEADER_LEN..payload_end],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -306,15 +360,63 @@ mod tests {
     fn test_sho_envelope_round_trip() {
         let payload = b"hello postcard";
         let envelope = wrap_sho_v2(payload);
-        let (version, extracted) = unwrap_sho(&envelope).unwrap();
+        let ShoEnvelope::Valid {
+            version,
+            payload: extracted,
+        } = read_sho_envelope(&envelope)
+        else {
+            panic!("a freshly wrapped envelope must read back as valid");
+        };
         assert_eq!(version, SHO_VERSION_POSTCARD);
         assert_eq!(extracted, payload);
     }
 
     #[test]
     fn test_sho_envelope_no_magic() {
-        assert!(unwrap_sho(b"NOT_SHO").is_none());
-        assert!(unwrap_sho(b"short").is_none());
+        assert_eq!(read_sho_envelope(b"NOT_SHO"), ShoEnvelope::Absent);
+        assert_eq!(read_sho_envelope(b"short"), ShoEnvelope::Absent);
+    }
+
+    #[test]
+    fn a_corrupt_envelope_is_not_reported_as_an_absent_one() {
+        // The distinction this type exists for. `Absent` sends the caller to
+        // the legacy decode chain; `ChecksumMismatch` must never do that.
+        let mut envelope = wrap_sho_v2(b"a payload that later rotted");
+        let mid = envelope.len() / 2;
+        envelope[mid] ^= 0xFF;
+
+        match read_sho_envelope(&envelope) {
+            ShoEnvelope::ChecksumMismatch { stored, computed } => {
+                assert_ne!(stored, computed);
+            }
+            other => panic!("a flipped payload bit must read as ChecksumMismatch, got {other:?}"),
+        }
+        assert!(read_sho_envelope(&envelope).is_corrupt());
+    }
+
+    #[test]
+    fn magic_without_room_for_a_checksum_is_truncated_not_absent() {
+        // "SHO" plus three bytes: too short to hold version + CRC32, so there
+        // is no checksum to test. It is still not a pre-envelope record.
+        let short = b"SHOab";
+        assert_eq!(
+            read_sho_envelope(short),
+            ShoEnvelope::Truncated { len: short.len() }
+        );
+        assert!(read_sho_envelope(short).is_corrupt());
+    }
+
+    #[test]
+    fn a_corrupt_version_byte_does_not_escape_the_checksum() {
+        // The version byte is inside the CRC-covered region. If the corruption
+        // verdict were gated on the version being known, flipping this byte
+        // would launder the record past the check meant to catch it.
+        let mut envelope = wrap_sho_v2(b"payload");
+        envelope[3] = 0x7F;
+        assert!(
+            read_sho_envelope(&envelope).is_corrupt(),
+            "an unknown version byte with a stale CRC is corruption, not a future format"
+        );
     }
 
     #[test]
@@ -358,7 +460,9 @@ mod tests {
     fn test_encode_sho_decode_round_trip() {
         let val: (u64, String) = (12345, "sho test".to_string());
         let envelope = encode_sho(&val).unwrap();
-        let (version, payload) = unwrap_sho(&envelope).unwrap();
+        let ShoEnvelope::Valid { version, payload } = read_sho_envelope(&envelope) else {
+            panic!("encode_sho must produce a valid envelope");
+        };
         assert_eq!(version, SHO_VERSION_POSTCARD);
         let decoded: (u64, String) = postcard::from_bytes(payload).unwrap();
         assert_eq!(decoded, val);

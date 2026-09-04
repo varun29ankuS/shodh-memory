@@ -546,6 +546,17 @@ impl LegacyExperienceV1 {
             // remember time, and silently minting coordinates during a legacy
             // decode would make old records look like they always had them.
             toponyms: Vec::new(),
+            // Same reasoning: a v0.1.0 record has no record of which of its
+            // `entities` the caller asserted, and inventing that provenance on
+            // read would let a legacy keyphrase enter the graph as a caller
+            // claim.
+            declared_entities: Vec::new(),
+            // A v1 bincode record was written years before any write path
+            // stamped an origin, so there is nothing to recover. `Unknown` is
+            // the truth; guessing "this looks like it came from the API" and
+            // persisting that on the migration rewrite would mint provenance
+            // that never existed.
+            origin: crate::memory::types::MemoryOrigin::Unknown,
         }
     }
 }
@@ -703,63 +714,231 @@ impl LegacyMemoryV2 {
 /// was in a legacy format and should be re-written for future performance.
 /// Postcard defaults for every trailing `MemoryFlat` field added after the
 /// postcard cutover (#192), in field order: `toponyms: Vec<Toponym>` (empty =
-/// varint `0x00`).
+/// varint `0x00`), then `declared_entities: Vec<String>` (empty = varint
+/// `0x00`), then `origin: MemoryOrigin` (`Unknown` = variant index varint
+/// `0x00`).
 ///
 /// `parent_id` is NOT listed: it was added in January, before the April
 /// postcard cutover, so every postcard-era record already carries it.
 ///
 /// `decode_raw_compat` appends these one at a time, so a record missing any
 /// suffix of these fields decodes (postcard has no `#[serde(default)]` EOF
-/// tolerance). Keep in sync with any new trailing field — and note that this
-/// mechanism ONLY works for fields appended at the end of `MemoryFlat`. A field
-/// added to `Experience` instead lands mid-payload, where an old record decodes
-/// to silently wrong values rather than failing; that is why
-/// `Experience::toponyms` is `#[serde(skip)]` and carried at the `MemoryFlat`
-/// tail.
-const MEMORY_DEFAULT_SUFFIX: &[u8] = &[0x00];
+/// tolerance). Keep in sync with any new trailing field — appending a field to
+/// `MemoryFlat` means appending its postcard default here, in the SAME ORDER as
+/// the struct declares it. The order is a contract: `toponyms`, then
+/// `declared_entities`, then `origin` — the order `MemoryFlat` declares them.
+/// Bytes appended in the wrong order default the wrong fields.
+///
+/// All three defaults happen to encode as the same byte (`0x00`: an empty
+/// `Vec` length, an empty `Vec` length, and `MemoryOrigin::Unknown`'s variant
+/// index), so the SUFFIX is order-agnostic and a mis-ordered suffix would not
+/// be caught by inspecting it. What is NOT order-agnostic is the declaration
+/// order in `MemoryFlat`, which decides which stored bytes are read as which
+/// field. `declared_entities` shipped first and live records already carry it,
+/// so `origin` goes after it — putting `origin` first would make every such
+/// record read `declared_entities`' length varint as the origin discriminant.
+///
+/// Note that this mechanism ONLY works for fields appended at the end of
+/// `MemoryFlat`. A field added to `Experience` instead lands mid-payload, where
+/// an old record decodes to silently wrong values rather than failing; that is
+/// why `Experience::toponyms` is `#[serde(skip)]` and carried at the
+/// `MemoryFlat` tail. `NerEntityRecord::fine_label` is what happens when that
+/// rule is broken — see [`decode_postcard_memory`].
+const MEMORY_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00, 0x00];
 
-fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
-    use crate::serialization::{SHO_VERSION_BINCODE2, SHO_VERSION_POSTCARD};
+/// Decode a SHO v2 (postcard) payload, tolerating both compatible-change classes
+/// the stored format has accumulated.
+///
+/// 1. **Missing tail fields** — repaired by appending `MEMORY_DEFAULT_SUFFIX`
+///    one default at a time (see [`crate::serialization::decode_raw_compat`]).
+/// 2. **A mid-payload field added to a nested struct** — NOT repairable by any
+///    suffix, because the missing bytes are in the middle. `NerEntityRecord`
+///    gained `fine_label` in July 2026, and `Experience::ner_entities` sits
+///    ahead of `cooccurrence_pairs`, `importance_override` and the whole of
+///    `MemoryFlat` after `experience`. Every memory written before that commit
+///    with a non-empty `ner_entities` therefore desynchronises the decoder by
+///    one byte per NER record. On a live 19,394-record store that is ~5% of
+///    memories, surfacing as `Found an Option discriminant that wasn't 0 or 1`,
+///    `Tried to parse invalid utf-8`, or a spurious end-of-buffer — whichever
+///    the shifted bytes happened to hit.
+///
+/// The second class is recovered by re-running the decode under
+/// [`NerWireGeneration::PreFineLabel`]. The retry is attempted only after the
+/// current layout has failed, so a record written today never pays for it, and
+/// the error reported on total failure is the CURRENT-format one — the honest
+/// answer to "why can this store not be read by this build".
+///
+/// A record recovered through the retry is reported as needing migration, so
+/// [`MemoryStorage::get`] rewrites it in the current format and no later read
+/// has to guess again.
+pub(crate) fn decode_postcard_memory(payload: &[u8]) -> Result<(Memory, bool)> {
+    let current_err =
+        match crate::serialization::decode_raw_compat::<Memory>(payload, MEMORY_DEFAULT_SUFFIX) {
+            Ok((memory, defaulted)) => return Ok((memory, defaulted)),
+            Err(e) => e,
+        };
 
-    // Check for versioned format: SHO + version byte + payload + 4-byte CRC32
-    if let Some((version, payload)) = crate::serialization::unwrap_sho(data) {
-        match version {
-            SHO_VERSION_POSTCARD => {
-                // Current format: postcard, tolerating records written before
-                // the trailing fields listed in MEMORY_DEFAULT_SUFFIX existed.
-                let (memory, defaulted): (Memory, bool) =
-                    crate::serialization::decode_raw_compat(payload, MEMORY_DEFAULT_SUFFIX)
-                        .map_err(|e| anyhow!("SHO v2 postcard decode failed: {e}"))?;
-                // `defaulted` marks the record for rewrite in the current schema,
-                // the same signal the legacy-format branches return.
-                Ok((memory, defaulted))
-            }
-            SHO_VERSION_BINCODE2 => {
-                // Legacy SHO v1: bincode 2.x — decode and mark for migration
-                let (memory, _): (Memory, _) =
-                    bincode::serde::decode_from_slice(payload, crate::bincode_safe_config())
-                        .map_err(|e| anyhow!("SHO v1 bincode decode failed: {e}"))?;
-                Ok((memory, true))
-            }
-            _ => {
-                // Unknown version — try the legacy fallback chain
-                deserialize_with_fallback(payload)
-                    .map_err(|e| anyhow!("SHO v{version} decode failed: {e}"))
-            }
-        }
-    } else {
-        // No SHO header — legacy format (raw bincode/msgpack)
-        deserialize_with_fallback(data)
-            .map_err(|e| anyhow!("legacy (no SHO header) decode failed: {e}"))
+    let _generation = NerWireGeneration::PreFineLabel.enter();
+    match crate::serialization::decode_raw_compat::<Memory>(payload, MEMORY_DEFAULT_SUFFIX) {
+        Ok((memory, _)) => Ok((memory, true)),
+        Err(_) => Err(current_err),
     }
+}
+
+/// Decode a stored memory value.
+///
+/// # A failed checksum is an error, not a hint to try harder
+///
+/// The SHO envelope carries a CRC32 per record. It used to be decorative: on a
+/// mismatch the envelope reader returned `None`, and `None` here meant "no
+/// envelope, try the legacy chain" — so a record whose checksum FAILED was
+/// handed, magic bytes and all, to [`deserialize_with_fallback`], whose last
+/// branch ([`try_raw_memory_parse`]) fabricates a `Memory` out of any
+/// twenty-one bytes it is given. The one mechanism able to detect real
+/// corruption had its failure signal laundered into a decode attempt by the
+/// path most likely to invent a plausible wrong answer.
+///
+/// [`crate::serialization::read_sho_envelope`] now separates the two states,
+/// and they are treated as opposites here:
+///
+/// - `Absent` — a pre-cutover record. Legitimately falls through to the legacy
+///   chain; every record written before the envelope existed depends on that,
+///   which is why the distinction had to be drawn rather than the fallback
+///   simply removed.
+/// - `ChecksumMismatch` / `Truncated` — damaged bytes. A hard error that never
+///   reaches a fallback decoder.
+///
+/// An envelope carrying a version this build does not know is an error too: its
+/// payload is by definition in a format the legacy chain predates, so running
+/// seventeen legacy branches over it can only produce a fabrication.
+fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
+    use crate::serialization::{ShoEnvelope, SHO_VERSION_BINCODE2, SHO_VERSION_POSTCARD};
+
+    match crate::serialization::read_sho_envelope(data) {
+        ShoEnvelope::Valid {
+            version: SHO_VERSION_POSTCARD,
+            payload,
+        } => {
+            // Current format: postcard, tolerating records written before
+            // the trailing fields listed in MEMORY_DEFAULT_SUFFIX existed,
+            // and before `NerEntityRecord::fine_label` existed.
+            let (memory, defaulted) = decode_postcard_memory(payload)
+                .map_err(|e| anyhow!("SHO v2 postcard decode failed: {e}"))?;
+            // `defaulted` marks the record for rewrite in the current schema,
+            // the same signal the legacy-format branches return.
+            Ok((memory, defaulted))
+        }
+        ShoEnvelope::Valid {
+            version: SHO_VERSION_BINCODE2,
+            payload,
+        } => {
+            // Legacy SHO v1: bincode 2.x — decode and mark for migration
+            let (memory, _): (Memory, _) =
+                bincode::serde::decode_from_slice(payload, crate::bincode_safe_config())
+                    .map_err(|e| anyhow!("SHO v1 bincode decode failed: {e}"))?;
+            Ok((memory, true))
+        }
+        ShoEnvelope::Valid { version, .. } => Err(anyhow!(
+            "SHO envelope version {version} is not readable by this build ({} \
+             bytes); refusing to guess at it with the legacy decoders",
+            data.len()
+        )),
+        ShoEnvelope::ChecksumMismatch { stored, computed } => Err(anyhow!(
+            "SHO envelope checksum mismatch (stored {stored:08x}, computed \
+             {computed:08x}, {} bytes): the bytes on disk are not the bytes that \
+             were written. Refusing to decode — a fallback decode of corrupted \
+             bytes returns a fabricated memory, not a recovered one",
+            data.len()
+        )),
+        ShoEnvelope::Truncated { len } => Err(anyhow!(
+            "SHO envelope truncated to {len} bytes, below the minimum envelope \
+             size; refusing to decode"
+        )),
+        ShoEnvelope::Absent => {
+            // No SHO header — legacy format (raw bincode/msgpack)
+            deserialize_with_fallback(data)
+                .map_err(|e| anyhow!("legacy (no SHO header) decode failed: {e}"))
+        }
+    }
+}
+
+/// Decode a stored memory value and verify it is the record its key claims.
+///
+/// # Why this is on the read path
+///
+/// Corruption on the memory side rarely announces itself. Every shape in the
+/// legacy fallback chain derives the id from the VALUE; the writer derives the
+/// key from the RECORD. A fabrication therefore cannot agree with its own key
+/// — `try_raw_memory_parse` reads the first sixteen bytes of the value as a
+/// UUID, which for an enveloped record is `SHO` + version + payload, and for
+/// arbitrary garbage is arbitrary garbage. The check has no false positive by
+/// construction: nothing in this codebase stores a memory under a key other
+/// than its own id.
+///
+/// The cost is a sixteen-byte comparison against a value that has already cost
+/// a RocksDB read and a full postcard decode — far below the noise floor of
+/// the work done to produce the thing being checked. There is no perf argument
+/// for serving a record that disagrees with its own key, and serving one is
+/// worse than serving nothing: the caller cannot tell it apart from fact.
+fn deserialize_memory_checked(key: &[u8], data: &[u8]) -> Result<(Memory, bool)> {
+    let (memory, needs_migration) = deserialize_memory(data)?;
+    if memory.id.0.as_bytes() != key {
+        tracing::warn!(
+            decoded_id = %memory.id.0,
+            key = %hex::encode(key),
+            bytes = data.len(),
+            "decoded memory id disagrees with the key it was stored under — \
+             treating it as corruption, not as a memory"
+        );
+        return Err(anyhow!(
+            "decoded memory id {} does not match its key {} ({} bytes): the \
+             record decoded into something the writer could not have written",
+            memory.id.0,
+            hex::encode(key),
+            data.len()
+        ));
+    }
+    Ok((memory, needs_migration))
 }
 
 /// Public wrapper around the full legacy fallback chain, used by the migration module.
 ///
 /// Tries SHO v2 (postcard), SHO v1 (bincode 2.x), then the 17-path legacy
 /// fallback for raw bincode/msgpack data. Returns just the Memory on success.
+///
+/// # This one does NOT check the key
+///
+/// It has no key to check: [`crate::integrity`] calls it precisely because it
+/// wants the raw decode verdict before applying its own `id_key_mismatch`
+/// check, and it must classify a fabrication rather than have the decode
+/// refuse it. Any caller that holds the key and is going to act on the result
+/// wants [`deserialize_memory_for_migration_checked`] instead.
 pub fn deserialize_memory_for_migration(data: &[u8]) -> Result<Memory> {
     deserialize_memory(data).map(|(m, _)| m)
+}
+
+/// The same chain, verified against the key the value was stored under.
+///
+/// # Why the migration path in particular needs this
+///
+/// `MemoryStorage::get_opt` has checked its decodes since the CRC work, so a
+/// fabrication is never *served*, and `storage::migrate_legacy` calls the
+/// private [`deserialize_memory_checked`] directly. The holes left behind were
+/// the two rewriting/counting paths OUTSIDE this module —
+/// `migration::migrate_memory_db` and `backup.rs`'s memory count — which had no
+/// checked entry point to call because none was public.
+///
+/// `migrate_memory_db` is the one that writes: it decodes with the unchecked
+/// chain and writes the result back with `encode_sho`, under the original key. A
+/// pseudo-decoded record therefore came out the other side re-encoded, freshly
+/// checksummed, and carrying an id that is not the key it lives under — the
+/// original bytes gone, and the fabrication now wearing a valid envelope.
+///
+/// That is worse than serving one. Serving a fabrication is a wrong answer to
+/// one request; persisting it destroys the evidence a scrub needs and makes the
+/// lie durable.
+pub fn deserialize_memory_for_migration_checked(key: &[u8], data: &[u8]) -> Result<Memory> {
+    deserialize_memory_checked(key, data).map(|(m, _)| m)
 }
 
 /// Legacy MemoryFlat for bincode 2.x data written BEFORE multimodal Experience fields
@@ -1183,9 +1362,28 @@ pub struct MemoryStorage {
     /// taken by reads. Capture is low-frequency relative to reads, so a
     /// single per-storage (i.e. per-user) mutex is acceptable for v1.
     oplog_append_lock: parking_lot::Mutex<()>,
+    /// Serializes read-modify-write updates of a memory record (see
+    /// [`Self::modify`]). Same reasoning as `oplog_append_lock`: handlers hold
+    /// only `.read()` guards on `MemorySystem`, so two link/parent/metadata
+    /// writes to the same memory genuinely run at the same time, and a
+    /// `get` -> mutate -> `update` sequence loses whichever write read first.
+    ///
+    /// A process-local mutex is sufficient rather than a shortcut: RocksDB
+    /// takes an exclusive file lock, so exactly one process ever has this DB
+    /// open, and every writer to it goes through this struct.
+    record_mutation_lock: parking_lot::Mutex<()>,
 }
 
 impl MemoryStorage {
+    /// Raw handle to the underlying database, for read-only maintenance passes
+    /// that must classify records at the wire level rather than through
+    /// [`Self::get`] — which lazily *rewrites* anything it decodes via a legacy
+    /// path, and would therefore persist a pseudo-decode over the original
+    /// bytes. Used by [`crate::integrity`].
+    pub(crate) fn raw_db(&self) -> &Arc<DB> {
+        &self.db
+    }
+
     /// CF accessor for the memory_index column family
     fn index_cf(&self) -> &ColumnFamily {
         self.db
@@ -1301,6 +1499,7 @@ impl MemoryStorage {
             write_retry_buffer: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             write_failure_count: std::sync::atomic::AtomicU64::new(0),
             oplog_append_lock: parking_lot::Mutex::new(()),
+            record_mutation_lock: parking_lot::Mutex::new(()),
         })
     }
 
@@ -1765,11 +1964,27 @@ impl MemoryStorage {
                 let uuid = uuid::Uuid::from_slice(&value).ok()?;
                 // Verify the memory still exists (might have been deleted)
                 let memory_id = MemoryId(uuid);
-                match self.get(&memory_id) {
-                    Ok(_) => Some(memory_id),
-                    Err(_) => {
-                        // Stale index entry — memory was deleted, clean up
+                match self.get_opt(&memory_id) {
+                    Ok(Some(_)) => Some(memory_id),
+                    Ok(None) => {
+                        // Proven stale: RocksDB reports no record at that id,
+                        // so the memory really was deleted. Clean up.
                         let _ = self.db.delete_cf(idx, hash_key.as_bytes());
+                        None
+                    }
+                    Err(e) => {
+                        // Inconclusive read — the memory may well exist. Do NOT
+                        // delete the dedup entry: destroying it on a transient
+                        // failure loses the only pointer from this content to
+                        // its memory, and the caller then writes a duplicate
+                        // whose store overwrites the entry with the new id.
+                        tracing::warn!(
+                            memory_id = %memory_id.0,
+                            error = %e,
+                            "content-hash dedup lookup could not read the target \
+                             memory — keeping the dedup entry and reporting no \
+                             match for this call only"
+                        );
                         None
                     }
                 }
@@ -1778,21 +1993,37 @@ impl MemoryStorage {
         }
     }
 
-    /// Retrieve a memory by ID
+    /// Retrieve a memory by ID, separating "this key does not exist" from
+    /// "this read did not succeed".
     ///
-    /// Performs lazy migration: if memory is in legacy format, re-writes it
-    /// in current format for faster future reads.
-    pub fn get(&self, id: &MemoryId) -> Result<Memory> {
+    /// `Ok(None)` is returned in exactly one case: RocksDB itself reported no
+    /// value at the key. That is the only outcome that proves the memory is
+    /// gone. Every other failure — a RocksDB/IO error, or bytes that are
+    /// present but do not decode — is `Err`, because the record may well still
+    /// be there. Callers that delete index entries, dedup entries or any other
+    /// pointer *to* a memory must key that deletion off `Ok(None)` and never
+    /// off `Err`: an inconclusive read is not proof of absence, and treating it
+    /// as one turns a transient blip into permanent, silent data loss.
+    ///
+    /// Performs the same lazy migration as [`Self::get`]: if a memory is in a
+    /// legacy format it is re-written in the current format for faster future
+    /// reads.
+    pub fn get_opt(&self, id: &MemoryId) -> Result<Option<Memory>> {
         let key = id.0.as_bytes();
         match self.db.get(key)? {
             Some(value) => {
-                let (memory, needs_migration) = deserialize_memory(&value).with_context(|| {
-                    format!(
-                        "Failed to deserialize memory {} ({} bytes)",
-                        id.0,
-                        value.len()
-                    )
-                })?;
+                // Checked against the key it was fetched under: a decode whose
+                // id disagrees with its key is a fabrication, and the error
+                // returns BEFORE the lazy migration below so a fabrication is
+                // never written anywhere.
+                let (memory, needs_migration) = deserialize_memory_checked(key, &value)
+                    .with_context(|| {
+                        format!(
+                            "Failed to deserialize memory {} ({} bytes)",
+                            id.0,
+                            value.len()
+                        )
+                    })?;
 
                 // Lazy migration: re-write legacy formats in current format
                 if needs_migration {
@@ -1802,10 +2033,52 @@ impl MemoryStorage {
                     }
                 }
 
-                Ok(memory)
+                Ok(Some(memory))
             }
-            None => Err(anyhow!("Memory not found: {id:?}")),
+            None => Ok(None),
         }
+    }
+
+    /// Retrieve a memory by ID, where a missing memory is itself an error.
+    ///
+    /// This is the right call when the record IS the answer — a single-id read
+    /// has nothing to return if the memory is absent. Callers that are
+    /// *scanning* (and would react to the failure by discarding a pointer to
+    /// the memory) must use [`Self::get_opt`] instead, which distinguishes
+    /// absence from an unsuccessful read.
+    pub fn get(&self, id: &MemoryId) -> Result<Memory> {
+        self.get_opt(id)?
+            .ok_or_else(|| anyhow!("Memory not found: {id:?}"))
+    }
+
+    /// Atomically read a memory, apply `f`, and write it back.
+    ///
+    /// The read and the write happen under one lock, so two concurrent callers
+    /// cannot both read the pre-update record and have the second overwrite the
+    /// first's change. Every read-modify-write of a memory record must go
+    /// through here; doing the same three steps inline is the lost-update bug
+    /// this exists to remove, and no amount of shrinking the gap between them
+    /// fixes it.
+    ///
+    /// `f` sees the CURRENT stored record, not a snapshot the caller took
+    /// earlier — that is the whole point, so callers must express their change
+    /// as a mutation rather than as a whole replacement record.
+    ///
+    /// Returns the memory as written. `Ok(None)` if the memory does not exist;
+    /// an unreadable record is an `Err`, never a silent no-op (see
+    /// [`Self::get_opt`]).
+    pub fn modify<F>(&self, id: &MemoryId, f: F) -> Result<Option<Memory>>
+    where
+        F: FnOnce(&mut Memory),
+    {
+        let _guard = self.record_mutation_lock.lock();
+        let mut memory = match self.get_opt(id)? {
+            Some(memory) => memory,
+            None => return Ok(None),
+        };
+        f(&mut memory);
+        self.update(&memory)?;
+        Ok(Some(memory))
     }
 
     /// Re-write a memory in current format (lazy migration helper)
@@ -2597,7 +2870,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory_checked(&key, &value) {
                 if memory.parent_id.is_none() {
                     roots.push(memory.id);
                 }
@@ -2710,7 +2983,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory_checked(&key, &value) {
                 if !memory.is_forgotten() {
                     memories.push(memory);
                 }
@@ -2735,7 +3008,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory_checked(&key, &value) {
                 if !memory.is_forgotten() {
                     f(memory)?;
                 }
@@ -2753,7 +3026,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory_checked(&key, &value) {
                 if !memory.compressed && !memory.is_forgotten() && memory.created_at < cutoff {
                     memories.push(memory);
                 }
@@ -2806,7 +3079,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((mut memory, _)) = deserialize_memory(&value) {
+            if let Ok((mut memory, _)) = deserialize_memory_checked(&key, &value) {
                 if memory.is_forgotten() {
                     continue;
                 }
@@ -2860,7 +3133,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((mut memory, _)) = deserialize_memory(&value) {
+            if let Ok((mut memory, _)) = deserialize_memory_checked(&key, &value) {
                 if memory.is_forgotten() {
                     continue;
                 }
@@ -2905,7 +3178,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory_checked(&key, &value) {
                 if regex.is_match(&memory.experience.content) {
                     to_delete.push(memory.id);
                     count += 1;
@@ -2961,7 +3234,7 @@ impl MemoryStorage {
                         continue;
                     }
 
-                    match deserialize_memory(&value) {
+                    match deserialize_memory_checked(&key, &value) {
                         Ok((memory, _)) => {
                             if memory.is_forgotten() {
                                 continue;
@@ -3084,6 +3357,12 @@ impl MemoryStorage {
                 );
                 to_delete.push(key.to_vec());
             } else if deserialize_memory(&value).is_err() {
+                // Deliberately the UNCHECKED decode. This branch deletes, and a
+                // record that decodes but disagrees with its key is exactly the
+                // evidence an operator needs to see; turning that disagreement
+                // into a delete would destroy it without anyone in the loop.
+                // Undecodable records are a different matter — they are already
+                // unreadable, so deleting them loses nothing that was readable.
                 tracing::debug!(
                     "Marking for deletion: valid key but corrupted value ({} bytes)",
                     value.len()
@@ -3150,8 +3429,11 @@ impl MemoryStorage {
             // still needs converting to postcard. So gate on the SHO envelope
             // version directly.
             let is_current_postcard = matches!(
-                crate::serialization::unwrap_sho(&value),
-                Some((crate::serialization::SHO_VERSION_POSTCARD, _))
+                crate::serialization::read_sho_envelope(&value),
+                crate::serialization::ShoEnvelope::Valid {
+                    version: crate::serialization::SHO_VERSION_POSTCARD,
+                    ..
+                }
             );
             if is_current_postcard {
                 already_current += 1;
@@ -3162,7 +3444,11 @@ impl MemoryStorage {
             // decode via the full fallback chain and queue it for re-encode to
             // postcard. A decode failure is counted as `failed`, never silently
             // skipped.
-            match deserialize_memory(&value) {
+            // Checked: this loop re-encodes what it decodes and writes it
+            // back OVER the original bytes at `key`. An unchecked pseudo-decode
+            // here does not merely serve a fabrication, it persists one and
+            // destroys the evidence of what the record used to be.
+            match deserialize_memory_checked(&key, &value) {
                 Ok((memory, _)) => {
                     to_migrate.push((key.to_vec(), memory));
                 }
@@ -3977,7 +4263,7 @@ impl MemoryStorage {
                 continue;
             }
 
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory_checked(&key, &value) {
                 let has_mapping = match self.get_vector_mapping(&memory.id) {
                     Ok(Some(entry)) => entry.text_vectors().is_some_and(|v| !v.is_empty()),
                     _ => false,
@@ -4179,6 +4465,67 @@ impl MemoryStorage {
     }
 }
 
+/// Encode a memory in the wire shape used before `NerEntityRecord::fine_label`
+/// existed, for tests only.
+///
+/// Lives at module level rather than inside `mod tests` so that
+/// [`crate::integrity`]'s tests can build the SAME bytes. A second copy of this
+/// derivation would be a second opinion about what a July record looks like,
+/// and the whole point of the fixture is that there is only one.
+#[cfg(test)]
+pub(crate) fn encode_pre_fine_label(memory: &Memory) -> Vec<u8> {
+    assert_eq!(
+        memory.experience.ner_entities.len(),
+        1,
+        "fixture expects exactly one NER record"
+    );
+    assert!(
+        memory.experience.ner_entities[0].fine_label.is_none(),
+        "the pre-fine_label format cannot carry a fine label"
+    );
+
+    let with_record = crate::serialization::encode_raw(memory).expect("encode with record");
+
+    let mut without = memory.clone();
+    without.experience.ner_entities.clear();
+    let without_record = crate::serialization::encode_raw(&without).expect("encode without");
+
+    // The encodings agree up to the `ner_entities` length varint, where one
+    // says 1 and the other 0. Everything after that varint in the
+    // record-less encoding is the shared tail (cooccurrence_pairs onward),
+    // so its length pins where the record ends in the other encoding.
+    // Deriving the tail by length rather than by scanning backwards for a
+    // common suffix matters: the record's final byte IS 0x00, so a backward
+    // scan runs straight past it into the record.
+    let prefix = with_record
+        .iter()
+        .zip(without_record.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    assert!(
+        prefix < without_record.len(),
+        "the two encodings must differ at the ner_entities length varint"
+    );
+    assert_eq!(
+        without_record[prefix], 0x00,
+        "empty ner_entities is length 0"
+    );
+    assert_eq!(with_record[prefix], 0x01, "one NER record is length 1");
+
+    let tail_len = without_record.len() - prefix - 1;
+    let record_end = with_record.len() - tail_len;
+    assert_eq!(
+        with_record[record_end - 1],
+        0x00,
+        "the last byte of the NER record must be the fine_label None marker"
+    );
+
+    let mut legacy = Vec::with_capacity(with_record.len() - 1);
+    legacy.extend_from_slice(&with_record[..record_end - 1]);
+    legacy.extend_from_slice(&with_record[record_end..]);
+    crate::serialization::wrap_sho_v2(&legacy)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4219,6 +4566,510 @@ mod tests {
             Vec::new(),
             Vec::new(),
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // A failed checksum must not be laundered into a decode attempt.
+    //
+    // These bytes are constructed so the fallback chain PROVABLY fabricates a
+    // memory from them: printable ASCII end to end, so `try_raw_memory_parse`
+    // reads the first sixteen bytes as a UUID and the rest as content. If the
+    // test flipped a bit in a real record instead, the fallback might fail for
+    // an unrelated reason and the "it used to succeed" premise would hold only
+    // by luck.
+    // -----------------------------------------------------------------------
+
+    /// A complete SHO v2 envelope whose CRC32 trailer is `XXXX` — wrong by
+    /// construction — around an all-printable payload.
+    fn envelope_with_a_broken_checksum() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(crate::memory::storage::STORAGE_MAGIC);
+        bytes.push(crate::serialization::SHO_VERSION_POSTCARD);
+        bytes.extend_from_slice(b"corrupted-record-payload-bytes");
+        bytes.extend_from_slice(b"XXXX");
+        bytes
+    }
+
+    #[test]
+    fn a_failed_checksum_is_an_error_not_a_trip_through_the_fallback_chain() {
+        let bytes = envelope_with_a_broken_checksum();
+
+        // Premise 1: the envelope really is corrupt, not merely unparsed.
+        assert!(
+            matches!(
+                crate::serialization::read_sho_envelope(&bytes),
+                crate::serialization::ShoEnvelope::ChecksumMismatch { .. }
+            ),
+            "fixture must present a complete envelope with a wrong checksum"
+        );
+
+        // Premise 2, and the whole reason this defect mattered: the fallback
+        // chain these bytes used to be handed to does NOT reject them. It
+        // invents a Memory. Asserted permanently — if this ever starts failing,
+        // the fabrication has been fixed at its source and this test needs
+        // revisiting, but it does not mean the discrimination below is wrong.
+        let fabricated = deserialize_with_fallback(&bytes);
+        assert!(
+            fabricated.is_ok(),
+            "premise: the legacy chain fabricates a Memory from these bytes; \
+             it errored instead: {:?}",
+            fabricated.err()
+        );
+
+        // The fix: a record whose checksum fails never reaches that chain.
+        let err = deserialize_memory(&bytes)
+            .expect_err("a record with a failed checksum must be a hard error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("checksum mismatch"),
+            "the error must name the checksum, so it cannot pass by way of some \
+             unrelated decode failure; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_record_with_no_envelope_still_decodes_through_the_legacy_chain() {
+        // The other half of the discrimination, and the reason it is a
+        // discrimination rather than a removal: every record written before the
+        // SHO cutover carries no envelope, and must keep decoding.
+        let id = MemoryId(
+            uuid::Uuid::parse_str("6f0b1c2d-3e4f-4a5b-8c9d-0e1f2a3b4c5d").expect("static uuid"),
+        );
+        let memory = sample_memory(id.clone(), "written before the envelope existed");
+        let legacy_bytes =
+            bincode::serde::encode_to_vec(&memory, bincode::config::standard()).expect("encode");
+
+        assert_eq!(
+            crate::serialization::read_sho_envelope(&legacy_bytes),
+            crate::serialization::ShoEnvelope::Absent,
+            "fixture must carry no envelope at all"
+        );
+
+        let (decoded, needs_migration) = deserialize_memory(&legacy_bytes)
+            .expect("a pre-envelope record must still decode via the legacy chain");
+        assert_eq!(decoded.id, id);
+        assert_eq!(
+            decoded.experience.content,
+            "written before the envelope existed"
+        );
+        // Pinned as-is, not as it ought to be: the fallback chain reports raw
+        // bincode 2.x of the CURRENT struct shape as needing no migration, even
+        // though it still wants re-encoding as postcard. That is the wart
+        // `migrate_legacy` documents and works around by gating on the envelope
+        // version rather than on this flag. Asserting it here keeps the two
+        // statements consistent.
+        assert!(
+            !needs_migration,
+            "raw bincode 2.x of the current shape is reported as current"
+        );
+
+        // A genuinely older shape, from a deeper branch of the same chain, so
+        // the guarantee is not resting on the one branch nearest the surface.
+        let minimal = rmp_serde::to_vec(&LegacyMinimalFixture {
+            id: id.clone(),
+            content: "an even older record".to_string(),
+        })
+        .expect("msgpack");
+        assert_eq!(
+            crate::serialization::read_sho_envelope(&minimal),
+            crate::serialization::ShoEnvelope::Absent
+        );
+        let (from_minimal, needs_migration) =
+            deserialize_memory(&minimal).expect("a deep-legacy record must still decode");
+        assert_eq!(from_minimal.id, id);
+        assert_eq!(from_minimal.experience.content, "an even older record");
+        assert!(
+            needs_migration,
+            "a deep-legacy record must be marked for rewrite"
+        );
+    }
+
+    #[test]
+    fn legacy_wire_formats_never_begin_with_the_sho_magic() {
+        // The premise under "absent vs corrupt": no pre-envelope encoding can
+        // be mistaken for a damaged envelope, because none of them start with
+        // an ASCII S. Both legacy encoders length-prefix the leading UUID, so
+        // byte 0 is a small integer, never 0x53. Pinned rather than reasoned
+        // about, because the whole discrimination rests on it.
+        // 53 48 4f = "SHO": the worst case for the magic test.
+        let id = MemoryId(
+            uuid::Uuid::parse_str("53484f01-0000-4000-8000-000000000000").expect("static uuid"),
+        );
+        let memory = sample_memory(id, "a uuid whose first three bytes ARE the magic");
+
+        let bincode2 =
+            bincode::serde::encode_to_vec(&memory, bincode::config::standard()).expect("bincode");
+        let msgpack = rmp_serde::to_vec(&memory).expect("msgpack");
+
+        for (name, bytes) in [("bincode2", &bincode2), ("msgpack", &msgpack)] {
+            assert_ne!(
+                &bytes[0..3],
+                &crate::memory::storage::STORAGE_MAGIC[..],
+                "{name} encoding of a memory whose id starts with 53 48 4f must \
+                 still not begin with the SHO magic, or absent-vs-corrupt has a \
+                 false-positive population"
+            );
+            assert_eq!(
+                crate::serialization::read_sho_envelope(bytes),
+                crate::serialization::ShoEnvelope::Absent,
+                "{name} record must read as Absent"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pseudo_decode_is_refused_and_its_bytes_are_left_where_they_are() {
+        // Twenty-one bytes of garbage: enough for `try_raw_memory_parse` to
+        // take the first sixteen as a UUID and the rest as content, and
+        // fabricate every other field. It decodes. That is the defect.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = MemoryStorage::new(dir.path(), None).expect("storage");
+
+        let key = uuid::Uuid::parse_str("11112222-3333-4444-8555-666677778888").expect("uuid");
+        let mut garbage = vec![0xAB_u8; 16];
+        garbage.extend_from_slice(b"hello");
+        assert_eq!(garbage.len(), 21);
+
+        // The id the fabrication carries: derived from the VALUE, so it cannot
+        // agree with the key the record was fetched under.
+        let fabricated_id = MemoryId(uuid::Uuid::from_bytes([0xAB_u8; 16]));
+        assert_ne!(fabricated_id.0, key);
+
+        // Premise: unchecked, this decodes into a Memory with no error.
+        assert!(
+            deserialize_memory(&garbage).is_ok(),
+            "premise: garbage pseudo-decodes through the fallback chain"
+        );
+
+        storage
+            .db
+            .put(key.as_bytes(), &garbage)
+            .expect("seed the corrupted record");
+
+        let err = storage
+            .get_opt(&MemoryId(key))
+            .expect_err("a decode that disagrees with its key must not be served");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("does not match its key"),
+            "the error must name the id/key disagreement; got: {msg}"
+        );
+
+        // The evidence survives: the original bytes are still there, unchanged.
+        let on_disk = storage
+            .db
+            .get(key.as_bytes())
+            .expect("read back")
+            .expect("the corrupted record must still exist");
+        assert_eq!(
+            on_disk, garbage,
+            "the read path must not rewrite a record it could not trust"
+        );
+
+        // And no phantom was written at the fabricated id. `migrate_memory_format`
+        // keys its rewrite off the DECODED id, so an unguarded lazy migration of
+        // a pseudo-decode does not overwrite the original — it MANUFACTURES a
+        // second record, at a key nothing ever wrote to, visible to every
+        // full-CF scan in this file.
+        assert!(
+            storage
+                .db
+                .get(fabricated_id.0.as_bytes())
+                .expect("read back")
+                .is_none(),
+            "the lazy migration must not have persisted the fabrication under \
+             its invented id"
+        );
+    }
+
+    /// The rewriting paths must refuse a pseudo-decode too.
+    ///
+    /// `get_opt` has checked its decodes since the CRC work, so a fabrication
+    /// is never served. `storage::migrate_legacy` was the hole left behind: it
+    /// decodes with the unchecked chain and writes the result back under the
+    /// original key with a fresh SHO envelope. That is strictly worse than
+    /// serving one — serving a fabrication is a wrong answer to one request,
+    /// persisting it destroys the only copy of the original bytes and gives
+    /// the lie a valid checksum.
+    ///
+    /// Fail-first: with the migration path calling
+    /// `deserialize_memory_for_migration`, the checked assertion below returns
+    /// `Ok` and this test fails on the first `expect_err`.
+    #[test]
+    fn the_rewriting_paths_refuse_a_record_that_disagrees_with_its_key() {
+        let key = uuid::Uuid::parse_str("11112222-3333-4444-8555-666677778888").expect("uuid");
+        let mut garbage = vec![0xAB_u8; 16];
+        garbage.extend_from_slice(b"hello");
+
+        // Premise, asserted rather than assumed: the entry the migration path
+        // used to call accepts this happily.
+        assert!(
+            deserialize_memory_for_migration(&garbage).is_ok(),
+            "premise: the unchecked chain fabricates a Memory from this"
+        );
+
+        // The entry it calls now does not.
+        let err = deserialize_memory_for_migration_checked(key.as_bytes(), &garbage)
+            .expect_err("a rewrite must never be fed a record that disagrees with its key");
+        assert!(
+            format!("{err:#}").contains("does not match its key"),
+            "the refusal must name the disagreement, not just fail"
+        );
+
+        // A record the real writer produced still passes, so the guard does not
+        // block the migration it exists to protect.
+        let good = sample_memory(
+            MemoryId(uuid::Uuid::parse_str("aaaabbbb-cccc-4ddd-8eee-ffff00001111").unwrap()),
+            "a record written by the writer",
+        );
+        let bytes = crate::serialization::encode_sho(&good).expect("encode");
+        let decoded = deserialize_memory_for_migration_checked(good.id.0.as_bytes(), &bytes)
+            .expect("a healthy record must migrate");
+        assert_eq!(decoded.id, good.id);
+    }
+
+    #[test]
+    fn a_scan_skips_the_record_whose_id_disagrees_with_its_key() {
+        // The same check on the paths that SERVE results in bulk. A fabrication
+        // that survives here is indistinguishable from a memory to every caller
+        // downstream.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = MemoryStorage::new(dir.path(), None).expect("storage");
+
+        let good = sample_memory(
+            MemoryId(uuid::Uuid::parse_str("aaaabbbb-cccc-4ddd-8eee-ffff00001111").unwrap()),
+            "a real record",
+        );
+        storage.store(&good).expect("store");
+
+        let key = uuid::Uuid::parse_str("99998888-7777-4666-8555-444433332222").expect("uuid");
+        let mut garbage = vec![0xCD_u8; 16];
+        garbage.extend_from_slice(b"fabricated content");
+        storage.db.put(key.as_bytes(), &garbage).expect("seed");
+
+        let all = storage.get_all().expect("get_all");
+        assert_eq!(
+            all.len(),
+            1,
+            "only the real record may be returned; got {:?}",
+            all.iter().map(|m| m.id.0).collect::<Vec<_>>()
+        );
+        assert_eq!(all[0].id, good.id);
+
+        // And the record is still on disk afterwards, untouched.
+        assert_eq!(
+            storage.db.get(key.as_bytes()).expect("read back"),
+            Some(garbage)
+        );
+    }
+
+    /// Build the SHO v2 bytes a pre-2026-07-12 build would have written for
+    /// `memory`, whose experience must carry exactly one `NerEntityRecord` with
+    /// `fine_label: None`.
+    ///
+    /// Today's encoder cannot produce that layout, and replicating `Experience`
+    /// (50+ fields) to serialize it would be a second source of truth that rots.
+    /// So the old bytes are derived by DIFFERENCE: encode the same memory twice,
+    /// once with an empty `ner_entities` and once with the one record, and the
+    /// encodings agree on every byte outside the span the record occupies. That
+    /// span ends with the `0x00` that encodes `fine_label: None` — the byte the
+    /// old format did not have — so removing it yields the pre-fine_label
+    /// payload without duplicating a single field declaration.
+    #[test]
+    fn memory_written_before_ner_fine_label_still_decodes() {
+        // `NerEntityRecord::fine_label` was appended on 2026-07-12. The record
+        // sits MID-PAYLOAD inside `Experience::ner_entities`, so a memory
+        // written before that date desynchronises today's decoder by one byte
+        // per NER record — everything after it (cooccurrence_pairs,
+        // importance_override, and the whole of MemoryFlat past `experience`)
+        // is read from the wrong offset. No tail-default suffix can repair a
+        // hole in the middle, which is why this needs a generation retry.
+        let id = MemoryId(
+            uuid::Uuid::parse_str("7c1e5a6b-9d24-4f31-8a55-2b6c7d8e9f01").expect("static uuid"),
+        );
+        let mut memory = sample_memory(id.clone(), "the Dali struck the Key Bridge");
+        memory.experience.ner_entities = vec![NerEntityRecord {
+            text: "Key Bridge".to_string(),
+            entity_type: "LOC".to_string(),
+            confidence: 0.87,
+            start_char: Some(19),
+            end_char: Some(29),
+            fine_label: None,
+        }];
+        memory.experience.cooccurrence_pairs = vec![("Dali".to_string(), "Key Bridge".to_string())];
+        memory.experience.importance_override = Some(0.9);
+        let created_at = memory.created_at;
+
+        let legacy_bytes = encode_pre_fine_label(&memory);
+
+        let (decoded, needs_migration) = deserialize_memory(&legacy_bytes)
+            .expect("a memory written before fine_label existed must still be readable");
+
+        assert_eq!(decoded.id, id);
+        assert_eq!(decoded.experience.content, "the Dali struck the Key Bridge");
+        assert_eq!(decoded.experience.ner_entities.len(), 1);
+        assert_eq!(decoded.experience.ner_entities[0].text, "Key Bridge");
+        assert_eq!(decoded.experience.ner_entities[0].end_char, Some(29));
+        assert_eq!(
+            decoded.experience.ner_entities[0].fine_label, None,
+            "a record written before the field existed asserts no fine label"
+        );
+        // The fields AFTER the NER record are what a byte shift destroys, so
+        // they are the real assertion: if the decoder is off by one, these come
+        // back as garbage rather than these values.
+        assert_eq!(
+            decoded.experience.cooccurrence_pairs,
+            vec![("Dali".to_string(), "Key Bridge".to_string())]
+        );
+        assert_eq!(decoded.experience.importance_override, Some(0.9));
+        assert_eq!(decoded.created_at, created_at);
+        assert!(
+            needs_migration,
+            "a record recovered through the legacy generation must be rewritten"
+        );
+
+        // The retry is scoped to the decode call and must not leak.
+        assert_eq!(
+            NerWireGeneration::current(),
+            NerWireGeneration::Current,
+            "the decode generation must be restored when the guard drops"
+        );
+    }
+
+    #[test]
+    fn current_memory_with_fine_label_is_unaffected_by_the_legacy_retry() {
+        // A memory written today keeps its fine labels and must decode on the
+        // first attempt, with no migration flag — the retry is a fallback, not
+        // a second opinion.
+        let id = MemoryId(
+            uuid::Uuid::parse_str("2d4f6a8b-0c13-4e57-9a2b-3c5d7e9f0a1b").expect("static uuid"),
+        );
+        let mut memory = sample_memory(id.clone(), "GLiNER typed the span");
+        memory.experience.ner_entities = vec![NerEntityRecord {
+            text: "Key Bridge".to_string(),
+            entity_type: "LOC".to_string(),
+            confidence: 0.87,
+            start_char: Some(0),
+            end_char: Some(10),
+            fine_label: Some("bridge".to_string()),
+        }];
+
+        let bytes = crate::serialization::encode_sho(&memory).unwrap();
+        let (decoded, needs_migration) = deserialize_memory(&bytes).unwrap();
+
+        assert_eq!(
+            decoded.experience.ner_entities[0].fine_label.as_deref(),
+            Some("bridge")
+        );
+        assert!(
+            !needs_migration,
+            "a current-format record must not be flagged for rewrite"
+        );
+    }
+
+    #[test]
+    fn memory_missing_its_tail_fields_is_defaulted_in_declaration_order() {
+        // MEMORY_DEFAULT_SUFFIX repairs fields appended to the END of
+        // MemoryFlat, one at a time, and the ORDER is a contract: `toponyms`,
+        // then `declared_entities`, then `origin`. A record written before all
+        // three, before the last two, before only the last, and a complete
+        // record must all decode — and a record short by one field must not
+        // have the WRONG field defaulted.
+        //
+        // The suffix bytes cannot catch a mis-ordering on their own: all three
+        // defaults encode as `0x00` (two empty `Vec` lengths and
+        // `MemoryOrigin::Unknown`'s variant index), so the suffix is
+        // order-agnostic and reordering `MemoryFlat` still produces a decode
+        // that succeeds. What catches it is truncating a REAL encoding one tail
+        // field at a time and checking that the fields BEFORE the missing one
+        // came back intact, which is what this test does. `origin` is therefore
+        // set to a non-default variant: a defaulted `origin` is indistinguishable
+        // from a correctly decoded `Unknown`.
+        let id = MemoryId(
+            uuid::Uuid::parse_str("8a7b6c5d-4e3f-4a2b-9c1d-0e1f2a3b4c5d").expect("static uuid"),
+        );
+        let mut memory = sample_memory(id.clone(), "a record with a populated tail");
+        memory.experience.toponyms = vec![Toponym {
+            mention: "Baltimore".to_string(),
+            name: "Baltimore".to_string(),
+            lat: 39.2904,
+            lon: -76.6122,
+            country: "US".to_string(),
+            population: 585_708,
+        }];
+        memory.experience.declared_entities = vec!["Baltimore".to_string()];
+        memory.experience.origin = MemoryOrigin::Api;
+
+        // The property MEMORY_DEFAULT_SUFFIX depends on: `Unknown` must encode
+        // as exactly the one `0x00` byte the decoder appends for a record
+        // written before the field existed. Renumbering the enum so `Unknown`
+        // is no longer variant 0 would break every such record silently.
+        assert_eq!(
+            crate::serialization::encode_raw(&MemoryOrigin::Unknown).expect("encode origin"),
+            vec![0x00],
+            "MemoryOrigin::Unknown must encode as the single byte the tail-default supplies"
+        );
+
+        let full = crate::serialization::encode_raw(&memory).expect("encode");
+
+        // Complete record: no defaults applied.
+        let (decoded, defaulted) =
+            crate::serialization::decode_raw_compat::<Memory>(&full, MEMORY_DEFAULT_SUFFIX)
+                .unwrap();
+        assert!(!defaulted);
+        assert_eq!(decoded.experience.declared_entities, vec!["Baltimore"]);
+        assert_eq!(decoded.experience.toponyms.len(), 1);
+        assert_eq!(decoded.experience.origin, MemoryOrigin::Api);
+
+        // Written before `origin`: the tail ends after `declared_entities`. A
+        // non-Unknown origin is one varint byte, so dropping the last byte
+        // leaves exactly the shape the live `declared_entities`-era build wrote
+        // — the records that already exist on disk.
+        let without_origin = &full[..full.len() - 1];
+        let (decoded, defaulted) = crate::serialization::decode_raw_compat::<Memory>(
+            without_origin,
+            MEMORY_DEFAULT_SUFFIX,
+        )
+        .expect("a record written before origin must decode");
+        assert!(
+            defaulted,
+            "the missing tail field must be reported as defaulted"
+        );
+        assert_eq!(
+            decoded.experience.origin,
+            MemoryOrigin::Unknown,
+            "a record written before the field existed has no origin to recover"
+        );
+        assert_eq!(
+            decoded.experience.declared_entities,
+            vec!["Baltimore"],
+            "the field before the missing one must survive intact — declaring \
+             `origin` ahead of `declared_entities` would empty this instead"
+        );
+        assert_eq!(decoded.experience.toponyms.len(), 1);
+
+        // Written before `declared_entities` too: the tail ends after
+        // `toponyms`. A one-entry Vec<String> encodes as [len=1, strlen,
+        // bytes...], so dropping "Baltimore" plus its two varints (on top of
+        // the origin byte already dropped) leaves the pre-field shape.
+        let without_declared = &full[..full.len() - 1 - ("Baltimore".len() + 2)];
+        let (decoded, defaulted) = crate::serialization::decode_raw_compat::<Memory>(
+            without_declared,
+            MEMORY_DEFAULT_SUFFIX,
+        )
+        .expect("a record written before declared_entities must decode");
+        assert!(
+            defaulted,
+            "the missing tail fields must be reported as defaulted"
+        );
+        assert!(decoded.experience.declared_entities.is_empty());
+        assert_eq!(decoded.experience.origin, MemoryOrigin::Unknown);
+        assert_eq!(
+            decoded.experience.toponyms.len(),
+            1,
+            "the field before the missing ones must survive intact — a suffix \
+             applied in the wrong order would empty this instead"
+        );
     }
 
     #[test]
@@ -4267,8 +5118,9 @@ mod tests {
         // shape. (encode_sho would emit current postcard and defeat the test.)
         let legacy_bytes =
             bincode::serde::encode_to_vec(&memory, bincode::config::standard()).expect("encode");
-        assert!(
-            crate::serialization::unwrap_sho(&legacy_bytes).is_none(),
+        assert_eq!(
+            crate::serialization::read_sho_envelope(&legacy_bytes),
+            crate::serialization::ShoEnvelope::Absent,
             "fixture must NOT carry an SHO header"
         );
         storage
@@ -4292,8 +5144,11 @@ mod tests {
             .expect("record present");
         assert!(
             matches!(
-                crate::serialization::unwrap_sho(&raw),
-                Some((crate::serialization::SHO_VERSION_POSTCARD, _))
+                crate::serialization::read_sho_envelope(&raw),
+                crate::serialization::ShoEnvelope::Valid {
+                    version: crate::serialization::SHO_VERSION_POSTCARD,
+                    ..
+                }
             ),
             "record must be rewritten as SHO v2 postcard"
         );
@@ -4422,7 +5277,8 @@ mod tests {
 
     #[test]
     fn test_write_mode_default_async() {
-        std::env::remove_var("SHODH_WRITE_MODE");
+        let mut guard = crate::test_support::ScopedEnv::acquire();
+        guard.remove("SHODH_WRITE_MODE");
         let mode = WriteMode::default();
         assert_eq!(mode, WriteMode::Async);
     }
@@ -4567,5 +5423,164 @@ mod tests {
         assert_eq!(mv.vector_ids.len(), 3);
         assert_eq!(mv.dimension, 384);
         assert!(mv.chunk_ranges.is_none());
+    }
+
+    /// Two concurrent read-modify-write updates of the SAME memory must both
+    /// survive. Before `modify()` existed, callers did `get` -> mutate ->
+    /// `update` inline while holding only a `.read()` guard on `MemorySystem`,
+    /// so both readers saw the pre-update record and the second write silently
+    /// erased the first.
+    ///
+    /// The sleep inside each closure widens the window deterministically: with
+    /// the lock it only serializes the two calls, without it the loss is
+    /// reliable rather than occasional.
+    #[test]
+    fn concurrent_modify_does_not_lose_an_update() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(MemoryStorage::new(dir.path(), None).expect("storage"));
+
+        let id = MemoryId(uuid::Uuid::new_v4());
+        storage
+            .store(&sample_memory(
+                id.clone(),
+                "a memory two writers will touch",
+            ))
+            .expect("store");
+
+        let parent = MemoryId(uuid::Uuid::new_v4());
+
+        let a = {
+            let storage = Arc::clone(&storage);
+            let id = id.clone();
+            let parent = parent.clone();
+            std::thread::spawn(move || {
+                storage
+                    .modify(&id, |m| {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        m.set_parent(Some(parent));
+                    })
+                    .expect("modify parent")
+            })
+        };
+        let b = {
+            let storage = Arc::clone(&storage);
+            let id = id.clone();
+            std::thread::spawn(move || {
+                storage
+                    .modify(&id, |m| {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        m.experience
+                            .tags
+                            .push("tagged-by-the-other-writer".to_string());
+                    })
+                    .expect("modify tags")
+            })
+        };
+        a.join().expect("thread a");
+        b.join().expect("thread b");
+
+        let final_memory = storage.get(&id).expect("read back");
+        assert_eq!(
+            final_memory.get_parent(),
+            Some(&parent),
+            "the parent write was lost by the concurrent tag write"
+        );
+        assert!(
+            final_memory
+                .experience
+                .tags
+                .iter()
+                .any(|t| t == "tagged-by-the-other-writer"),
+            "the tag write was lost by the concurrent parent write"
+        );
+    }
+
+    /// `modify` must not invent a memory, and must not report absence for a
+    /// record it simply failed to read.
+    #[test]
+    fn modify_reports_a_missing_memory_without_writing_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = MemoryStorage::new(dir.path(), None).expect("storage");
+
+        let missing = MemoryId(uuid::Uuid::new_v4());
+        let mut ran = false;
+        let result = storage
+            .modify(&missing, |_| ran = true)
+            .expect("modify a missing memory is not an error");
+        assert!(
+            result.is_none(),
+            "modify reported a memory that never existed"
+        );
+        assert!(
+            !ran,
+            "the mutation ran against a memory that does not exist"
+        );
+        assert!(storage.get_opt(&missing).expect("get_opt").is_none());
+    }
+
+    /// `modify()` is a decode → mutate → re-encode round trip, so it can drop
+    /// any field the round trip does not carry. The three `MemoryFlat` tail
+    /// fields are exactly that shape: they are `#[serde(skip)]` on `Experience`
+    /// and ride at the tail of `MemoryFlat` instead, which is why the LZ4 path
+    /// has to copy them back by hand.
+    ///
+    /// `modify()` was written on a branch that had no `origin` and no
+    /// `declared_entities` at all, so it could not have been checked against
+    /// them, and its live caller is `set_memory_parent` — a path that runs on
+    /// memories carrying exactly this authority. If the round trip dropped
+    /// them, reparenting a memory would silently retract every caller entity
+    /// assertion the graph admits on, and reset its provenance to `Unknown`,
+    /// while changing nothing a caller of `set_memory_parent` would think to
+    /// look at.
+    ///
+    /// `origin` is set to a non-default variant deliberately: a dropped
+    /// `origin` decodes as `Unknown`, which is indistinguishable from a record
+    /// that never had one.
+    #[test]
+    fn modify_preserves_the_memory_flat_tail_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = MemoryStorage::new(dir.path(), None).expect("storage");
+
+        let id = MemoryId(uuid::Uuid::new_v4());
+        let mut memory = sample_memory(id.clone(), "a memory whose tail must survive a modify");
+        memory.experience.toponyms = vec![Toponym {
+            mention: "Baltimore".to_string(),
+            name: "Baltimore".to_string(),
+            lat: 39.2904,
+            lon: -76.6122,
+            country: "US".to_string(),
+            population: 585_708,
+        }];
+        memory.experience.declared_entities = vec!["Baltimore".to_string()];
+        memory.experience.origin = MemoryOrigin::Api;
+        storage.store(&memory).expect("store");
+
+        // The live mutation: reparenting touches none of the three.
+        let parent = MemoryId(uuid::Uuid::new_v4());
+        storage
+            .modify(&id, |m| m.set_parent(Some(parent.clone())))
+            .expect("modify")
+            .expect("the memory exists");
+
+        let after = storage.get(&id).expect("read back");
+        assert_eq!(after.get_parent(), Some(&parent), "the mutation itself");
+        assert_eq!(
+            after.experience.declared_entities,
+            vec!["Baltimore".to_string()],
+            "modify() retracted the caller's declared entities — graph \
+             admission runs on exactly this authority"
+        );
+        assert_eq!(
+            after.experience.origin,
+            MemoryOrigin::Api,
+            "modify() reset the memory's origin to Unknown, which reads as a \
+             record that never had one"
+        );
+        assert_eq!(
+            after.experience.toponyms.len(),
+            1,
+            "modify() dropped the resolved toponyms"
+        );
+        assert_eq!(after.experience.toponyms[0].name, "Baltimore");
     }
 }
