@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { ProviderLogo } from "@/components/ui/provider-logo";
 import { Composer } from "./Composer";
 import { EgressBadge } from "./EgressBadge";
+import { useEgressServers } from "./useEgressServers";
 import { costIsReal, useBillingLookup } from "./useBilling";
 import { MessageList } from "./MessageList";
 import { ModelPicker } from "./ModelPicker";
@@ -53,7 +54,10 @@ type Mode = "minimized" | "expanded";
 const INSPECTOR_ROUTES = ["/recall", "/geo", "/graph"];
 
 export function ConversationOverlay({ seat }: { seat: SeatReachability }) {
-  const { pathname } = useLocation();
+  const { pathname } = useLocation();
+  // Every remote tool server is another way out of this machine; the badge
+  // has to count them, not just the model.
+  const egressServers = useEgressServers();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
@@ -211,7 +215,7 @@ export function ConversationOverlay({ seat }: { seat: SeatReachability }) {
           </span>
         ) : null}
 
-        <EgressBadge info={modelInfo} />
+        <EgressBadge info={modelInfo} servers={egressServers} />
 
         {mode === "expanded" ? (
           <>

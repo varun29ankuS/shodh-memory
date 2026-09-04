@@ -198,10 +198,54 @@ pub struct CreateTodoRequest {
     pub related_memory_ids: Option<Vec<String>>,
 }
 
+/// Wire-form serialisation for [`Todo`]: drops the 384-float `embedding`.
+///
+/// The embedding must NOT be stripped with `skip_serializing` on the field
+/// itself: [`crate::memory::todos::TodoStore::store_todo`] persists todos with
+/// `serde_json::to_vec` through that very `Serialize` impl, and the embedding
+/// on the stored record is the single source of truth for semantic todo search.
+/// Skipping it at the field would erase embeddings from RocksDB on the next
+/// write. Stripping here keeps storage intact while the wire form stays lean —
+/// it was 287,082 bytes for 50 todos, ~81% of it embedding floats that no
+/// client (UI, MCP server, Python, TUI) reads.
+///
+/// Applying this at the response types rather than at each construction site
+/// means no present or future handler can leak the embedding by forgetting to
+/// strip it.
+mod todo_wire {
+    use super::Todo;
+    use serde::ser::SerializeSeq;
+    use serde::{Serialize, Serializer};
+
+    /// Clone one todo with its embedding dropped. Cloning a single todo at a
+    /// time keeps peak memory bounded regardless of list length.
+    fn stripped(todo: &Todo) -> Todo {
+        let mut todo = todo.clone();
+        todo.embedding = None;
+        todo
+    }
+
+    pub fn opt<S: Serializer>(todo: &Option<Todo>, ser: S) -> Result<S::Ok, S::Error> {
+        match todo {
+            Some(todo) => stripped(todo).serialize(ser),
+            None => ser.serialize_none(),
+        }
+    }
+
+    pub fn list<S: Serializer>(todos: &[Todo], ser: S) -> Result<S::Ok, S::Error> {
+        let mut seq = ser.serialize_seq(Some(todos.len()))?;
+        for todo in todos {
+            seq.serialize_element(&stripped(todo))?;
+        }
+        seq.end()
+    }
+}
+
 /// Response for todo operations
 #[derive(Debug, Serialize)]
 pub struct TodoResponse {
     pub success: bool,
+    #[serde(serialize_with = "todo_wire::opt")]
     pub todo: Option<Todo>,
     pub project: Option<Project>,
     pub formatted: String,
@@ -212,6 +256,7 @@ pub struct TodoResponse {
 pub struct TodoListResponse {
     pub success: bool,
     pub count: usize,
+    #[serde(serialize_with = "todo_wire::list")]
     pub todos: Vec<Todo>,
     pub projects: Vec<Project>,
     pub formatted: String,
@@ -221,9 +266,12 @@ pub struct TodoListResponse {
 #[derive(Debug, Serialize)]
 pub struct TodoCompleteResponse {
     pub success: bool,
+    #[serde(serialize_with = "todo_wire::opt")]
     pub todo: Option<Todo>,
+    #[serde(serialize_with = "todo_wire::opt")]
     pub next_recurrence: Option<Todo>,
     /// Todos whose dependency set is fully satisfied now that this one is done
+    #[serde(serialize_with = "todo_wire::list")]
     pub unblocked: Vec<Todo>,
     pub formatted: String,
 }
@@ -289,6 +337,11 @@ pub struct UpdateTodoRequest {
     /// Replace the set of linked memory UUIDs. Pass an empty array to clear.
     #[serde(default)]
     pub related_memory_ids: Option<Vec<String>>,
+    /// Target todo, supplied in the body by the flat `/api/todos/update` alias.
+    /// Ignored by the path-style `/api/todos/{todo_id}/update` route, which
+    /// takes the id from the URL.
+    #[serde(default)]
+    pub todo_id: Option<String>,
 }
 
 /// Request to reorder a todo
@@ -296,6 +349,20 @@ pub struct UpdateTodoRequest {
 pub struct ReorderTodoRequest {
     pub user_id: String,
     pub direction: String,
+    /// Target todo, supplied in the body by the flat `/api/todos/reorder`
+    /// alias. Ignored by the path-style route.
+    #[serde(default)]
+    pub todo_id: Option<String>,
+}
+
+/// Body of the flat `/api/todos/complete` and `/api/todos/delete` aliases,
+/// which carry no path capture and so must name their target in the body.
+/// This is the shape the Python integration sends
+/// (`python/shodh_memory/integrations/openai_agents.py`).
+#[derive(Debug, Deserialize)]
+pub struct FlatTodoRequest {
+    pub user_id: String,
+    pub todo_id: String,
 }
 
 /// Request to get due todos
@@ -525,6 +592,98 @@ async fn verify_memory_ids(
         });
     }
     Ok(parsed)
+}
+
+/// Every todo under a project, including those in its sub-projects — the same
+/// set [`crate::memory::todos::TodoStore::delete_project`] cascades over.
+fn collect_project_todos(
+    state: &AppState,
+    user_id: &str,
+    project_id: &ProjectId,
+    out: &mut Vec<Todo>,
+) -> Result<(), AppError> {
+    out.extend(
+        state
+            .todo_store
+            .list_todos_by_project(user_id, project_id)
+            .map_err(AppError::Internal)?,
+    );
+    let subprojects = state
+        .todo_store
+        .list_subprojects(user_id, project_id)
+        .map_err(AppError::Internal)?;
+    for sub in subprojects {
+        collect_project_todos(state, user_id, &sub.id, out)?;
+    }
+    Ok(())
+}
+
+/// Write the memory→todo half of the todo↔memory link.
+///
+/// `Todo::related_memory_ids` is only one side of the relationship; without
+/// this the source memory's `related_todo_ids` stays empty and the memory looks
+/// unconnected to the work that cites it. `add` gains the back-link, `remove`
+/// loses it, so a link set that is *replaced* stays consistent on both sides.
+///
+/// A back-link is bookkeeping, not the user's request: a memory that has since
+/// been deleted must not fail the todo write, so per-memory errors are logged
+/// and skipped rather than propagated.
+async fn sync_memory_back_links(
+    state: &AppState,
+    user_id: &str,
+    todo_id: &TodoId,
+    add: Vec<MemoryId>,
+    remove: Vec<MemoryId>,
+) -> Result<(), AppError> {
+    if add.is_empty() && remove.is_empty() {
+        return Ok(());
+    }
+
+    let memory_system = state.get_user_memory(user_id).map_err(AppError::Internal)?;
+    let todo_id = todo_id.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let guard = memory_system.read();
+        for memory_id in remove {
+            if let Err(e) = guard.unlink_related_todo(&memory_id, &todo_id) {
+                tracing::warn!(
+                    memory_id = %memory_id.0,
+                    todo_id = %todo_id,
+                    "Failed to remove todo back-link from memory: {e}"
+                );
+            }
+        }
+        for memory_id in add {
+            if let Err(e) = guard.link_related_todo(&memory_id, todo_id.clone()) {
+                tracing::warn!(
+                    memory_id = %memory_id.0,
+                    todo_id = %todo_id,
+                    "Failed to write todo back-link to memory: {e}"
+                );
+            }
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Back-link task panicked: {e}")))
+}
+
+/// Pull the target todo id out of a flat alias body.
+///
+/// `/api/todos/update|complete|delete|reorder` are registered without a path
+/// capture, so they name their target in the body. A missing id is a client
+/// error; it must never surface as the axum `Path` extractor rejection (a 500)
+/// that these routes used to return for *every* call.
+fn flat_todo_id(todo_id: Option<String>) -> Result<String, AppError> {
+    match todo_id {
+        Some(id) if !id.trim().is_empty() => Ok(id),
+        _ => Err(AppError::InvalidInput {
+            field: "todo_id".to_string(),
+            reason: "This endpoint takes the target todo in the request body; \
+                     pass \"todo_id\", or use the path-style route \
+                     (/api/todos/{todo_id}/...) instead."
+                .to_string(),
+        }),
+    }
 }
 
 // =============================================================================
@@ -1108,6 +1267,16 @@ pub async fn create_todo(
         .store_todo(&todo)
         .map_err(AppError::Internal)?;
 
+    // Complete the link: the source memories gain a back-link to this todo.
+    sync_memory_back_links(
+        &state,
+        &req.user_id,
+        &todo.id,
+        todo.related_memory_ids.clone(),
+        Vec::new(),
+    )
+    .await?;
+
     let activity_msg = if let Some(ref proj) = project_name {
         format!("Created in project '{}'", proj)
     } else {
@@ -1543,6 +1712,23 @@ pub async fn update_todo(
     Path(todo_id): Path<String>,
     Json(req): Json<UpdateTodoRequest>,
 ) -> Result<Json<TodoResponse>, AppError> {
+    update_todo_core(state, todo_id, req).await
+}
+
+/// Flat alias `POST /api/todos/update` — target named in the body.
+pub async fn update_todo_flat(
+    State(state): State<AppState>,
+    Json(req): Json<UpdateTodoRequest>,
+) -> Result<Json<TodoResponse>, AppError> {
+    let todo_id = flat_todo_id(req.todo_id.clone())?;
+    update_todo_core(state, todo_id, req).await
+}
+
+async fn update_todo_core(
+    state: AppState,
+    todo_id: String,
+    req: UpdateTodoRequest,
+) -> Result<Json<TodoResponse>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
     let mut todo = state
@@ -1550,6 +1736,10 @@ pub async fn update_todo(
         .find_todo_by_prefix(&req.user_id, &todo_id)
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::TodoNotFound(todo_id.clone()))?;
+
+    // `related_memory_ids` has replace semantics, so the back-links of memories
+    // dropped from the set have to be revoked as well as new ones written.
+    let links_before = todo.related_memory_ids.clone();
 
     if let Some(ref content) = req.content {
         todo.content = content.clone();
@@ -1675,6 +1865,20 @@ pub async fn update_todo(
         .todo_store
         .update_todo(&todo)
         .map_err(AppError::Internal)?;
+
+    // Keep the memory side in step with the replaced link set.
+    let added: Vec<MemoryId> = todo
+        .related_memory_ids
+        .iter()
+        .filter(|id| !links_before.contains(id))
+        .cloned()
+        .collect();
+    let removed: Vec<MemoryId> = links_before
+        .iter()
+        .filter(|id| !todo.related_memory_ids.contains(id))
+        .cloned()
+        .collect();
+    sync_memory_back_links(&state, &req.user_id, &todo.id, added, removed).await?;
 
     let update_description = {
         let mut changes = Vec::new();
@@ -1837,6 +2041,25 @@ pub async fn complete_todo(
     Path(todo_id): Path<String>,
     Json(req): Json<TodoQuery>,
 ) -> Result<Json<TodoCompleteResponse>, AppError> {
+    complete_todo_core(state, todo_id, req.user_id).await
+}
+
+/// Flat alias `POST /api/todos/complete` — target named in the body.
+/// This is the endpoint the Python OpenAI-agents integration calls.
+pub async fn complete_todo_flat(
+    State(state): State<AppState>,
+    Json(req): Json<FlatTodoRequest>,
+) -> Result<Json<TodoCompleteResponse>, AppError> {
+    let todo_id = flat_todo_id(Some(req.todo_id))?;
+    complete_todo_core(state, todo_id, req.user_id).await
+}
+
+async fn complete_todo_core(
+    state: AppState,
+    todo_id: String,
+    user_id: String,
+) -> Result<Json<TodoCompleteResponse>, AppError> {
+    let req = TodoQuery { user_id };
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
     let todo = state
@@ -1928,6 +2151,20 @@ pub async fn complete_todo(
 
     match result {
         Some((completed, next)) => {
+            // A recurring todo spawns its next occurrence by cloning itself,
+            // memory links included. That new todo id needs its own back-links,
+            // or the copied `related_memory_ids` would be one-sided again.
+            if let Some(ref next_todo) = next {
+                sync_memory_back_links(
+                    &state,
+                    &req.user_id,
+                    &next_todo.id,
+                    next_todo.related_memory_ids.clone(),
+                    Vec::new(),
+                )
+                .await?;
+            }
+
             // Surface todos whose dependency set is now fully satisfied —
             // "you finished this; here is what it unblocks"
             let unblocked = state
@@ -2003,6 +2240,24 @@ pub async fn delete_todo(
     Path(todo_id): Path<String>,
     Query(query): Query<TodoQuery>,
 ) -> Result<Json<TodoResponse>, AppError> {
+    delete_todo_core(state, todo_id, query.user_id).await
+}
+
+/// Flat alias `POST /api/todos/delete` — target named in the body.
+pub async fn delete_todo_flat(
+    State(state): State<AppState>,
+    Json(req): Json<FlatTodoRequest>,
+) -> Result<Json<TodoResponse>, AppError> {
+    let todo_id = flat_todo_id(Some(req.todo_id))?;
+    delete_todo_core(state, todo_id, req.user_id).await
+}
+
+async fn delete_todo_core(
+    state: AppState,
+    todo_id: String,
+    user_id: String,
+) -> Result<Json<TodoResponse>, AppError> {
+    let query = TodoQuery { user_id };
     validation::validate_user_id(&query.user_id).map_validation_err("user_id")?;
 
     let todo = state
@@ -2015,6 +2270,19 @@ pub async fn delete_todo(
         .todo_store
         .delete_todo(&query.user_id, &todo.id)
         .map_err(AppError::Internal)?;
+
+    // Revoke the back-links, otherwise every linked memory keeps a dangling id
+    // pointing at a todo that no longer exists.
+    if success {
+        sync_memory_back_links(
+            &state,
+            &query.user_id,
+            &todo.id,
+            Vec::new(),
+            todo.related_memory_ids.clone(),
+        )
+        .await?;
+    }
 
     let formatted = if success {
         todo_formatter::format_todo_deleted(&todo.short_id())
@@ -2056,6 +2324,23 @@ pub async fn reorder_todo(
     State(state): State<AppState>,
     Path(todo_id): Path<String>,
     Json(req): Json<ReorderTodoRequest>,
+) -> Result<Json<TodoResponse>, AppError> {
+    reorder_todo_core(state, todo_id, req).await
+}
+
+/// Flat alias `POST /api/todos/reorder` — target named in the body.
+pub async fn reorder_todo_flat(
+    State(state): State<AppState>,
+    Json(req): Json<ReorderTodoRequest>,
+) -> Result<Json<TodoResponse>, AppError> {
+    let todo_id = flat_todo_id(req.todo_id.clone())?;
+    reorder_todo_core(state, todo_id, req).await
+}
+
+async fn reorder_todo_core(
+    state: AppState,
+    todo_id: String,
+    req: ReorderTodoRequest,
 ) -> Result<Json<TodoResponse>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
@@ -2756,15 +3041,17 @@ pub async fn delete_project(
         })
         .ok_or_else(|| AppError::ProjectNotFound(project_id.clone()))?;
 
-    let todos_count = if req.delete_todos {
-        state
-            .todo_store
-            .list_todos_by_project(&req.user_id, &project.id)
-            .map_err(AppError::Internal)?
-            .len()
+    // Collected before the delete, and recursively: `delete_project` cascades
+    // into sub-projects, so their todos are destroyed too and their memory
+    // back-links must be revoked with the rest.
+    let doomed_todos = if req.delete_todos {
+        let mut collected = Vec::new();
+        collect_project_todos(&state, &req.user_id, &project.id, &mut collected)?;
+        collected
     } else {
-        0
+        Vec::new()
     };
+    let todos_count = doomed_todos.len();
 
     let deleted = state
         .todo_store
@@ -2773,6 +3060,17 @@ pub async fn delete_project(
 
     if !deleted {
         return Err(AppError::ProjectNotFound(project_id));
+    }
+
+    for todo in &doomed_todos {
+        sync_memory_back_links(
+            &state,
+            &req.user_id,
+            &todo.id,
+            Vec::new(),
+            todo.related_memory_ids.clone(),
+        )
+        .await?;
     }
 
     let formatted = todo_formatter::format_project_deleted(&project, todos_count);
@@ -2804,4 +3102,267 @@ pub async fn delete_project(
         stats: None,
         formatted,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::handlers::test_helpers::{self, TestHarness};
+    use crate::memory::types::{Experience, MemoryId, TodoId};
+    use axum::http::StatusCode;
+    use serde_json::json;
+
+    /// Create a todo via the HTTP API and return its id.
+    async fn create_todo_via_api(harness: &TestHarness, user_id: &str, content: &str) -> String {
+        let req = test_helpers::post_json(
+            "/api/todos/add",
+            &json!({ "user_id": user_id, "content": content }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK, "todo creation failed: {body}");
+        body["todo"]["id"].as_str().unwrap().to_string()
+    }
+
+    /// The four flat alias routes (`/api/todos/update|complete|delete|reorder`)
+    /// carry no path capture, so handlers extracting `Path<String>` blew up at
+    /// runtime with axum's "Wrong number of path arguments for `Path`. Expected
+    /// 1 but got 0" — a 500 on every call, including from the live Python
+    /// caller in `python/shodh_memory/integrations/openai_agents.py`, which
+    /// posts `{"user_id", "todo_id"}` to `/api/todos/complete`.
+    ///
+    /// Each alias must read the id from the request body and succeed.
+    #[tokio::test]
+    async fn flat_alias_routes_read_todo_id_from_body() {
+        let harness = TestHarness::new();
+        let user_id = "flat-alias-user";
+
+        // --- /api/todos/update ---
+        let id = create_todo_via_api(&harness, user_id, "alias update target").await;
+        let req = test_helpers::post_json(
+            "/api/todos/update",
+            &json!({ "user_id": user_id, "todo_id": id, "notes": "set via flat alias" }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "POST /api/todos/update must not 500: {body}"
+        );
+        assert_eq!(body["todo"]["notes"], "set via flat alias");
+
+        // --- /api/todos/complete (exact shape the Python caller sends) ---
+        let id = create_todo_via_api(&harness, user_id, "alias complete target").await;
+        let req = test_helpers::post_json(
+            "/api/todos/complete",
+            &json!({ "user_id": user_id, "todo_id": id }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "POST /api/todos/complete must not 500: {body}"
+        );
+        assert_eq!(body["todo"]["status"], "done");
+
+        // --- /api/todos/reorder ---
+        let id = create_todo_via_api(&harness, user_id, "alias reorder target").await;
+        let req = test_helpers::post_json(
+            "/api/todos/reorder",
+            &json!({ "user_id": user_id, "todo_id": id, "direction": "up" }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "POST /api/todos/reorder must not 500: {body}"
+        );
+
+        // --- /api/todos/delete ---
+        let id = create_todo_via_api(&harness, user_id, "alias delete target").await;
+        let req = test_helpers::post_json(
+            "/api/todos/delete",
+            &json!({ "user_id": user_id, "todo_id": id }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "POST /api/todos/delete must not 500: {body}"
+        );
+        let gone = harness
+            .manager
+            .todo_store
+            .get_todo(user_id, &TodoId(id.parse().unwrap()))
+            .unwrap();
+        assert!(gone.is_none(), "flat delete alias must really delete");
+    }
+
+    /// A missing/blank `todo_id` on a flat alias is a client error, not a 500.
+    #[tokio::test]
+    async fn flat_alias_without_todo_id_is_client_error() {
+        let harness = TestHarness::new();
+        let req = test_helpers::post_json(
+            "/api/todos/complete",
+            &json!({ "user_id": "flat-alias-user" }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert!(
+            status.is_client_error(),
+            "missing todo_id must be a 4xx, got {status}: {body}"
+        );
+    }
+
+    /// `GET/POST /api/todos` shipped the full 384-float embedding for every
+    /// todo — 287,082 bytes for 50 todos on the live `claude` profile, ~81% of
+    /// it embedding floats no client reads.
+    ///
+    /// The embedding must vanish from the wire while remaining on the stored
+    /// record, which is the single source of truth for semantic todo search.
+    #[tokio::test]
+    async fn list_response_omits_embedding_but_storage_keeps_it() {
+        let harness = TestHarness::new();
+        let user_id = "embedding-wire-user";
+
+        let id = create_todo_via_api(&harness, user_id, "semantic search target").await;
+
+        // Storage keeps the embedding: that is the round-trip contract.
+        let stored = harness
+            .manager
+            .todo_store
+            .get_todo(user_id, &TodoId(id.parse().unwrap()))
+            .unwrap()
+            .expect("todo must be stored");
+        assert_eq!(
+            stored.embedding.as_ref().map(Vec::len),
+            Some(384),
+            "storage round-trip must preserve the 384-dim embedding"
+        );
+
+        // Every wire surface that carries a Todo must drop it. Asserted on the
+        // JSON key, not on the raw text: todo content may mention "embedding".
+        let req = test_helpers::post_json("/api/todos", &json!({ "user_id": user_id }));
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        let listed = &body["todos"][0];
+        assert_eq!(listed["id"].as_str(), Some(id.as_str()));
+        assert!(
+            listed.get("embedding").is_none(),
+            "list response must not carry the embedding, got: {listed}"
+        );
+
+        let req = test_helpers::get(&format!("/api/todos/{id}?user_id={user_id}"));
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body["todo"].get("embedding").is_none(),
+            "single-todo response must not carry the embedding"
+        );
+
+        // The completion response carries todos too (todo/next_recurrence/unblocked).
+        let req = test_helpers::post_json(
+            "/api/todos/complete",
+            &json!({ "user_id": user_id, "todo_id": id }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body["todo"].get("embedding").is_none(),
+            "complete response must not carry the embedding"
+        );
+    }
+
+    /// A todo linked to a memory recorded `todo.related_memory_ids`, but the
+    /// memory's `related_todo_ids` stayed empty — half a link, which makes a
+    /// memory look unconnected to the work that references it.
+    ///
+    /// Both sides must be written on create, rewritten on update, and cleaned
+    /// up on delete so no dangling ids survive.
+    #[tokio::test]
+    async fn memory_todo_back_link_is_written_on_both_sides() {
+        let harness = TestHarness::new();
+        let user_id = "backlink-user";
+
+        let (mem_a, mem_b) = {
+            let memory = harness.manager.get_user_memory(user_id).unwrap();
+            let guard = memory.read();
+            let a = guard
+                .remember(
+                    Experience {
+                        content: "source memory A".to_string(),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap();
+            let b = guard
+                .remember(
+                    Experience {
+                        content: "source memory B".to_string(),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap();
+            (a, b)
+        };
+
+        let related_todo_ids = |mid: &MemoryId| -> Vec<TodoId> {
+            let memory = harness.manager.get_user_memory(user_id).unwrap();
+            let guard = memory.read();
+            guard.get_memory(mid).unwrap().related_todo_ids
+        };
+
+        // --- create: back-link appears on the source memory ---
+        let req = test_helpers::post_json(
+            "/api/todos/add",
+            &json!({
+                "user_id": user_id,
+                "content": "todo motivated by memory A",
+                "related_memory_ids": [mem_a.0.to_string()],
+            }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let todo_id_str = body["todo"]["id"].as_str().unwrap().to_string();
+        let todo_id = TodoId(todo_id_str.parse().unwrap());
+
+        assert_eq!(
+            related_todo_ids(&mem_a),
+            vec![todo_id.clone()],
+            "creating a linked todo must write the memory-side back-link"
+        );
+
+        // --- update: links move from A to B, both sides stay consistent ---
+        let req = test_helpers::post_json(
+            &format!("/api/todos/{todo_id_str}/update"),
+            &json!({
+                "user_id": user_id,
+                "related_memory_ids": [mem_b.0.to_string()],
+            }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        assert!(
+            related_todo_ids(&mem_a).is_empty(),
+            "a memory dropped from related_memory_ids must lose its back-link"
+        );
+        assert_eq!(
+            related_todo_ids(&mem_b),
+            vec![todo_id.clone()],
+            "a memory added to related_memory_ids must gain a back-link"
+        );
+
+        // --- delete: no dangling ids left behind ---
+        let req = test_helpers::post_json(
+            "/api/todos/delete",
+            &json!({ "user_id": user_id, "todo_id": todo_id_str }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        assert!(
+            related_todo_ids(&mem_b).is_empty(),
+            "deleting a todo must remove its back-link, not leave a dangling id"
+        );
+    }
 }

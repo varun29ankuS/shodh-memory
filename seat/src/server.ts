@@ -29,6 +29,7 @@
  */
 
 import * as crypto from "node:crypto";
+import { loadPolicy } from "./policy.js";
 import * as http from "node:http";
 import type { AuthInteraction, AuthPrompt } from "@earendil-works/pi-ai";
 import type { ShodhBackend, HealthDetail } from "./backend.js";
@@ -191,6 +192,11 @@ function lastAssistantText(messages: unknown[]): string | undefined {
 
 export class SeatServer {
 	private readonly deps: SeatServerDeps;
+	/** Loaded once: SEAT_POLICY is process configuration, like SEAT_MCP_SERVERS.
+	 *  A malformed or unreadable policy file is fatal at startup rather than
+	 *  degrading to "no policy" — that is the one failure where the
+	 *  safe-looking outcome is the dangerous one. */
+	private readonly policy = loadPolicy();
 	private readonly conversations = new Map<string, Conversation>();
 	/** In-flight browser-OAuth logins, one per provider. */
 	private readonly oauthSessions = new Map<
@@ -299,6 +305,7 @@ export class SeatServer {
 			ledger: this.deps.ledger,
 			// Passed as a getter, not a snapshot: see ConversationDeps.mcpTools.
 			mcpTools: () => this.deps.mcpHost.getTools(),
+			policy: this.policy,
 		};
 	}
 

@@ -329,6 +329,15 @@ pub struct ReinforceFeedbackResponse {
     pub associations_strengthened: usize,
     pub importance_boosts: usize,
     pub importance_decays: usize,
+    /// Memory-to-memory edges minted or strengthened because this set was
+    /// confirmed useful. Zero unless SHODH_COACT_OUTCOME_GATED=1 and the
+    /// outcome was "helpful" — see `record_memory_coactivation_outcome`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub coactivation_edges: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 // =============================================================================
@@ -950,7 +959,11 @@ pub async fn recall(
             unique_facts.entry(fact.id.clone()).or_insert(fact);
         }
         let mut sorted_facts: Vec<RecallFact> = unique_facts.into_values().collect();
-        sorted_facts.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
+        sorted_facts.sort_by(|a, b| {
+            b.confidence
+                .total_cmp(&a.confidence)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         sorted_facts.truncate(5);
         sorted_facts
     };
@@ -2228,7 +2241,7 @@ pub async fn proactive_context(
                 .collect();
 
             // Sort by boosted score (highest first)
-            enriched.sort_by(|a, b| b.1.total_cmp(&a.1));
+            enriched.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.id.cmp(&b.0.id)));
 
             // --- Adaptive involuntary memory constraints (Berntsen 2009) ---
             // These operate ONLY on proactive_context, not voluntary recall.
@@ -2255,7 +2268,7 @@ pub async fn proactive_context(
                         .max(ELABORATION_QUALITY_MIN);
                     *score *= quality;
                 }
-                enriched.sort_by(|a, b| b.1.total_cmp(&a.1));
+                enriched.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.id.cmp(&b.0.id)));
             }
 
             // (B) Steeper proactive recency — involuntary memories favor recent events.
@@ -2272,7 +2285,7 @@ pub async fn proactive_context(
                     let proactive_recency_factor = (-differential_rate * hours_old).exp();
                     *score *= proactive_recency_factor;
                 }
-                enriched.sort_by(|a, b| b.1.total_cmp(&a.1));
+                enriched.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.id.cmp(&b.0.id)));
             }
 
             // (C) Habituation — penalize memories surfaced repeatedly without utility.
@@ -2294,7 +2307,7 @@ pub async fn proactive_context(
                         }
                     }
                 }
-                enriched.sort_by(|a, b| b.1.total_cmp(&a.1));
+                enriched.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.id.cmp(&b.0.id)));
             }
 
             // (D) Lateral inhibition — similar candidates suppress each other.
@@ -2325,7 +2338,7 @@ pub async fn proactive_context(
                     }
                 }
                 // Final sort after all biological constraints applied
-                enriched.sort_by(|a, b| b.1.total_cmp(&a.1));
+                enriched.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.id.cmp(&b.0.id)));
             }
 
             // Normalize scores before applying the public threshold. Raw pipeline scores are
@@ -2854,7 +2867,11 @@ pub async fn proactive_context(
                 }
                 // Deduplicate by text similarity: if two facts share >80% words, keep higher confidence
                 let mut sorted: Vec<ProactiveFact> = found.into_values().collect();
-                sorted.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
+                sorted.sort_by(|a, b| {
+                    b.confidence
+                        .total_cmp(&a.confidence)
+                        .then_with(|| a.id.cmp(&b.id))
+                });
                 let mut deduped: Vec<ProactiveFact> = Vec::new();
                 for fact in sorted {
                     let fact_words: std::collections::HashSet<&str> =
@@ -3234,6 +3251,7 @@ pub async fn reinforce_feedback(
             associations_strengthened: 0,
             importance_boosts: 0,
             importance_decays: 0,
+            coactivation_edges: 0,
         }));
     }
 
@@ -3279,6 +3297,10 @@ pub async fn reinforce_feedback(
         .map_err(AppError::Internal)?
     };
 
+    // Memory-to-memory edges minted because this set was confirmed useful.
+    // Stays 0 unless the outcome-gated path below runs.
+    let mut coactivation_edges = 0usize;
+
     // Propagate feedback to entity salience in the knowledge graph
     if let Some(graph) = graph {
         let boost = match outcome {
@@ -3311,6 +3333,51 @@ pub async fn reinforce_feedback(
                 Err(e) => tracing::warn!("Entity reinforcement task panicked: {}", e),
             }
         }
+
+        // OUTCOME-GATED memory-to-memory Hebbian update.
+        //
+        // The recall path calls record_memory_coactivation on every retrieval
+        // and is strengthen-only, so it mints nothing and the mem<->mem layer
+        // has been inert since f6b730ee. That gate was correct: un-gated
+        // all-pairs minting over a full retrieval was ~80% of graph edges and
+        // the OOM driver, and the resulting hub bias cost 6.7pp of p@1.
+        //
+        // This is the same rule with a reward attached. It fires only on an
+        // explicit "helpful" outcome over the exact set the caller had evidence
+        // for, which is what makes minting affordable: a citation set is a
+        // handful of memories, so all-pairs is single-digit edges rather than
+        // ~1,225 for a top-50 retrieval.
+        //
+        // DEFAULT OFF. It has to beat the ablation on the pinned harness —
+        // p@1/MRR up, recall@10 identity held, effect several times run noise —
+        // before it earns a default, exactly as the retrieval-gated version
+        // failed to.
+        let outcome_gated = std::env::var("SHODH_COACT_OUTCOME_GATED")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        if outcome_gated && matches!(outcome, crate::memory::RetrievalOutcome::Helpful) {
+            let graph_clone = graph.clone();
+            let uuids = memory_uuids.clone();
+            let cited_count = uuids.len();
+            match tokio::task::spawn_blocking(move || {
+                let graph_guard = graph_clone.read();
+                graph_guard.record_memory_coactivation_outcome(&uuids)
+            })
+            .await
+            {
+                Ok(Ok(count)) => {
+                    coactivation_edges = count;
+                    tracing::info!(
+                        coactivation_edges = count,
+                        cited = cited_count,
+                        "Outcome-gated coactivation applied"
+                    );
+                }
+                Ok(Err(e)) => tracing::warn!("Outcome-gated coactivation failed: {}", e),
+                Err(e) => tracing::warn!("Outcome-gated coactivation task panicked: {}", e),
+            }
+        }
     }
 
     tracing::info!(
@@ -3337,6 +3404,7 @@ pub async fn reinforce_feedback(
         associations_strengthened: stats.associations_strengthened,
         importance_boosts: stats.importance_boosts,
         importance_decays: stats.importance_decays,
+        coactivation_edges,
     }))
 }
 

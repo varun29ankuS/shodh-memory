@@ -17,29 +17,29 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "d3": "^7.9.0",
-    "dompurify": "^3.4.13",
-    "lucide-react": "^1.29.0",
-    "marked": "^18.0.9",
-    "motion": "^13.0.0",
+    "dompurify": "^3.4.14",
+    "lucide-react": "^1.33.0",
+    "marked": "^18.0.10",
+    "motion": "^13.1.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router-dom": "^7.18.2",
     "simple-icons": "^16.28.0",
     "tailwind-merge": "^3.6.0",
     "topojson-client": "^3.1.0",
-    "zustand": "^5.0.14"
+    "zustand": "^5.0.15"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@types/d3": "^7.4.3",
-    "@types/node": "^26.1.2",
+    "@types/node": "^26.2.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
-    "@vitejs/plugin-react": "^6.0.5",
+    "@vitejs/plugin-react": "^6.1.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
-    "vite": "^8.2.1",
+    "vite": "^8.2.2",
     "vite-plugin-singlefile": "^2.3.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   }
 }

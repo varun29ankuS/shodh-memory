@@ -128,6 +128,44 @@ jobs:
           [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
           ls -la "$MODEL_DIR"
 
+      # EVERY DIAGNOSTIC BELOW RAN WITHOUT THE NEURAL NER UNTIL NOW.
+      #
+      # The neural recogniser is GLiNER, loaded from SHODH_GLINER_MODEL_PATH
+      # (default ./models/gliner-bi-edge). This workflow never fetched it, and
+      # until the guard moved into `ingest_corpus` the analysis paths it drives
+      # -- reachability, entity-linking, the funnel, the learning curve, the
+      # ablation matrix, multi-hop, ontology, lineage, forgetting, temporal --
+      # carried no NER gate. So they degraded to the rule-based fallback in
+      # silence and reported the result as if it were the shipped system, while
+      # recall.yml fetched and verified the same assets all along.
+      #
+      # That is not a small fidelity difference. The extractor decides which
+      # entities exist, which decides which edges exist, which is the substrate
+      # every one of these diagnostics measures.
+      - name: Cache GLiNER typer assets
+        id: gliner-cache
+        uses: actions/cache@v6
+        with:
+          path: models/gliner-bi-edge
+          key: gliner-bi-edge-onnx-v1
+
+      - name: Fetch GLiNER typer assets
+        if: steps.gliner-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p models/gliner-bi-edge
+          gh release download gliner-bi-edge-onnx-v1 --repo "$GITHUB_REPOSITORY" --dir models/gliner-bi-edge
+          ls -la models/gliner-bi-edge
+
+      - name: Verify GLiNER assets (hard gate)
+        run: |
+          GL="${{ github.workspace }}/models/gliner-bi-edge"
+          test -s "$GL/model.onnx" || { echo "::error::GLiNER model missing - refusing to measure fallback NER"; exit 1; }
+          test -s "$GL/tokenizer.json" || { echo "::error::GLiNER tokenizer missing"; exit 1; }
+          test -s "$GL/label_embeddings.bin" || { echo "::error::GLiNER label embeddings missing"; exit 1; }
+          echo "SHODH_GLINER_MODEL_PATH=$GL" >> "$GITHUB_ENV"
+
       - name: Graph reachability diagnostic
         if: ${{ github.event.inputs.mode == 'reachability' }}
         env:
