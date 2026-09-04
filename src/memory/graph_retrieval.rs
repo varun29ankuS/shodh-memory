@@ -290,11 +290,32 @@ fn spread_single_direction(
         // HashMap iteration order produces slightly different sums and flips
         // near-tie ranks between repeats (the query-time residual after the
         // ingest-order fixes). Sorting by Uuid pins the accumulation order.
-        let mut current_activated: Vec<(Uuid, f32)> =
-            activation_map.iter().map(|(id, act)| (*id, *act)).collect();
-        current_activated.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        // Order by entity NAME, not by Uuid.
+        //
+        // Sorting by Uuid pins the accumulation order WITHIN one process and is
+        // a random permutation ACROSS ingests, because entity UUIDs are
+        // re-rolled every time the corpus is ingested. The cross-repeat
+        // determinism guard re-ingests on every repeat, so a Uuid sort here
+        // leaves exactly the ULP wobble it was added to remove — which is the
+        // same conclusion the PPR frontier below already reached and fixed.
+        //
+        // Names are a pure function of graph content, so they are stable across
+        // ingests; uuid stays as the total-order fallback for duplicate names.
+        let mut current_activated: Vec<(String, Uuid, f32)> = activation_map
+            .iter()
+            .map(|(id, act)| {
+                let name = graph
+                    .get_entity(id)
+                    .ok()
+                    .flatten()
+                    .map(|e| e.name)
+                    .unwrap_or_default();
+                (name, *id, *act)
+            })
+            .collect();
+        current_activated.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 
-        for (entity_uuid, source_activation) in current_activated {
+        for (_name, entity_uuid, source_activation) in current_activated {
             if source_activation < threshold {
                 continue;
             }

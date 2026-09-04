@@ -2294,7 +2294,10 @@ mod tests {
         let scrubbed = store
             .remove_memory_links("test_user", &doomed)
             .expect("remove_memory_links");
-        assert_eq!(scrubbed, 1, "exactly one todo referenced the deleted memory");
+        assert_eq!(
+            scrubbed, 1,
+            "exactly one todo referenced the deleted memory"
+        );
 
         let after = store.get_todo("test_user", &linked.id).unwrap().unwrap();
         assert_eq!(

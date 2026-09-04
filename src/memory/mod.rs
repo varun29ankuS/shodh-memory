@@ -10564,7 +10564,13 @@ impl MemorySystem {
             }
         }
 
-        results.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
+        // Confidence desc -> fact id asc. Facts are accumulated across entities through a
+        // HashSet dedup, so equal-confidence facts have no inherent order to fall back on.
+        results.sort_by(|a, b| {
+            b.confidence
+                .total_cmp(&a.confidence)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         Ok(results)
     }
 
@@ -12091,7 +12097,6 @@ mod readonly_recall_tests {
         );
     }
 }
-
 
 #[cfg(test)]
 mod memory_entity_resolution_tests {

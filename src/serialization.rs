@@ -360,7 +360,11 @@ mod tests {
     fn test_sho_envelope_round_trip() {
         let payload = b"hello postcard";
         let envelope = wrap_sho_v2(payload);
-        let ShoEnvelope::Valid { version, payload: extracted } = read_sho_envelope(&envelope) else {
+        let ShoEnvelope::Valid {
+            version,
+            payload: extracted,
+        } = read_sho_envelope(&envelope)
+        else {
             panic!("a freshly wrapped envelope must read back as valid");
         };
         assert_eq!(version, SHO_VERSION_POSTCARD);

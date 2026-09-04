@@ -299,7 +299,9 @@ pub async fn ingest_experience(
     experience.toponyms = toponyms;
     experience.origin = origin;
 
-    let memory = state.get_user_memory(&user_id).map_err(AppError::Internal)?;
+    let memory = state
+        .get_user_memory(&user_id)
+        .map_err(AppError::Internal)?;
 
     let (memory_id, deduped, was_update, needs_graph_rebuild, experience, metric_label) =
         match external_id {

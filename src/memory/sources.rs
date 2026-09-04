@@ -556,7 +556,11 @@ impl SourceStore {
             .context("write source definition")
     }
 
-    pub fn get_source(&self, user_id: &str, source_id: &SourceId) -> Result<Option<SourceDefinition>> {
+    pub fn get_source(
+        &self,
+        user_id: &str,
+        source_id: &SourceId,
+    ) -> Result<Option<SourceDefinition>> {
         let raw = self
             .db
             .get_cf(self.sources_cf(), def_key(user_id, source_id))
@@ -631,9 +635,7 @@ impl SourceStore {
             .context("read source runtime")?;
         match raw {
             None => Ok(SourceRuntime::default()),
-            Some(bytes) => {
-                crate::serialization::decode(&bytes).context("decode source runtime")
-            }
+            Some(bytes) => crate::serialization::decode(&bytes).context("decode source runtime"),
         }
     }
 

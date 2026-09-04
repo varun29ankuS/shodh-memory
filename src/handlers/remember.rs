@@ -1127,7 +1127,11 @@ pub async fn upsert_memory(
 /// Resolves the memory's entity graph, finds temporal candidates, infers causal
 /// edges, and strengthens corresponding knowledge graph connections. All failures
 /// are logged but never propagate — lineage is best-effort.
-pub(crate) fn spawn_lineage_inference(state: AppState, user_id: String, memory_id: crate::memory::MemoryId) {
+pub(crate) fn spawn_lineage_inference(
+    state: AppState,
+    user_id: String,
+    memory_id: crate::memory::MemoryId,
+) {
     let tracker = state.task_tracker.clone();
     tracker.spawn(async move {
         let graph_arc = match state.get_user_graph(&user_id) {

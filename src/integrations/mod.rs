@@ -93,14 +93,18 @@ mod tests {
 mod https_default_tests {
     use super::resolve_api_url_override;
 
-    /// `SHODH_ENFORCE_HTTPS` and the override var are process-global.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // `SHODH_ENFORCE_HTTPS` and the override var are process-global, so this
+    // takes the CRATE-WIDE lock rather than a module-local one. A mutex private
+    // to this module excludes only its own tests; a test in a sibling module
+    // mutating env would still race it, which is the failure the single lock
+    // exists to prevent and which this branch's own "one env lock" commit
+    // established.
 
     const DEFAULT_URL: &str = "https://api.example.com/v1";
     const VAR: &str = "SHODH_TEST_INTEGRATION_URL";
 
     fn run<T>(enforce: Option<&str>, override_url: Option<&str>, f: impl FnOnce() -> T) -> T {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::memory::RECALL_ENV_LOCK.lock();
         match enforce {
             Some(v) => std::env::set_var("SHODH_ENFORCE_HTTPS", v),
             None => std::env::remove_var("SHODH_ENFORCE_HTTPS"),

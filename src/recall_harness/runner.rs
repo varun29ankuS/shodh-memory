@@ -2733,7 +2733,7 @@ pub fn analyze_learning_curve(inputs: &RunInputs, cycles: usize) -> Result<Learn
             name,
             _harness_env.recall_read_only(),
         )
-            .with_context(|| format!("learning-curve arm {name}"))?;
+        .with_context(|| format!("learning-curve arm {name}"))?;
         arms.push(arm);
     }
 

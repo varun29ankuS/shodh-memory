@@ -247,7 +247,6 @@ pub async fn auth_middleware(request: Request, next: Next) -> Response {
     next.run(request).await
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,7 +333,6 @@ mod tests {
 
         guard.set("SHODH_ENV", "test");
         assert!(!is_production_mode());
-
     }
 
     // ── validate_api_key: SHODH_API_KEYS ──
@@ -481,7 +479,6 @@ mod tests {
             parsed.message.contains("SHODH_DEV_API_KEY"),
             "Should mention SHODH_DEV_API_KEY"
         );
-
     }
 
     #[tokio::test]
@@ -495,7 +492,6 @@ mod tests {
             parsed.message.contains("SHODH_API_KEYS"),
             "Should mention SHODH_API_KEYS"
         );
-
     }
 
     #[tokio::test]
@@ -522,7 +518,6 @@ mod tests {
         let body = to_bytes(resp.into_body(), 2048).await.unwrap();
         let parsed: ErrorResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed.message, "Invalid API key");
-
     }
 
     #[tokio::test]
@@ -566,7 +561,6 @@ mod tests {
             StatusCode::OK,
             "Should accept API key from query parameter on WebSocket upgrade"
         );
-
     }
 
     #[tokio::test]
@@ -597,7 +591,6 @@ mod tests {
             StatusCode::OK,
             "Should accept API key from query parameter on the SSE event stream"
         );
-
     }
 
     #[tokio::test]
@@ -628,7 +621,6 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "Query param auth should be ignored for non-WebSocket requests"
         );
-
     }
 
     #[tokio::test]
@@ -659,6 +651,5 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "Should reject invalid query parameter API key on WebSocket"
         );
-
     }
 }

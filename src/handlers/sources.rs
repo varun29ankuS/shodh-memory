@@ -50,8 +50,7 @@ use super::router::AppState;
 use crate::errors::{AppError, ValidationErrorExt};
 use crate::ingest::folder;
 use crate::memory::sources::{
-    ItemCursor, SourceConfig, SourceDefinition, SourceId, SourceKind, SourceRun,
-    RUN_FAILURE_SAMPLE,
+    ItemCursor, SourceConfig, SourceDefinition, SourceId, SourceKind, SourceRun, RUN_FAILURE_SAMPLE,
 };
 use crate::validation;
 
@@ -478,7 +477,11 @@ pub async fn create_source(
         &req.user_id,
         "SOURCE_CREATE",
         &def.id.0.to_string(),
-        &format!("registered source '{}' at {}", def.name, display_root(&def.config.as_watched_folder().root)),
+        &format!(
+            "registered source '{}' at {}",
+            def.name,
+            display_root(&def.config.as_watched_folder().root)
+        ),
     );
 
     Ok((StatusCode::CREATED, Json(source_view(&state, &def)?)))
@@ -595,7 +598,11 @@ fn validate_globs(patterns: &[String], field: &str) -> Result<(), AppError> {
     if patterns.len() > validation::MAX_TAGS {
         return Err(AppError::InvalidInput {
             field: field.to_string(),
-            reason: format!("too many patterns: {} (max: {})", patterns.len(), validation::MAX_TAGS),
+            reason: format!(
+                "too many patterns: {} (max: {})",
+                patterns.len(),
+                validation::MAX_TAGS
+            ),
         });
     }
     for pattern in patterns {
@@ -862,7 +869,10 @@ pub async fn list_items(
         if !KNOWN.contains(&filter.to_ascii_lowercase().as_str()) {
             return Err(AppError::InvalidInput {
                 field: "state".to_string(),
-                reason: format!("unknown state '{filter}'. Known states: {}", KNOWN.join(", ")),
+                reason: format!(
+                    "unknown state '{filter}'. Known states: {}",
+                    KNOWN.join(", ")
+                ),
             });
         }
     }
@@ -914,7 +924,8 @@ mod tests {
             ..ServerConfig::default()
         };
         Arc::new(
-            MultiUserMemoryManager::new(path.to_path_buf(), config).expect("failed to open manager"),
+            MultiUserMemoryManager::new(path.to_path_buf(), config)
+                .expect("failed to open manager"),
         )
     }
 
@@ -1023,14 +1034,25 @@ mod tests {
     async fn source_listing_is_identical_after_a_restart() {
         let home = TempDir::new().expect("temp home");
         let corpus = TempDir::new().expect("temp corpus");
-        write_file(corpus.path(), "notes/alpha.md", "Baltimore harbour survey, first pass.");
-        write_file(corpus.path(), "notes/beta.md", "Second note about the Patapsco river.");
+        write_file(
+            corpus.path(),
+            "notes/alpha.md",
+            "Baltimore harbour survey, first pass.",
+        );
+        write_file(
+            corpus.path(),
+            "notes/beta.md",
+            "Second note about the Patapsco river.",
+        );
 
         let before = {
             let state = build_manager(home.path());
             let def = register(&state, corpus.path(), "Field notes").await;
             let run = run_now(&state, &def, false).await;
-            assert_eq!(run.items_ingested, 2, "both notes must land on the first run");
+            assert_eq!(
+                run.items_ingested, 2,
+                "both notes must land on the first run"
+            );
             drain(&state).await;
             let json = list_json(&state).await;
             drop(state);
@@ -1058,8 +1080,16 @@ mod tests {
     async fn a_second_run_over_unchanged_files_writes_nothing() {
         let home = TempDir::new().expect("temp home");
         let corpus = TempDir::new().expect("temp corpus");
-        write_file(corpus.path(), "one.md", "A note about the survey at Fort McHenry.");
-        write_file(corpus.path(), "two.md", "A different note about the tide gauge.");
+        write_file(
+            corpus.path(),
+            "one.md",
+            "A note about the survey at Fort McHenry.",
+        );
+        write_file(
+            corpus.path(),
+            "two.md",
+            "A different note about the tide gauge.",
+        );
 
         let state = build_manager(home.path());
         let def = register(&state, corpus.path(), "Notes").await;
@@ -1162,7 +1192,11 @@ mod tests {
     async fn a_lost_cursor_commit_does_not_duplicate_or_bump_a_version() {
         let home = TempDir::new().expect("temp home");
         let corpus = TempDir::new().expect("temp corpus");
-        write_file(corpus.path(), "survey.md", "The channel was sounded at first light.");
+        write_file(
+            corpus.path(),
+            "survey.md",
+            "The channel was sounded at first light.",
+        );
 
         let state = build_manager(home.path());
         let def = register(&state, corpus.path(), "Survey").await;
@@ -1184,7 +1218,11 @@ mod tests {
             "the re-read must be absorbed, not re-written"
         );
         assert_eq!(second.memories_written, 0);
-        assert_eq!(memory_count(&state), before, "the duplicate was not absorbed");
+        assert_eq!(
+            memory_count(&state),
+            before,
+            "the duplicate was not absorbed"
+        );
 
         let cursor = state
             .source_store
@@ -1204,8 +1242,16 @@ mod tests {
     async fn every_memory_a_run_writes_carries_its_provenance() {
         let home = TempDir::new().expect("temp home");
         let corpus = TempDir::new().expect("temp corpus");
-        write_file(corpus.path(), "a.md", "The pier was inspected and found sound.");
-        write_file(corpus.path(), "sub/b.md", "The second pier was not inspected.");
+        write_file(
+            corpus.path(),
+            "a.md",
+            "The pier was inspected and found sound.",
+        );
+        write_file(
+            corpus.path(),
+            "sub/b.md",
+            "The second pier was not inspected.",
+        );
 
         let state = build_manager(home.path());
         let def = register(&state, corpus.path(), "Inspections").await;
@@ -1257,7 +1303,11 @@ mod tests {
     async fn credential_files_are_refused_and_counted() {
         let home = TempDir::new().expect("temp home");
         let corpus = TempDir::new().expect("temp corpus");
-        write_file(corpus.path(), "notes.md", "An ordinary note about the harbour.");
+        write_file(
+            corpus.path(),
+            "notes.md",
+            "An ordinary note about the harbour.",
+        );
         write_file(corpus.path(), "deploy.key", "PRIVATE KEY MATERIAL");
         write_file(corpus.path(), ".env", "SHODH_API_KEY=secret");
         write_file(corpus.path(), ".ssh/notes.md", "Host bastion, port 22.");
@@ -1294,7 +1344,11 @@ mod tests {
     async fn a_lease_left_by_a_dead_process_is_swept_into_an_aborted_run() {
         let home = TempDir::new().expect("temp home");
         let corpus = TempDir::new().expect("temp corpus");
-        write_file(corpus.path(), "note.md", "A note that will never finish ingesting.");
+        write_file(
+            corpus.path(),
+            "note.md",
+            "A note that will never finish ingesting.",
+        );
 
         let def = {
             let state = build_manager(home.path());
@@ -1310,7 +1364,10 @@ mod tests {
                 heartbeat_at: run.started_at,
                 pid: std::process::id(),
             };
-            state.source_store.begin_run(&run, &lease).expect("begin run");
+            state
+                .source_store
+                .begin_run(&run, &lease)
+                .expect("begin run");
             assert!(state.source_store.is_running(USER, &def.id).expect("lease"));
             drop(state);
             def
@@ -1380,7 +1437,11 @@ mod tests {
     async fn triggering_a_run_over_http_ingests_and_records() {
         let home = TempDir::new().expect("temp home");
         let corpus = TempDir::new().expect("temp corpus");
-        write_file(corpus.path(), "note.md", "The dredger finished the north channel.");
+        write_file(
+            corpus.path(),
+            "note.md",
+            "The dredger finished the north channel.",
+        );
 
         let state = build_manager(home.path());
         let def = register(&state, corpus.path(), "Dredging").await;
@@ -1518,8 +1579,16 @@ mod tests {
     async fn a_truncated_run_does_not_report_the_files_it_never_reached_as_gone() {
         let home = TempDir::new().expect("temp home");
         let corpus = TempDir::new().expect("temp corpus");
-        write_file(corpus.path(), "a.md", "The first note describes the north pier.");
-        write_file(corpus.path(), "b.md", "The second note describes the south pier.");
+        write_file(
+            corpus.path(),
+            "a.md",
+            "The first note describes the north pier.",
+        );
+        write_file(
+            corpus.path(),
+            "b.md",
+            "The second note describes the south pier.",
+        );
 
         let state = build_manager(home.path());
         let def = register(&state, corpus.path(), "Capped").await;

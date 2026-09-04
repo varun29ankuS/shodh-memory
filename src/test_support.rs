@@ -38,7 +38,8 @@ use std::ffi::OsString;
 ///
 /// Reentrant so a helper that acquires a [`ScopedEnv`] can be called from a test
 /// that already holds one.
-pub(crate) static ENV_LOCK: parking_lot::ReentrantMutex<()> = parking_lot::const_reentrant_mutex(());
+pub(crate) static ENV_LOCK: parking_lot::ReentrantMutex<()> =
+    parking_lot::const_reentrant_mutex(());
 
 /// Holds [`ENV_LOCK`] and restores every variable it touched when dropped.
 ///
@@ -168,6 +169,16 @@ const ENV_MUTATION_INVENTORY: &[(&str, usize, &str)] = &[
         "HarnessEnvPin's set and its two restore arms, plus analyze_ablation's          per-arm config which runs only in the recall_eval binary; all under          RECALL_ENV_LOCK",
     ),
     (
+        "src/integrations/mod.rs",
+        6,
+        "https_default_tests: one set + one remove for SHODH_ENFORCE_HTTPS and          for the URL override, plus both restore arms. Test-only, and taken          under RECALL_ENV_LOCK rather than a module-local mutex, because a          private lock excludes only this module's tests",
+    ),
+    (
+        "src/memory/ablation.rs",
+        3,
+        "ablation tests: one set + one remove for SHODH_DISABLE_BOOSTS and its          restore arm. Under RECALL_ENV_LOCK because this flag changes what the          RECALL PATH scores -- a module-local lock would let it flip mid-query          in a sibling module's test",
+    ),
+    (
         "src/server.rs",
         8,
         "server bootstrap, documented as running before the tokio runtime          spawns any thread",
@@ -220,20 +231,24 @@ mod tests {
         let set = concat!("env::", "set_var(");
         let remove = concat!("env::", "remove_var(");
 
-        let prose = format!("/// see std::{set}) for why this is unsound
+        let prose = format!(
+            "/// see std::{set}) for why this is unsound
 // std::{remove})
-");
+"
+        );
         assert_eq!(
             count_env_mutations(&prose),
             0,
             "prose about the functions must not count as a call site"
         );
 
-        let real = format!("fn f() {{
+        let real = format!(
+            "fn f() {{
     std::{set}\"A\", \"1\");
     std::{remove}\"A\");
 }}
-");
+"
+        );
         assert_eq!(
             count_env_mutations(&real),
             2,

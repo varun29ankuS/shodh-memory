@@ -1396,7 +1396,10 @@ mod tests {
             .iter()
             .map(|m| m["content"].as_str().unwrap())
             .collect();
-        assert_eq!(returned, newest_first, "POST /api/memories must be newest first");
+        assert_eq!(
+            returned, newest_first,
+            "POST /api/memories must be newest first"
+        );
 
         let req = test_helpers::get(&format!("/api/memories?user_id={user_id}&limit=12"));
         let (status, body) = test_helpers::send(harness.router(), req).await;
@@ -1407,7 +1410,10 @@ mod tests {
             .iter()
             .map(|m| m["content"].as_str().unwrap())
             .collect();
-        assert_eq!(returned, newest_first, "GET /api/memories must be newest first");
+        assert_eq!(
+            returned, newest_first,
+            "GET /api/memories must be newest first"
+        );
     }
 
     /// Ordering must survive `offset`, and pages must not overlap or skip.

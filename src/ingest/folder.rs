@@ -112,7 +112,16 @@ const CREDENTIAL_DIR_NAMES: &[&str] = &[".git", ".ssh", ".gnupg", ".aws"];
 fn is_credential_shaped(file_name: &str) -> bool {
     let lower = file_name.to_ascii_lowercase();
     const SUFFIXES: &[&str] = &[
-        ".pem", ".key", ".pfx", ".p12", ".kdbx", ".ovpn", ".jks", ".keystore", ".asc", ".gpg",
+        ".pem",
+        ".key",
+        ".pfx",
+        ".p12",
+        ".kdbx",
+        ".ovpn",
+        ".jks",
+        ".keystore",
+        ".asc",
+        ".gpg",
     ];
     const PREFIXES: &[&str] = &["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", ".env"];
     const EXACT: &[&str] = &[
@@ -449,9 +458,10 @@ fn walk_root(
         for entry in read {
             match entry {
                 Ok(e) => children.push(e.path()),
-                Err(e) => out
-                    .failures
-                    .push((display_relative(root, &dir), format!("entry unreadable: {e}"))),
+                Err(e) => out.failures.push((
+                    display_relative(root, &dir),
+                    format!("entry unreadable: {e}"),
+                )),
             }
         }
         children.sort();
@@ -605,11 +615,7 @@ fn read_item(entry: &WalkEntry, root: &Path, max_file_bytes: u64) -> Result<Stri
 
     let bytes = std::fs::read(&canonical).map_err(|e| ReadRefusal::Failed(format!("{e}")))?;
 
-    if bytes
-        .iter()
-        .take(BINARY_SNIFF_BYTES)
-        .any(|b| *b == 0)
-    {
+    if bytes.iter().take(BINARY_SNIFF_BYTES).any(|b| *b == 0) {
         return Err(ReadRefusal::Skipped("binary content".to_string()));
     }
 
@@ -793,12 +799,10 @@ pub async fn execute_run(
         run.push_failure(item, reason, true);
     }
 
-    let experience_type =
-        crate::handlers::remember::parse_experience_type(Some(&cfg.memory_type)).map_err(|e| {
-            AppError::InvalidInput {
-                field: "config.memory_type".to_string(),
-                reason: e.message(),
-            }
+    let experience_type = crate::handlers::remember::parse_experience_type(Some(&cfg.memory_type))
+        .map_err(|e| AppError::InvalidInput {
+            field: "config.memory_type".to_string(),
+            reason: e.message(),
         })?;
 
     let mut last_heartbeat = std::time::Instant::now();
@@ -861,7 +865,15 @@ pub async fn execute_run(
         let text = match read {
             Ok(text) => text,
             Err(refusal) => {
-                apply_refusal(&store, def, &mut run, &entry, &hash, existing.as_ref(), refusal)?;
+                apply_refusal(
+                    &store,
+                    def,
+                    &mut run,
+                    &entry,
+                    &hash,
+                    existing.as_ref(),
+                    refusal,
+                )?;
                 since_heartbeat += 1;
                 continue;
             }
@@ -890,9 +902,7 @@ pub async fn execute_run(
         }
 
         let parts = split_content(&text);
-        if parts.is_empty()
-            || parts[0].trim().len() < validation::MIN_MEANINGFUL_CONTENT_LENGTH
-        {
+        if parts.is_empty() || parts[0].trim().len() < validation::MIN_MEANINGFUL_CONTENT_LENGTH {
             apply_refusal(
                 &store,
                 def,
@@ -980,9 +990,7 @@ pub async fn execute_run(
 
     // One walk of the cursors: disappearance detection and the item totals the
     // dashboard reads, so the listing endpoint never has to scan them.
-    let cursors = store
-        .list_cursors(&def.id)
-        .map_err(AppError::Internal)?;
+    let cursors = store.list_cursors(&def.id).map_err(AppError::Internal)?;
 
     // "Disappeared" means "enumerated before, not enumerated now". A run that
     // stopped at a cap never reached the rest of the folder, so those cursors
@@ -1085,13 +1093,7 @@ fn apply_refusal(
     // would turn a transient read error into a permanent one.
     let (size_bytes, mtime, content_sha256) = if retryable {
         existing
-            .map(|c| {
-                (
-                    c.size_bytes,
-                    c.mtime_unix_nanos,
-                    c.content_sha256.clone(),
-                )
-            })
+            .map(|c| (c.size_bytes, c.mtime_unix_nanos, c.content_sha256.clone()))
             .unwrap_or((0, None, String::new()))
     } else {
         (entry.size, entry.mtime_unix_nanos, String::new())
@@ -1215,7 +1217,16 @@ async fn write_item(
             }
         }
 
-        let mut req = base_request(def, run, rel, hash, content_sha, experience_type, cfg, content);
+        let mut req = base_request(
+            def,
+            run,
+            rel,
+            hash,
+            content_sha,
+            experience_type,
+            cfg,
+            content,
+        );
         req.external_id = Some(external_id.clone());
         req.change_reason = Some("source item content changed".to_string());
         let outcome = crate::ingest::ingest_experience(state, req).await?;
@@ -1237,11 +1248,19 @@ async fn write_item(
     let mut preceding: Option<String> = None;
 
     for (index, content) in parts.into_iter().enumerate() {
-        let mut req = base_request(def, run, rel, hash, content_sha, experience_type, cfg, content);
-        req.experience.metadata.insert(
-            META_PART.to_string(),
-            format!("{}/{}", index + 1, total),
+        let mut req = base_request(
+            def,
+            run,
+            rel,
+            hash,
+            content_sha,
+            experience_type,
+            cfg,
+            content,
         );
+        req.experience
+            .metadata
+            .insert(META_PART.to_string(), format!("{}/{}", index + 1, total));
         req.experience.context = crate::handlers::remember::build_rich_context(
             None,
             None,
@@ -1406,7 +1425,12 @@ mod tests {
                 "{name} must be refused before any read"
             );
         }
-        for name in ["notes.md", "README.txt", "keyboard-shortcuts.md", "envoy.md"] {
+        for name in [
+            "notes.md",
+            "README.txt",
+            "keyboard-shortcuts.md",
+            "envoy.md",
+        ] {
             assert!(
                 !is_credential_shaped(name),
                 "{name} is ordinary text and must not be refused"
@@ -1528,8 +1552,11 @@ mod tests {
     fn the_walk_refuses_a_directory_junction() {
         let root = tempfile::TempDir::new().expect("root");
         let outside = tempfile::TempDir::new().expect("outside");
-        std::fs::write(outside.path().join("secret.md"), "material outside the corpus")
-            .expect("write");
+        std::fs::write(
+            outside.path().join("secret.md"),
+            "material outside the corpus",
+        )
+        .expect("write");
         std::fs::write(root.path().join("ordinary.md"), "an ordinary note").expect("write");
 
         let link = root.path().join("escape");

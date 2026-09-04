@@ -131,12 +131,14 @@ pub fn is_enabled(family: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// Serialises tests that mutate `SHODH_DISABLE_BOOSTS`, which is
-    /// process-global state.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // `SHODH_DISABLE_BOOSTS` is process-global AND it changes what the recall
+    // path scores, so a module-local mutex is not enough: it would let an
+    // ablation test flip boosts off while a recall test in another module is
+    // mid-query, and that test would silently measure a different pipeline.
+    // Crate-wide lock, same as every other env-mutating test.
 
     fn with_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::memory::RECALL_ENV_LOCK.lock();
         match value {
             Some(v) => std::env::set_var("SHODH_DISABLE_BOOSTS", v),
             None => std::env::remove_var("SHODH_DISABLE_BOOSTS"),

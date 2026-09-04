@@ -45,6 +45,7 @@ pub mod middleware;
 pub mod mif;
 pub mod migration;
 pub mod openie;
+pub mod path_guard;
 pub mod query_parsing;
 pub mod recall_harness;
 pub mod relation_typer;

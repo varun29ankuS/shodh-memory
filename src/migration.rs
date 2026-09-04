@@ -859,8 +859,12 @@ mod tests {
             details: "a record the migration must read".to_string(),
         };
         let cf = db.cf_handle("audit").expect("audit cf");
-        db.put_cf(cf, b"audit:1", serialization::encode(&event).expect("encode"))
-            .expect("write audit record");
+        db.put_cf(
+            cf,
+            b"audit:1",
+            serialization::encode(&event).expect("encode"),
+        )
+        .expect("write audit record");
     }
 
     /// A shared DB written by a server that HAS the source registry must still
@@ -887,7 +891,11 @@ mod tests {
             .iter()
             .map(|d| d.name().to_string())
             .collect();
-        assert_eq!(registry.len(), 2, "the registry declares two column families");
+        assert_eq!(
+            registry.len(),
+            2,
+            "the registry declares two column families"
+        );
 
         let mut names: Vec<&str> = PRE_REGISTRY_SHARED_CFS.to_vec();
         names.extend(registry.iter().map(|s| s.as_str()));

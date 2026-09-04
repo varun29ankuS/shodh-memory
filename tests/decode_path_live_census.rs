@@ -190,10 +190,8 @@ fn decode_path_census_over_live_profiles() {
         // Every record is classified exactly once: no key falls between the
         // envelope states, which is what made the old two-state reading able to
         // hide a whole class.
-        let classified = c.absent
-            + c.truncated
-            + c.checksum_mismatch
-            + c.valid.values().sum::<u64>();
+        let classified =
+            c.absent + c.truncated + c.checksum_mismatch + c.valid.values().sum::<u64>();
         assert_eq!(
             classified, c.memory_keys,
             "{profile}: every memory key must land in exactly one envelope state"

@@ -380,11 +380,7 @@ async fn list_sessions_empty() {
 #[tokio::test]
 async fn session_stats() {
     let h = Harness::new();
-    let (status, _) = json_of(
-        h.app(),
-        authed_get("/api/sessions/stats?user_id=test-user"),
-    )
-    .await;
+    let (status, _) = json_of(h.app(), authed_get("/api/sessions/stats?user_id=test-user")).await;
     assert!(status.is_success());
 }
 
@@ -411,18 +407,12 @@ async fn session_stats_are_scoped_to_the_caller() {
     store.end_session(&finished, "test");
     let _live = store.start_session("tenant-a");
 
-    let (status_a, body_a) = json_of(
-        h.app(),
-        authed_get("/api/sessions/stats?user_id=tenant-a"),
-    )
-    .await;
+    let (status_a, body_a) =
+        json_of(h.app(), authed_get("/api/sessions/stats?user_id=tenant-a")).await;
     assert!(status_a.is_success(), "tenant-a stats returned {status_a}");
 
-    let (status_b, body_b) = json_of(
-        h.app(),
-        authed_get("/api/sessions/stats?user_id=tenant-b"),
-    )
-    .await;
+    let (status_b, body_b) =
+        json_of(h.app(), authed_get("/api/sessions/stats?user_id=tenant-b")).await;
     assert!(status_b.is_success(), "tenant-b stats returned {status_b}");
 
     assert_ne!(
@@ -848,7 +838,10 @@ async fn memory_history_is_user_scoped() {
     .await;
     assert!(status.is_success(), "stranger history returned {status}");
     assert!(
-        theirs["events"].as_array().expect("events array").is_empty(),
+        theirs["events"]
+            .as_array()
+            .expect("events array")
+            .is_empty(),
         "a different tenant read this memory's audit trail: {theirs}"
     );
 
@@ -1937,11 +1930,8 @@ async fn update_to_done_settles_and_rolls_over_recurrence() {
 
     // The decisive assertion: a recurring task completed through /update must
     // leave a live next occurrence behind, exactly as /complete does.
-    let (status, body) = json_of(
-        h.app(),
-        authed_post("/api/todos", json!({"user_id": user})),
-    )
-    .await;
+    let (status, body) =
+        json_of(h.app(), authed_post("/api/todos", json!({"user_id": user}))).await;
     assert_eq!(status, StatusCode::OK);
     let live: Vec<&serde_json::Value> = body["todos"]
         .as_array()
@@ -1981,11 +1971,7 @@ async fn update_to_done_settles_and_rolls_over_recurrence() {
         "re-marking a done todo done must not spawn another occurrence: {body}"
     );
 
-    let (_, body) = json_of(
-        h.app(),
-        authed_post("/api/todos", json!({"user_id": user})),
-    )
-    .await;
+    let (_, body) = json_of(h.app(), authed_post("/api/todos", json!({"user_id": user}))).await;
     let live = body["todos"]
         .as_array()
         .expect("todos array")

@@ -169,7 +169,10 @@ pub fn build_protected_routes(state: AppState) -> Router {
         // =================================================================
         .route("/api/sources", post(sources::create_source))
         .route("/api/sources/{user_id}", get(sources::list_sources))
-        .route("/api/sources/{user_id}/{source_id}", get(sources::get_source))
+        .route(
+            "/api/sources/{user_id}/{source_id}",
+            get(sources::get_source),
+        )
         .route(
             "/api/sources/{user_id}/{source_id}",
             delete(sources::delete_source),
