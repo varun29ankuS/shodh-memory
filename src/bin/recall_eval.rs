@@ -906,7 +906,9 @@ fn summarise_reachability(report: &ReachabilityReport) {
         // understates them because degrees are post-cap. A degree sitting
         // exactly on the cap is the tell: its overflow was discarded at ingest.
         if !gs.top_hubs.is_empty() {
-            eprintln!("  top hubs by degree (post-cap; a degree at the cap means edges were dropped):");
+            eprintln!(
+                "  top hubs by degree (post-cap; a degree at the cap means edges were dropped):"
+            );
             for (name, labels, degree) in gs.top_hubs.iter().take(15) {
                 let short: String = name.chars().take(38).collect();
                 eprintln!("    {degree:>5}  {short:<38}  {labels}");
