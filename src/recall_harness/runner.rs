@@ -380,9 +380,7 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
                             cur_pass.scores_by_case.get(&cur_rank.case_id),
                             at,
                         ) {
-                            (Some(a), Some(b), Some(idx))
-                                if idx < a.len() && idx < b.len() =>
-                            {
+                            (Some(a), Some(b), Some(idx)) if idx < a.len() && idx < b.len() => {
                                 let lo = idx.saturating_sub(1);
                                 let hi = (idx + 2).min(a.len()).min(b.len());
                                 let tied = a[idx].to_bits() == b[idx].to_bits();
@@ -907,7 +905,8 @@ fn run_one_pass(
             // latency recorded just below is a reported number.
             let result = if per_case_scores {
                 system.read().recall_with_diagnostics(&query).map(|r| {
-                    if let Some(attrs) = r.stats.as_ref().and_then(|s| s.score_attributions.as_ref())
+                    if let Some(attrs) =
+                        r.stats.as_ref().and_then(|s| s.score_attributions.as_ref())
                     {
                         // Already sorted by final_score descending, with a
                         // memory_id tie-break, so this is a stable read.
