@@ -1994,7 +1994,13 @@ pub fn analyze_funnel(inputs: &RunInputs) -> Result<FunnelReport> {
         .filter(|k| *k >= SMOKE_K)
         .unwrap_or(SMOKE_K);
 
-    const STAGES: [&str; 5] = ["graph", "vector", "hybrid", "fusion", "final"];
+    // `graph_pool` precedes `graph`: the leg's complete scored pool BEFORE the
+    // GRAPH_CANDIDATE_CAP/graph_leg_k truncations (recorded inside
+    // spreading_activation_retrieve_with_stats). graph_pool.present% vs
+    // graph.present% splits pool-membership loss from the exit-gate ordering
+    // cut; graph_pool.mean_rank_when_present locates where the pool ordering
+    // places gold.
+    const STAGES: [&str; 6] = ["graph_pool", "graph", "vector", "hybrid", "fusion", "final"];
 
     #[derive(Default, Clone)]
     struct Acc {
@@ -2033,12 +2039,18 @@ pub fn analyze_funnel(inputs: &RunInputs) -> Result<FunnelReport> {
         case_count += 1;
         let cat = category_name(case.category).to_string();
 
-        let query = Query {
+        let mut query = Query {
             query_text: Some(case.query.clone()),
             max_results: diag_k,
             layers: crate::memory::types::LayerMode::Full,
             ..Default::default()
         };
+        // Match the recall path's query preparation (run_one_pass annotates both
+        // the production and the deep query): without neural-NER annotation the
+        // graph leg seeds from the POS heuristic alone, so the funnel would
+        // measure a DIFFERENTLY-SEEDED leg than the recall runs it exists to
+        // explain — every stage row, not just graph ones, shifts with the seeds.
+        manager.annotate_query_ner(&mut query);
 
         crate::memory::gold_funnel::begin(gold.clone());
         let _ = system.read().recall(&query);
