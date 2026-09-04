@@ -1784,9 +1784,22 @@ impl MemoryStorage {
     /// in current format for faster future reads.
     pub fn get(&self, id: &MemoryId) -> Result<Memory> {
         let key = id.0.as_bytes();
-        match self.db.get(key)? {
+        // Split the RocksDB read from the decode: they answer different
+        // questions. A read-dominated profile is an I/O/block-cache story; a
+        // decode-dominated one is a serialization-format story. Unarmed, both
+        // probes are a thread-local `is_none` check — no clock is read.
+        let t_read = crate::stage_probe::start();
+        let raw = self.db.get(key)?;
+        crate::stage_probe::record(t_read, |p, d| {
+            p.storage_read += d;
+            p.storage_reads += 1;
+        });
+        match raw {
             Some(value) => {
-                let (memory, needs_migration) = deserialize_memory(&value).with_context(|| {
+                let t_decode = crate::stage_probe::start();
+                let decoded = deserialize_memory(&value);
+                crate::stage_probe::record(t_decode, |p, d| p.storage_decode += d);
+                let (memory, needs_migration) = decoded.with_context(|| {
                     format!(
                         "Failed to deserialize memory {} ({} bytes)",
                         id.0,

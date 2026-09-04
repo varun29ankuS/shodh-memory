@@ -2081,6 +2081,34 @@ impl MemorySystem {
         self.recall_inner(query, true)
     }
 
+    /// `recall()` with a per-stage latency breakdown, for the recall harness.
+    ///
+    /// This runs the PRODUCTION `recall()` — same function, same arguments, same
+    /// branches — and returns what the thread-local [`stage_probe`] accumulated
+    /// alongside the memories. Nothing about the retrieval changes; the probe is
+    /// write-only.
+    ///
+    /// Deliberately NOT `recall_with_diagnostics`, for two reasons documented at
+    /// length in [`crate::stage_probe`]: that path measures `recall_inner`, not
+    /// `recall()` (so it would miss the companion re-rank's nested deep recall
+    /// entirely), and it additionally builds the per-memory `ScoreAttribution`
+    /// map, which is real work inside the scoring stage we are trying to measure.
+    ///
+    /// The returned `StageTiming` is the same type the debug API emits, filled at
+    /// the same seven checkpoints, summed over however many `recall_inner`
+    /// invocations `recall()` made (`inner_recalls`).
+    pub fn recall_with_timing(
+        &self,
+        query: &Query,
+    ) -> Result<(Vec<SharedMemory>, crate::stage_probe::Probe)> {
+        crate::stage_probe::arm();
+        let result = self.recall(query);
+        // Drain unconditionally: leaving the probe armed after an error would
+        // leak this query's partial accumulation into the next one.
+        let probe = crate::stage_probe::take().unwrap_or_default();
+        Ok((result?, probe))
+    }
+
     fn recall_inner(&self, query: &Query, collect_diagnostics: bool) -> Result<RetrievalResult> {
         // Semantic search requires special handling
         if let Some(query_text) = &query.query_text {
@@ -2863,6 +2891,10 @@ impl MemorySystem {
                 .get_or_insert_with(StageTiming::default)
                 .query_analysis_us = t_query_analysis.as_micros() as u64;
         }
+        crate::stage_probe::with_probe(|p| {
+            p.query_analysis += t_query_analysis;
+            p.inner_recalls += 1;
+        });
 
         // TEMPORAL PREFIX INJECTION: When the query has high-confidence temporal
         // references, prepend a temporal context string to give MiniLM textual
@@ -2990,6 +3022,7 @@ impl MemorySystem {
                 .embedding_us = (t_embedding - t_query_analysis).as_micros() as u64;
             s.embedding_time_us = (t_embedding - t_query_analysis).as_micros() as u64;
         }
+        crate::stage_probe::with_probe(|p| p.embedding += t_embedding - t_query_analysis);
 
         // ===========================================================================
         // LAYER 1: TEMPORAL PRE-FILTER (Episode Coherence)
@@ -3553,6 +3586,7 @@ impl MemorySystem {
             s.graph_density = graph_density.unwrap_or(0.0);
             s.entities_activated = query_entity_count;
         }
+        crate::stage_probe::with_probe(|p| p.graph_expansion += t_graph - t_embedding);
 
         // Create a modified query with the embedding for vector search
         let vector_query = Query {
@@ -3652,6 +3686,7 @@ impl MemorySystem {
                 .vector_search_us = (t_vector - t_graph).as_micros() as u64;
             s.semantic_candidates = vector_results.len();
         }
+        crate::stage_probe::with_probe(|p| p.vector_search += t_vector - t_graph);
 
         // ===========================================================================
         // LAYER 4: BM25 + RRF FUSION
@@ -3793,7 +3828,12 @@ impl MemorySystem {
             let mut hybrid_components: std::collections::HashMap<MemoryId, (f32, f32)> =
                 std::collections::HashMap::new();
             let hybrid_ids = if layer_bm25 {
-                match self.hybrid_search.search_with_dynamic_weights_pool(
+                // BM25/tantivy carved out of the Layer-4 total. Fusion is the
+                // widest stage in the pipeline (BM25 + RRF + seven boost
+                // families), so an undifferentiated `fusion_us` cannot tell a
+                // tantivy problem from a boost-stack problem.
+                let t_bm25 = crate::stage_probe::start();
+                let hybrid = self.hybrid_search.search_with_dynamic_weights_pool(
                     bm25_query_text,
                     vector_results.clone(),
                     get_content,
@@ -3801,7 +3841,9 @@ impl MemorySystem {
                     phrases,
                     disc_opt,
                     bm25_pool_override,
-                ) {
+                );
+                crate::stage_probe::record(t_bm25, |p, d| p.bm25 += d);
+                match hybrid {
                     Ok(r) => {
                         for x in &r {
                             hybrid_components.insert(
@@ -4937,6 +4979,7 @@ impl MemorySystem {
                 .get_or_insert_with(StageTiming::default)
                 .fusion_us = (t_fusion - t_vector).as_micros() as u64;
         }
+        crate::stage_probe::with_probe(|p| p.fusion += t_fusion - t_vector);
 
         // Fetch memories with cache-aware strategy
         // CRITICAL: Apply filters after fetching to ensure mission_id, robot_id etc. are respected
@@ -5271,7 +5314,17 @@ impl MemorySystem {
             }
 
             // Cold path: Fetch from RocksDB storage (expensive deserialization)
-            match self.retriever.get_from_storage(&memory_id) {
+            //
+            // Carved out of the Layer-5 total. Only the COLD path is timed here:
+            // the working/session branches above are `Arc` clones out of an
+            // in-memory map, and folding them in would mean binding the read
+            // guard to a local, which shortens the lock hold — a real behavior
+            // change in a stage that is supposed to be observed, not altered.
+            // Their cost stays inside `scoring`, and `scoring - fetch` bounds it.
+            let t_fetch_storage = crate::stage_probe::start();
+            let from_storage = self.retriever.get_from_storage(&memory_id);
+            crate::stage_probe::record(t_fetch_storage, |p, d| p.fetch += d);
+            match from_storage {
                 Ok(memory) => {
                     // CRITICAL FIX: Apply filters before adding to results
                     if self.retriever.matches_filters(&memory, &vector_query) {
@@ -5332,6 +5385,7 @@ impl MemorySystem {
                 .get_or_insert_with(StageTiming::default)
                 .scoring_us = (t_fetch - t_fusion).as_micros() as u64;
         }
+        crate::stage_probe::with_probe(|p| p.scoring += t_fetch - t_fusion);
 
         // Quality gate: multiplicative factor based on content richness.
         // Prevents empty/trivial memories from surfacing on recency or graph boost alone.
@@ -5680,11 +5734,13 @@ impl MemorySystem {
             final_count = memories.len(),
             "recall [layer:post] linguistic + competition + coactivation + hierarchy === RECALL COMPLETE ==="
         );
+        crate::stage_probe::with_probe(|p| p.post += t_total - t_fetch);
 
         // Finalize diagnostics
         if let Some(ref mut s) = stats {
             let timings = s.stage_timings.get_or_insert_with(StageTiming::default);
             timings.total_us = t_total.as_micros() as u64;
+            timings.post_us = (t_total - t_fetch).as_micros() as u64;
             s.retrieval_time_us = t_total.as_micros() as u64;
 
             // Convert per-memory attributions to vec, ordered by final score
