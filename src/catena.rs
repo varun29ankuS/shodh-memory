@@ -157,7 +157,9 @@ pub fn link_events_in_sentence(sent: &[ParsedToken]) -> Vec<EventLink> {
 pub fn links_from_tokens(tokens: &[ParsedToken]) -> Vec<EventLink> {
     let mut out: Vec<EventLink> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for sent in sentences(tokens) {
+    let sents = sentences(tokens);
+
+    for sent in &sents {
         for link in link_events_in_sentence(sent) {
             let key = (
                 link.source.clone(),
@@ -169,7 +171,73 @@ pub fn links_from_tokens(tokens: &[ParsedToken]) -> Vec<EventLink> {
             }
         }
     }
+
+    // INTER-SENTENTIAL pass. Everything above is bounded by a sentence, which
+    // silently loses the dominant construction in news prose: the cause is one
+    // sentence and the connective OPENS the next.
+    //
+    //   "The ship rammed the bridge. As a result, the bridge collapsed."
+    //
+    // Measured, that yields zero links while the identical clause pair inside
+    // one sentence yields `ram --as a result--> collapse`. The vocabulary and
+    // the extraction were never the problem — the segmentation boundary was,
+    // and on a news corpus (where "As a result," / "Consequently," /
+    // "Therefore," are conventionally sentence-initial) that is most of the
+    // causal structure there is.
+    //
+    // Bounded deliberately: only a signal in the LEADING position of a sentence
+    // qualifies, and it links the last event of the previous sentence to the
+    // first event of this one. A signal buried mid-sentence already had its
+    // chance intra-sententially, and reaching backwards from there would invent
+    // links across clauses that the writer joined for other reasons.
+    for pair in sents.windows(2) {
+        let (prev, cur) = (pair[0], pair[1]);
+        let Some((dir, relation, start, end, marker)) = leading_signal(cur) else {
+            continue;
+        };
+        // A leading signal has no left operand in its own sentence, so direction
+        // resolves against the previous one: Forward = prev caused cur (the
+        // common case), Backward = cur caused prev ("Because of this, ...").
+        let prev_evs = event_triggers(prev);
+        let cur_evs = event_triggers(cur);
+        let (Some(prev_ev), Some(cur_ev)) = (prev_evs.last(), nearest_right(&cur_evs, end)) else {
+            continue;
+        };
+        let _ = start;
+        let (source, target) = match dir {
+            SignalDir::Forward => (prev_ev.lemma.clone(), cur_ev.lemma.clone()),
+            SignalDir::Backward => (cur_ev.lemma.clone(), prev_ev.lemma.clone()),
+        };
+        if source == target {
+            continue;
+        }
+        let key = (source.clone(), marker.clone(), target.clone());
+        if seen.insert(key) {
+            out.push(EventLink {
+                source,
+                target,
+                relation,
+                signal: marker,
+            });
+        }
+    }
+
     out
+}
+
+/// A signal occupying the LEADING position of a sentence — the first token, or
+/// preceded only by punctuation. Returns `(dir, relation, start, end, marker)`.
+///
+/// Restricted to the leading position on purpose: that is the position where a
+/// signal has no left operand in its own sentence and therefore genuinely
+/// refers back to the previous one.
+fn leading_signal(sent: &[ParsedToken]) -> Option<(SignalDir, LinkRelation, usize, usize, String)> {
+    let first_word = sent
+        .iter()
+        .position(|t| t.text.chars().any(|c| c.is_alphanumeric()))?;
+    signal_hits(sent)
+        .into_iter()
+        .find(|(_, _, start, _, _)| *start == first_word)
 }
 
 /// Extract the event causal links from raw text via the shared parser. `None` if
@@ -300,6 +368,69 @@ mod tests {
             tk(5, ".", "PUNCT", "."),
         ];
         assert_eq!(sentences(&toks).len(), 2);
+    }
+
+    #[test]
+    fn leading_signal_links_across_a_sentence_boundary() {
+        // "The ship rammed the bridge. As a result, the bridge collapsed."
+        //
+        // The dominant causal construction in news prose: cause in one
+        // sentence, connective opening the next. Measured against the real
+        // parser this produced ZERO links before the inter-sentential pass,
+        // while the identical clause pair inside one sentence produced
+        // `ram --as a result--> collapse`. Neither the vocabulary nor the
+        // extraction was at fault — `links_from_tokens` simply never looked
+        // across the boundary, which on a news corpus is most of the causal
+        // structure that exists.
+        let toks = vec![
+            tk(0, "ship", "NOUN", "ship"),
+            tk(1, "rammed", "VERB", "ram"),
+            tk(2, "bridge", "NOUN", "bridge"),
+            tk(3, ".", "PUNCT", "."),
+            tk(4, "As", "ADP", "as"),
+            tk(5, "a", "DET", "a"),
+            tk(6, "result", "NOUN", "result"),
+            tk(7, ",", "PUNCT", ","),
+            tk(8, "bridge", "NOUN", "bridge"),
+            tk(9, "collapsed", "VERB", "collapse"),
+            tk(10, ".", "PUNCT", "."),
+        ];
+        let links = links_from_tokens(&toks);
+        assert!(
+            links
+                .iter()
+                .any(|l| l.source == "ram" && l.target == "collapse"),
+            "leading signal must link the previous sentence's last event to this \
+             sentence's first, got {links:?}"
+        );
+    }
+
+    #[test]
+    fn mid_sentence_signal_does_not_reach_into_the_previous_sentence() {
+        // The bound on the pass above. A signal buried mid-sentence already had
+        // its chance intra-sententially; letting it reach backwards would invent
+        // links across clauses the writer joined for other reasons. Here the
+        // second sentence is self-contained, so the only link is its own.
+        let toks = vec![
+            tk(0, "ship", "NOUN", "ship"),
+            tk(1, "docked", "VERB", "dock"),
+            tk(2, ".", "PUNCT", "."),
+            tk(3, "failure", "NOUN", "failure"),
+            tk(4, "caused", "VERB", "cause"),
+            tk(5, "collapse", "NOUN", "collapse"),
+            tk(6, ".", "PUNCT", "."),
+        ];
+        let links = links_from_tokens(&toks);
+        assert!(
+            links
+                .iter()
+                .any(|l| l.source == "failure" && l.target == "collapse"),
+            "intra-sentence link must still fire, got {links:?}"
+        );
+        assert!(
+            !links.iter().any(|l| l.source == "dock"),
+            "a mid-sentence signal must NOT reach back to the previous sentence, got {links:?}"
+        );
     }
 
     #[test]

@@ -293,6 +293,14 @@ struct Args {
     #[arg(long)]
     longmemeval_limit: Option<usize>,
 
+    /// LongMemEval shard start: skip this many manifest questions before
+    /// applying `--longmemeval-limit`. Each question carries its own ~490-turn
+    /// haystack, so a full run cannot fit a single job's timeout; disjoint
+    /// (offset, limit) windows let parallel jobs cover the suite exactly once.
+    /// The manifest order is deterministic, so the windows are stable.
+    #[arg(long)]
+    longmemeval_offset: Option<usize>,
+
     /// Simulated edge age in days, applied AFTER ingest and BEFORE queries
     /// (decay study). When `> 0`, the harness ages the knowledge-graph edges via
     /// `simulate_edge_aging` at the production ~6h cadence, so recall quality is
@@ -420,11 +428,16 @@ fn run(args: &Args) -> Result<i32> {
         let report = shodh_memory::recall_harness::runner::run_longmemeval(
             lme_dir,
             &storage_path,
+            args.longmemeval_offset,
             args.longmemeval_limit,
             10,
             &layer_modes,
         )
         .context("LongMemEval run")?;
+        // Write the report so a sharded run can be recombined. Previously this
+        // path printed only, and `--output` was passed a file the run ignored.
+        std::fs::write(&args.output, serde_json::to_string_pretty(&report)?)
+            .with_context(|| format!("writing {}", args.output.display()))?;
         println!(
             "LongMemEval-S: {} questions (NER={}) — recall@{} = {:.4} — p@1 = {:.4}",
             report.questions, report.ner_backend, report.k, report.recall_at_k, report.p_at_1
@@ -832,6 +845,71 @@ fn summarise_reachability(report: &ReachabilityReport) {
             pct(c.cases_no_seed, c.cases),
         );
     }
+    // Substrate scoreboard. A typed path walk needs every hop to name a real
+    // relation; a hop through a symmetric type carries no order, so the typed
+    // share bounds what any composition scheme can express -- at a typed
+    // fraction p, a fully-typed k-hop path is about p^k.
+    let gs = &report.graph;
+    let stored = gs.typed_edges + gs.symmetric_edges;
+    if stored > 0 {
+        eprintln!(
+            "  relation substrate: {} stored edges, {} typed ({:.2}%), {} symmetric ({:.2}%)",
+            stored,
+            gs.typed_edges,
+            pct(gs.typed_edges, stored),
+            gs.symmetric_edges,
+            pct(gs.symmetric_edges, stored),
+        );
+        let p = gs.typed_edges as f64 / stored as f64;
+        eprintln!(
+            "  fully-typed path share: 2-hop ~{:.2}%, 3-hop ~{:.3}%  (p^k at p={:.4})",
+            100.0 * p * p,
+            100.0 * p * p * p,
+            p
+        );
+        // Entity labels. A label-pair typing rule that never matches is
+        // indistinguishable from one that does nothing, unless you can see this.
+        let mut labels: Vec<(&String, &usize)> = gs.entity_labels.iter().collect();
+        labels.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        let shown: Vec<String> = labels
+            .iter()
+            .take(8)
+            .map(|(name, n)| format!("{name}={n}"))
+            .collect();
+        eprintln!("  entity labels: {}", shown.join("  "));
+
+        // Connectivity. A k-connected graph survives k-1 vertex deletions; if
+        // this shatters after a handful, connectivity is HUB-CARRIED and a high
+        // edge count was never high connectivity.
+        eprintln!(
+            "  components: {} (largest {:.1}% of entities)",
+            gs.components_all.0,
+            100.0 * gs.components_all.1
+        );
+        for (k, count, largest) in &gs.components_after_hub_removal {
+            eprintln!(
+                "    after removing top-{k:<3} hubs: {count:>5} components, largest {:.1}%",
+                100.0 * largest
+            );
+        }
+        eprintln!(
+            "  TYPED-only subgraph: {} components, largest {:.1}%, {} entities isolated ({:.1}%)",
+            gs.typed_components.0,
+            100.0 * gs.typed_components.1,
+            gs.typed_components.2,
+            100.0 * gs.typed_components.2 as f64 / gs.total_entities.max(1) as f64,
+        );
+        eprintln!("  (isolated-in-typed is the ceiling on what a grammar-guided walk can reach)");
+
+        let mut by_count: Vec<(&String, &usize)> = gs.relation_types.iter().collect();
+        by_count.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        let top: Vec<String> = by_count
+            .iter()
+            .take(8)
+            .map(|(name, n)| format!("{name}={n}"))
+            .collect();
+        eprintln!("  relation types: {}", top.join("  "));
+    }
     eprintln!("  ≤2hop% is the canonical double-hop signal: high => graph-native fixes can lift multi_hop;");
     eprintln!("  low + high unreach% => gold has no associative path (extraction/construction gap or non-entity hop).");
 }
@@ -1085,8 +1163,14 @@ fn summarise(report: &Report) {
     for name in mode_order {
         if let Some(layer) = report.layers.get(name) {
             eprintln!(
-                "  {:<12} ndcg@10={:.4} recall@10={:.4} mrr={:.4} p@1={:.4} map={:.4}",
-                name, layer.ndcg_at_10, layer.recall_at_10, layer.mrr, layer.p_at_1, layer.map
+                "  {:<12} ndcg@10={:.4} recall@10={:.4} hit@10={:.4} mrr={:.4} p@1={:.4} map={:.4}",
+                name,
+                layer.ndcg_at_10,
+                layer.recall_at_10,
+                layer.hit_at_10,
+                layer.mrr,
+                layer.p_at_1,
+                layer.map
             );
         }
     }

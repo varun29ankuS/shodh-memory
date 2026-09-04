@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Composer } from "./Composer";
 import { EgressBadge } from "./EgressBadge";
+import { useEgressServers } from "./useEgressServers";
 import { costIsReal, useBillingLookup } from "./useBilling";
 import { EvidencePanel } from "./EvidencePanel";
 import { MessageList } from "./MessageList";
@@ -66,7 +67,10 @@ function exportMarkdown(title: string, turns: ChatTurn[]): void {
   URL.revokeObjectURL(url);
 }
 
-export function ChatView({ reach, seat }: { reach: Reachability; seat: SeatReachability }) {
+export function ChatView({ reach, seat }: { reach: Reachability; seat: SeatReachability }) {
+  // Every remote tool server is another way out of this machine; the badge
+  // has to count them, not just the model.
+  const egressServers = useEgressServers();
   const queryClient = useQueryClient();
   const profile = useSession((s) => s.profile);
   const activeId = useChat((s) => s.activeId);
@@ -222,7 +226,7 @@ export function ChatView({ reach, seat }: { reach: Reachability; seat: SeatReach
             </span>
           ) : null}
 
-          <EgressBadge info={activeModelInfo} />
+          <EgressBadge info={activeModelInfo} servers={egressServers} />
 
           {activeId ? (
             <ModelPicker

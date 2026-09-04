@@ -1,0 +1,16 @@
+{
+  "name": "@shodh/connector-corpus",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only document connector for the shodh seat, over stdio.",
+  "bin": {
+    "shodh-connector-corpus": "index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.24.0"
+  },
+  "scripts": {
+    "test": "node --test test.mjs"
+  }
+}

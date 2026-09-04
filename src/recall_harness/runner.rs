@@ -566,34 +566,8 @@ fn run_one_pass(
     // populated graph wired in). The manager is kept alive for the whole pass.
     let manager = build_manager(storage_path)?;
 
-    // NER-backend gate (eval fidelity): every CI number before 2026-06-11 was
-    // silently measured on the rule-based fallback NER (census-shape proof,
-    // run 27342411453). Refuse to measure on it again — a harness that tests a
-    // different recognizer than production ships is not measuring the system.
-    // SHODH_ALLOW_FALLBACK_NER=1 is the explicit, visible escape hatch.
-    let ner_backend = if manager.get_neural_ner().is_fallback_mode() {
-        "fallback"
-    } else {
-        "neural"
-    };
-    eprintln!("NER_BACKEND={ner_backend}");
-    // cfg!(test) exemption: lib tests exercise the harness MACHINERY on
-    // runners that may lack the model; the gate protects MEASUREMENTS (the
-    // recall-eval binary is never cfg(test)).
-    if ner_backend == "fallback"
-        && !cfg!(test)
-        && !std::env::var("SHODH_ALLOW_FALLBACK_NER")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-    {
-        anyhow::bail!(
-            "recall harness refusing to run on the FALLBACK NER (model not \
-             loaded) — results would not measure the shipped system. Provide \
-             the pinned model or set SHODH_ALLOW_FALLBACK_NER=1 to override \
-             visibly."
-        );
-    }
-
+    // The NER-backend gate now lives in `ingest_corpus`, so every measurement
+    // path is covered rather than only the two that remembered to ask.
     let id_map = ingest_corpus(&manager, corpus)?;
     let system = manager.get_user_memory(EVAL_USER)?;
 
@@ -690,6 +664,25 @@ fn run_one_pass(
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from);
     let mut feature_lines: Vec<String> = Vec::new();
+
+    // Candidate-pool export (`SHODH_POOL_EXPORT=<jsonl path>`, Full mode only).
+    //
+    // Writes, per case: the query, the gold ids, and the RECALL_DIAG_K-deep
+    // candidate pool in rank order. That is everything an OFFLINE rescoring
+    // experiment needs -- a cross-encoder, a late-interaction MaxSim scorer, a
+    // fine-tuned or JEPA-style adapter -- because the pool is exactly the set a
+    // reranker would see and the gold ids are the labels. Candidate TEXT is
+    // deliberately not duplicated here: the corpus jsonl already holds it keyed
+    // by id, so the consumer joins rather than the harness bloating every line.
+    //
+    // The point is to convert "would X improve ranking?" from a 45-minute CI run
+    // into a script. ~32pp of gold sits in ranks 11-100, so every rescoring idea
+    // is testable against this file without touching the Rust pipeline at all.
+    let pool_export: Option<std::path::PathBuf> = std::env::var("SHODH_POOL_EXPORT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from);
+    let mut pool_lines: Vec<String> = Vec::new();
 
     for mode in layer_modes {
         let mut per_case = Vec::with_capacity(cases.len());
@@ -823,6 +816,31 @@ fn run_one_pass(
                     .retrieved
                     .clone()
             };
+            if pool_export.is_some() && matches!(*mode, LayerMode::Full) {
+                // Corpus ids, matching `pool` -- `relevance` is keyed by Uuid while
+                // the rank lists are already corpus ids, so exporting the raw Uuid
+                // made the two sets disjoint and every offline join scored zero.
+                let mut gold: Vec<String> = relevance
+                    .keys()
+                    .map(|u| {
+                        uuid_to_corpus_id
+                            .get(u)
+                            .cloned()
+                            .unwrap_or_else(|| u.to_string())
+                    })
+                    .collect();
+                gold.sort();
+                pool_lines.push(
+                    serde_json::json!({
+                        "case_id": case.id,
+                        "category": category_name(case.category),
+                        "query": case.query,
+                        "gold": gold,
+                        "pool": deep_retrieved,
+                    })
+                    .to_string(),
+                );
+            }
             deep_ranks.push(CaseRankList {
                 case_id: case.id.clone(),
                 retrieved: deep_retrieved,
@@ -859,6 +877,22 @@ fn run_one_pass(
                 deep_ranks,
             },
         );
+    }
+
+    if let Some(path) = &pool_export {
+        if !pool_lines.is_empty() {
+            use std::io::Write as _;
+            let mut f = std::fs::File::create(path)
+                .with_context(|| format!("creating pool export {}", path.display()))?;
+            for line in &pool_lines {
+                writeln!(f, "{line}")?;
+            }
+            eprintln!(
+                "  pool export: {} cases -> {}",
+                pool_lines.len(),
+                path.display()
+            );
+        }
     }
 
     if let Some(path) = &feature_export {
@@ -941,6 +975,22 @@ pub const EVAL_USER: &str = "recall-eval";
 /// activation / lineage / ontology layer disabled. The manager wires a per-user
 /// graph + NER, so the eval exercises the same ingest path production does.
 pub(crate) fn build_manager(storage_path: &Path) -> Result<MultiUserMemoryManager> {
+    // Pin here, not at the entry points. The pinning was applied per analysis
+    // fn and two paths never got it: bridge_harness::ingest_fresh and
+    // forgetting_harness::analyze_selective_forgetting, both called straight
+    // from the recall-eval dispatch. Unpinned they run with ONNX threads at
+    // the PRODUCTION default of 24 on a 4-core runner, rayon on every core,
+    // SHODH_RECALL_READONLY unset so recall MUTATES usage state mid-eval, and
+    // a live scoring clock -- the last two documented in pin_harness_threads
+    // itself as the causes of repeat non-determinism it exists to prevent.
+    //
+    // This is the chokepoint rather than ingest_corpus because the env has to
+    // be set before MultiUserMemoryManager::new below, which initialises the
+    // embedder and reads the thread counts. Every measurement path calls
+    // build_manager, and it is crate-internal to the harness, so the
+    // production server is unaffected. The per-entry-point calls that remain
+    // are now redundant, and harmless: the function only sets what is unset.
+    pin_harness_threads();
     std::fs::create_dir_all(storage_path)
         .with_context(|| format!("creating storage dir {}", storage_path.display()))?;
     MultiUserMemoryManager::new(storage_path.to_path_buf(), ServerConfig::default())
@@ -955,10 +1005,53 @@ pub(crate) fn build_manager(storage_path: &Path) -> Result<MultiUserMemoryManage
 /// memory, then build the entity graph from it. Without the
 /// `process_experience_into_graph` step the graph stays empty and Layer 2
 /// spreading activation is a no-op.
+/// Refuse to measure on the rule-based fallback NER.
+///
+/// This lives at the INGEST chokepoint rather than at each entry point, and the
+/// placement is the fix. The gate previously existed only inside `run_one_pass`
+/// and `run_longmemeval`; the other seven measurement paths that build a corpus
+/// -- `analyze_ablation`, `analyze_funnel`, `analyze_graph_reachability`,
+/// `analyze_linking`, `run_learning_arm`, `ingest_fresh` and
+/// `analyze_selective_forgetting` -- had none, so they would quietly measure a
+/// different recogniser than the one production ships and report the result as
+/// if it were the system.
+///
+/// That is not hypothetical. `.github/workflows/locomo-recall.yml` drives
+/// `--ablation`, `--funnel`, `--forgetting` and `--learning` and fetches no
+/// GLiNER model at all, while `recall.yml` fetches and verifies it. The
+/// ablation matrix -- the instrument behind the graph lever verdicts -- was on
+/// the fallback path, and nothing in its output said so.
+///
+/// Every path reaches ingest, so a guard here cannot be forgotten by a path
+/// written later. `SHODH_ALLOW_FALLBACK_NER=1` remains the visible escape
+/// hatch, and `cfg!(test)` is exempt because lib tests exercise the harness
+/// MACHINERY on runners that may lack the model -- the gate protects
+/// MEASUREMENTS, and the recall-eval binary is never `cfg(test)`.
+pub(crate) fn guard_ner_backend(manager: &MultiUserMemoryManager) -> Result<()> {
+    let backend = if manager.get_neural_ner().is_fallback_mode() {
+        "fallback"
+    } else {
+        "neural"
+    };
+    eprintln!("NER_BACKEND={backend}");
+    if backend == "fallback"
+        && !cfg!(test)
+        && !std::env::var("SHODH_ALLOW_FALLBACK_NER")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    {
+        anyhow::bail!(
+            "recall harness refusing to run on the FALLBACK NER (model not              loaded) -- results would not measure the shipped system. Provide              the pinned model or set SHODH_ALLOW_FALLBACK_NER=1 to override              visibly."
+        );
+    }
+    Ok(())
+}
+
 pub fn ingest_corpus(
     manager: &MultiUserMemoryManager,
     corpus: &[CorpusItem],
 ) -> Result<HashMap<String, Uuid>> {
+    guard_ner_backend(manager)?;
     let mut map = HashMap::with_capacity(corpus.len());
     let ner = manager.get_neural_ner();
     let user_mem = manager.get_user_memory(EVAL_USER)?;
@@ -1110,6 +1203,11 @@ struct LongMemEvalCase {
 }
 
 /// Aggregate LongMemEval result.
+///
+/// Serialisable so that a sharded run can be recombined: every mean is carried
+/// with its own count, so shards aggregate as a count-weighted mean rather than
+/// a mean of means.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LongMemEvalReport {
     pub questions: usize,
     pub recall_at_k: f64,
@@ -1125,6 +1223,24 @@ pub struct LongMemEvalReport {
     pub layers: BTreeMap<String, (f64, usize)>,
 }
 
+/// Resolve a shard's `[start, end)` window over a manifest of `len` cases.
+///
+/// `offset` skips that many cases; `limit` bounds how many follow. Both saturate
+/// at `len`, so an out-of-range shard yields an empty window rather than
+/// panicking — with a fixed shard count and a variable question total, the tail
+/// shards are routinely out of range.
+///
+/// The correctness claim this exists to pin: for `offset = i * per` and
+/// `limit = per`, the windows are disjoint and cover `0..len` exactly once.
+fn shard_window(len: usize, offset: Option<usize>, limit: Option<usize>) -> (usize, usize) {
+    let start = offset.unwrap_or(0).min(len);
+    let end = match limit {
+        Some(n) => start.saturating_add(n).min(len),
+        None => len,
+    };
+    (start, end)
+}
+
 /// Run the LongMemEval-S suite (ICLR 2025, the current SOTA long-term memory
 /// benchmark). UNLIKE LoCoMo, each question carries its OWN ~48-session haystack
 /// (~115K tokens), so this is a LOOP of mini-evals: per question, ingest its
@@ -1138,6 +1254,7 @@ pub struct LongMemEvalReport {
 pub fn run_longmemeval(
     base_dir: &Path,
     storage_root: &Path,
+    offset: Option<usize>,
     limit: Option<usize>,
     k: usize,
     layer_modes: &[LayerMode],
@@ -1151,9 +1268,14 @@ pub fn run_longmemeval(
     for line in manifest_txt.lines().filter(|l| !l.trim().is_empty()) {
         cases.push(serde_json::from_str(line).context("parsing LongMemEval manifest line")?);
     }
-    if let Some(n) = limit {
-        cases.truncate(n);
-    }
+    // Shard selection: skip `offset` cases, then take `limit`. LongMemEval-S
+    // gives every question its OWN ~490-turn haystack, so cost is linear in
+    // questions and a full run cannot fit one job's timeout. Disjoint
+    // (offset, limit) windows let parallel jobs cover the suite exactly once.
+    // The manifest order is deterministic - the converter's `--shuffle` is a
+    // stable sort - so the windows are stable across jobs and across reruns.
+    let (start, end) = shard_window(cases.len(), offset, limit);
+    cases = cases.drain(start..end).collect();
 
     let mut sum_recall = 0.0f64;
     let mut sum_p1 = 0.0f64;
@@ -1439,6 +1561,28 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
             "+graph-boost-mult",
             vec![("SHODH_GRAPH_BOOST_MULTIPLICATIVE", "1")],
         ),
+        // Traversal direction. Without this flag `edge_neighbor` returns
+        // `edge.to_entity` unconditionally, so standing on a node and meeting an
+        // edge that ENDS there resolves to the node itself: every incoming edge
+        // is a self-loop and the walk can only follow outgoing edges. Reachable
+        // from the live path (`edge_neighbor` is called inside PPR), so this arm
+        // can differ from baseline.
+        ("+edge-dir", vec![("SHODH_GRAPH_EDGE_DIR", "1")]),
+        // Composition-by-traversal: beam-search the strongest intent-matching
+        // paths from the seeds and inject the reached endpoints. Shipped OFF
+        // since it landed and never carried an arm, so it has never appeared in
+        // the study at all.
+        ("+graph-traverse", vec![("SHODH_GRAPH_TRAVERSE", "1")]),
+        // The two graph-leg components that had no gate before `memory::ablation`
+        // existed, and so had never been ablated in either direction.
+        (
+            "-lateral-inhibition",
+            vec![("SHODH_DISABLE_BOOSTS", "hebbian,lateral_inhibition")],
+        ),
+        (
+            "-graph-potentiation",
+            vec![("SHODH_DISABLE_BOOSTS", "hebbian,graph_potentiation")],
+        ),
         (
             "+graph-boost-mult+expand",
             vec![
@@ -1469,6 +1613,9 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
 
         let mut by_cat: HashMap<SmokeCategory, Vec<f64>> = HashMap::new();
         let mut all: Vec<Metrics> = Vec::with_capacity(cases.len());
+        // Order-sensitive fingerprint over every retrieved id. An arm that
+        // matches baseline here provably changed nothing.
+        let mut fp = std::collections::hash_map::DefaultHasher::new();
         for case in &cases {
             let query = Query {
                 query_text: Some(case.query.clone()),
@@ -1478,6 +1625,14 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
             };
             let memories = system.read().recall(&query).unwrap_or_default();
             let retrieved: Vec<Uuid> = memories.iter().map(|m| m.id.0).collect();
+            {
+                use std::hash::{Hash, Hasher};
+                for id in &retrieved {
+                    id.hash(&mut fp);
+                }
+                // Separator so [a],[b] and [a,b] cannot collide.
+                0xFFu8.hash(&mut fp);
+            }
             let relevance = build_relevance_map(case, &id_map);
             let m = Metrics::compute(&retrieved, &relevance, SMOKE_K);
             by_cat.entry(case.category).or_default().push(m.recall_at_k);
@@ -1506,7 +1661,45 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
             mrr: all.iter().map(|m| m.mrr).sum::<f64>() / n,
             p_at_1: all.iter().map(|m| m.p_at_1).sum::<f64>() / n,
             by_category_recall,
+            retrieval_fingerprint: {
+                use std::hash::Hasher;
+                fp.finish()
+            },
+            vacuous_vs_baseline: false,
         });
+    }
+
+    // Vacuity check. An arm whose retrieved ids are byte-identical to baseline's
+    // did not exercise the code path it names, and its metrics are attributable
+    // to nothing. The `+spread-fix` arms were vacuous this way for months --
+    // SHODH_SPREAD_FIX only reached the legacy BFS spread, but SHODH_PPR defaults
+    // ON and its branch precedes it, so the flag could not execute while the rows
+    // read as evidence. Flag it in the report rather than failing the run: an arm
+    // may also be legitimately inert (it executed and changed no ranking), and
+    // only the fingerprint distinguishes the two.
+    let baseline_fp = rows
+        .iter()
+        .find(|r| r.name.starts_with("baseline"))
+        .map(|r| r.retrieval_fingerprint);
+    if let Some(base) = baseline_fp {
+        for row in rows.iter_mut() {
+            if row.name.starts_with("baseline") || row.flags.is_empty() {
+                continue;
+            }
+            if row.retrieval_fingerprint == base {
+                row.vacuous_vs_baseline = true;
+                tracing::warn!(
+                    arm = %row.name,
+                    flags = %row.flags.join(" "),
+                    "VACUOUS ABLATION ARM: retrieval is byte-identical to baseline, so this                      config did not reach the code path it names. Its numbers measure nothing.                      Confirm the flag is readable from the live path before trusting this row."
+                );
+                eprintln!(
+                    "  !! VACUOUS ARM `{}` ({}) -- byte-identical to baseline, measures nothing",
+                    row.name,
+                    row.flags.join(" ")
+                );
+            }
+        }
     }
 
     Ok(AblationReport {
@@ -1962,7 +2155,145 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
         degrees.sort_unstable_by(|a, b| b.cmp(a));
         let total_entities = degrees.len();
         let degree_sum: usize = degrees.iter().sum();
+
+        // Relation-type histogram over STORED edges. Walked from the entity side
+        // and de-duplicated by edge uuid, because get_entity_relationships
+        // returns an edge once from each endpoint it is reachable from and
+        // counting incidences would double most of them.
+        //
+        // SYMMETRIC types carry no order, so a path hop through one contributes
+        // nothing a composition could be non-commutative about. They are also
+        // the ones fully determined by entity->episode incidence, so this split
+        // is the same line as "stored vs derivable".
+        const SYMMETRIC: [&str; 7] = [
+            "CoOccurs",
+            "RelatedTo",
+            "AssociatedWith",
+            "CoRetrieved",
+            "WorksWith",
+            "Knows",
+            "AlternativeTo",
+        ];
+        let mut relation_types: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut seen_edges: std::collections::HashSet<uuid::Uuid> = Default::default();
+        for e in &entities {
+            for edge in g.get_entity_relationships(&e.uuid).unwrap_or_default() {
+                if !seen_edges.insert(edge.uuid) {
+                    continue;
+                }
+                *relation_types
+                    .entry(format!("{:?}", edge.relation_type))
+                    .or_insert(0) += 1;
+            }
+        }
+        let symmetric_edges: usize = relation_types
+            .iter()
+            .filter(|(name, _)| SYMMETRIC.contains(&name.as_str()))
+            .map(|(_, n)| *n)
+            .sum();
+        let typed_edges: usize = relation_types.values().sum::<usize>() - symmetric_edges;
+
+        // Entity labels. A label-pair typing rule can be correct and enabled and
+        // still never fire, because the labels it matches are not produced.
+        let mut entity_labels: std::collections::BTreeMap<String, usize> = Default::default();
+        for e in &entities {
+            if e.labels.is_empty() {
+                *entity_labels.entry("<unlabelled>".to_string()).or_insert(0) += 1;
+            }
+            for l in &e.labels {
+                *entity_labels.entry(format!("{l:?}")).or_insert(0) += 1;
+            }
+        }
+
+        // Undirected adjacency, built once and reused for every component pass.
+        let index: std::collections::HashMap<uuid::Uuid, usize> = entities
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.uuid, i))
+            .collect();
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); entities.len()];
+        let mut typed_adj: Vec<Vec<usize>> = vec![Vec::new(); entities.len()];
+        let mut counted: std::collections::HashSet<uuid::Uuid> = Default::default();
+        for e in &entities {
+            for edge in g.get_entity_relationships(&e.uuid).unwrap_or_default() {
+                if !counted.insert(edge.uuid) {
+                    continue;
+                }
+                let (Some(&a), Some(&b)) =
+                    (index.get(&edge.from_entity), index.get(&edge.to_entity))
+                else {
+                    continue;
+                };
+                adj[a].push(b);
+                adj[b].push(a);
+                if !SYMMETRIC.contains(&format!("{:?}", edge.relation_type).as_str()) {
+                    typed_adj[a].push(b);
+                    typed_adj[b].push(a);
+                }
+            }
+        }
+
+        // Components by BFS over an adjacency list, with a set of deleted
+        // vertices. Iterative: a hub-heavy graph would blow a recursive stack.
+        let components = |adj: &Vec<Vec<usize>>, removed: &std::collections::HashSet<usize>| {
+            let n = adj.len();
+            let mut seen = vec![false; n];
+            let (mut count, mut largest) = (0usize, 0usize);
+            for start in 0..n {
+                if seen[start] || removed.contains(&start) {
+                    continue;
+                }
+                count += 1;
+                let mut size = 0usize;
+                let mut stack = vec![start];
+                seen[start] = true;
+                while let Some(v) = stack.pop() {
+                    size += 1;
+                    for &w in &adj[v] {
+                        if !seen[w] && !removed.contains(&w) {
+                            seen[w] = true;
+                            stack.push(w);
+                        }
+                    }
+                }
+                largest = largest.max(size);
+            }
+            (count, largest)
+        };
+
+        let n_ent = entities.len().max(1);
+        let none: std::collections::HashSet<usize> = Default::default();
+        let (c_all, l_all) = components(&adj, &none);
+        let components_all = (c_all, l_all as f64 / n_ent as f64);
+
+        // Delete the top-N by degree. A k-connected graph survives k-1
+        // deletions; if this shatters early, connectivity is hub-carried.
+        let mut by_degree: Vec<usize> = (0..entities.len()).collect();
+        by_degree.sort_unstable_by(|&a, &b| adj[b].len().cmp(&adj[a].len()).then(a.cmp(&b)));
+        let mut components_after_hub_removal = Vec::new();
+        for &k in &[1usize, 5, 10, 25] {
+            if k > by_degree.len() {
+                break;
+            }
+            let removed: std::collections::HashSet<usize> =
+                by_degree.iter().take(k).copied().collect();
+            let (c, l) = components(&adj, &removed);
+            let denom = (entities.len() - k).max(1);
+            components_after_hub_removal.push((k, c, l as f64 / denom as f64));
+        }
+
+        let (c_typed, l_typed) = components(&typed_adj, &none);
+        let isolated_typed = typed_adj.iter().filter(|a| a.is_empty()).count();
+        let typed_components = (c_typed, l_typed as f64 / n_ent as f64, isolated_typed);
+
         GraphStructure {
+            relation_types,
+            typed_edges,
+            symmetric_edges,
+            entity_labels,
+            components_all,
+            components_after_hub_removal,
+            typed_components,
             total_entities,
             total_edges: degree_sum / 2,
             max_degree: degrees.first().copied().unwrap_or(0),
@@ -1971,6 +2302,7 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
             } else {
                 degree_sum as f64 / total_entities as f64
             },
+            hub_saturation_skipped_edges: crate::metrics::HUB_SATURATION_EDGE_SKIP_TOTAL.get(),
             hub_count: degrees
                 .iter()
                 .filter(|d| **d > HUB_REPORT_THRESHOLD)
@@ -3332,6 +3664,48 @@ mod tests {
             rank(&pf, "person"),
             rank(&full, "person")
         );
+    }
+
+    #[test]
+    fn shard_windows_tile_the_manifest_exactly_once() {
+        // The property the sharded LongMemEval workflow depends on: with a fixed
+        // shard count and `per = ceil(len / shards)`, the windows are disjoint
+        // and cover every case exactly once. If this breaks, a suite total is
+        // silently computed over duplicated or skipped questions.
+        const SHARDS: usize = 10;
+        for len in [0usize, 1, 7, 9, 10, 11, 47, 50, 149, 150, 479] {
+            let per = len.div_ceil(SHARDS).max(1);
+            let mut covered = vec![0u32; len];
+            for shard in 0..SHARDS {
+                let (start, end) = shard_window(len, Some(shard * per), Some(per));
+                assert!(start <= end, "len={len} shard={shard}: inverted window");
+                assert!(end <= len, "len={len} shard={shard}: window past the end");
+                for slot in covered.iter_mut().take(end).skip(start) {
+                    *slot += 1;
+                }
+            }
+            assert!(
+                covered.iter().all(|&c| c == 1),
+                "len={len}: every case must be covered exactly once, got {covered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_range_shard_yields_an_empty_window_not_a_panic() {
+        // Routine, not exceptional: the shard count is fixed at 10 while the
+        // question total varies, so the tail shards fall off the end whenever
+        // the total is small.
+        assert_eq!(shard_window(5, Some(50), Some(5)), (5, 5));
+        assert_eq!(shard_window(0, Some(0), Some(5)), (0, 0));
+        assert_eq!(shard_window(5, Some(3), Some(99)), (3, 5));
+    }
+
+    #[test]
+    fn absent_offset_and_limit_select_the_whole_manifest() {
+        assert_eq!(shard_window(42, None, None), (0, 42));
+        assert_eq!(shard_window(42, None, Some(10)), (0, 10));
+        assert_eq!(shard_window(42, Some(10), None), (10, 42));
     }
 
     #[test]

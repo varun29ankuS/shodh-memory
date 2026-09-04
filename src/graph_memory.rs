@@ -8,7 +8,6 @@ use chrono::{DateTime, Utc};
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, DB};
 use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3496,17 +3495,54 @@ impl GraphMemory {
                 .map(|(_, u)| *u)
         };
 
+        // Drop attribution for the OpenIE arm. Three filters sit between an
+        // extracted triple and a minted edge, and until now only the survivors
+        // were counted — so the recall ceiling was unmeasured. In particular
+        // `match_entity` requires BOTH arguments to resolve to an entity that
+        // already exists, which silently discards a well-formed causal triple
+        // about anything not yet promoted to an entity. On a corpus where the
+        // causal backbone looks thin, this tells you whether extraction is weak
+        // or whether the arguments simply are not entities yet.
+        let mut oie_total = 0usize;
+        let mut oie_dropped_not_causal = 0usize;
+        let mut oie_dropped_low_precision = 0usize;
+        // Per-TRIPLE, mutually exclusive — these sum with the others to oie_total.
+        let mut oie_dropped_unmatched = 0usize;
+        let mut oie_dropped_self_loop = 0usize;
+        let mut oie_dropped_write_failed = 0usize;
+        // Per-ARGUMENT diagnostics — a triple with both ends unmatched increments
+        // BOTH, so these deliberately do NOT reconcile against oie_total. They
+        // separate the two fixes: subject misses point at entity coverage,
+        // object misses at argument-span quality.
+        let mut oie_unmatched_subject_arg = 0usize;
+        let mut oie_unmatched_object_arg = 0usize;
+
         // OpenIE — entity→entity typed causal edges (grammar supplies the predicate).
         if let Some(triples) = crate::openie::extract_triples(content) {
             for tr in triples {
-                if !tr.causal || tr.low_precision {
+                oie_total += 1;
+                if !tr.causal {
+                    oie_dropped_not_causal += 1;
                     continue;
                 }
-                let (Some(from), Some(to)) = (match_entity(&tr.subject), match_entity(&tr.object))
-                else {
+                if tr.low_precision {
+                    oie_dropped_low_precision += 1;
+                    continue;
+                }
+                let subj = match_entity(&tr.subject);
+                let obj = match_entity(&tr.object);
+                if subj.is_none() {
+                    oie_unmatched_subject_arg += 1;
+                }
+                if obj.is_none() {
+                    oie_unmatched_object_arg += 1;
+                }
+                let (Some(from), Some(to)) = (subj, obj) else {
+                    oie_dropped_unmatched += 1;
                     continue;
                 };
                 if from == to {
+                    oie_dropped_self_loop += 1;
                     continue;
                 }
                 let rt = Self::relation_type_from_label(tr.relation);
@@ -3521,6 +3557,8 @@ impl GraphMemory {
                 );
                 if self.add_relationship(edge).is_ok() {
                     minted += 1;
+                } else {
+                    oie_dropped_write_failed += 1;
                 }
             }
         }
@@ -3528,15 +3566,26 @@ impl GraphMemory {
         // CATENA — event→event edges (the inchoative pivots no entity arm sees):
         // causal signals mint `Causes`, temporal signals mint `Precedes` — sequence
         // is never reported as causation.
+        let mut cat_total = 0usize;
+        let mut cat_dropped_event_create_failed = 0usize;
+        let mut cat_dropped_self_loop = 0usize;
+
         if let Some(links) = crate::catena::extract_event_links(content) {
             for link in links {
+                cat_total += 1;
                 let (Some(from), Some(to)) = (
                     self.get_or_create_event(&link.source, now),
                     self.get_or_create_event(&link.target, now),
                 ) else {
+                    // CATENA mints its own event nodes rather than requiring a
+                    // pre-existing entity, so unlike the OpenIE arm this should
+                    // be rare — a non-zero count here means node creation is
+                    // failing, not that the corpus lacks entities.
+                    cat_dropped_event_create_failed += 1;
                     continue;
                 };
                 if from == to {
+                    cat_dropped_self_loop += 1;
                     continue;
                 }
                 let rt = Self::relation_type_from_link(link.relation);
@@ -3555,8 +3604,34 @@ impl GraphMemory {
             }
         }
 
-        if minted > 0 {
-            tracing::info!(edges = minted, "causal spine: minted OpenIE + CATENA edges");
+        // Emit whenever either arm EXTRACTED something, not only when an edge
+        // survived. A run that extracts 40 triples and mints 0 is the finding;
+        // logging only on success is what let that state look like "the corpus
+        // has no causal structure" instead of "every triple was filtered".
+        // Greppable as `causal_spine_attribution` and aggregable across an
+        // ingest: sum the fields to get the corpus-level recall ceiling.
+        if oie_total > 0 || cat_total > 0 {
+            tracing::info!(
+                target: "causal_spine_attribution",
+                minted,
+                oie_total,
+                // These five are per-triple and mutually exclusive, so
+                // minted_openie + the five = oie_total. If they do not, the
+                // attribution has a bug and the numbers should not be trusted.
+                oie_dropped_not_causal,
+                oie_dropped_low_precision,
+                oie_dropped_unmatched,
+                oie_dropped_self_loop,
+                oie_dropped_write_failed,
+                // Per-argument diagnostics — intentionally do NOT reconcile.
+                oie_unmatched_subject_arg,
+                oie_unmatched_object_arg,
+                cat_total,
+                cat_dropped_event_create_failed,
+                cat_dropped_self_loop,
+                entities_available = entity_uuids.len(),
+                "causal spine attribution"
+            );
         }
         minted
     }
@@ -4904,30 +4979,77 @@ impl GraphMemory {
         }
 
         // Sort by pruning priority: LTP-protected edges last (survive pruning),
-        // then by effective strength descending (strongest survive)
-        let mut scored: Vec<(Uuid, f32, bool)> = all_edges
+        // then by effective strength descending (strongest survive).
+        //
+        // CROSS-INGEST DETERMINISM. Latent, not observed: this was fixed while
+        // hunting the `conv-42_q19` repeat divergence and it did NOT fix it.
+        // Measured on the locomo gate before and after, the metrics are
+        // bit-identical (ndcg@10 0.4114 both runs) and the divergence survives,
+        // so no entity in that corpus exceeds MAX_ENTITY_DEGREE and this branch
+        // never executes there. It is kept because the defect is real on any
+        // corpus with hubs — which the defence and GDELT graphs have — not
+        // because it was shown to matter here. The remaining divergence is
+        // elsewhere and is present on main independently of this branch.
+        //
+        // It is the same defect Phase 3.1 of
+        // `get_entity_relationships_limited` fixes on the READ path, which this
+        // write path never got. `get_entity_relationships` returns edges in
+        // prefix-scan order, i.e. edge-UUID order, and edge UUIDs are
+        // `Uuid::new_v4()` — random per ingest. A stable sort on (protection,
+        // strength) therefore leaves equal-priority edges in that random order,
+        // and `take(prune_count)` below does not merely reorder them: it
+        // DELETES them. Fresh graphs carry large exact-strength plateaus (every
+        // co-occurrence edge starts at its tier's initial weight) and hub
+        // entities carry far more edges than MAX_ENTITY_DEGREE, so two ingests
+        // of the same corpus permanently kept different edge sets. Not a
+        // different order over one graph — a different graph.
+        //
+        // Ordered by a key that is a pure function of graph CONTENT: (peer
+        // entity name, relation type, edge uuid). Peer names are repeat-stable
+        // via deterministic entity resolution, and `add_relationship` dedups by
+        // (from, to, type), so the uuid only ever separates content-identical
+        // edges, where the choice cannot matter.
+        let peer_of = |e: &RelationshipEdge| -> Uuid {
+            if e.from_entity == *entity_uuid {
+                e.to_entity
+            } else {
+                e.from_entity
+            }
+        };
+        let mut peer_names: HashMap<Uuid, String> = HashMap::new();
+        for e in &all_edges {
+            let peer = peer_of(e);
+            peer_names.entry(peer).or_insert_with(|| {
+                self.get_entity(&peer)
+                    .ok()
+                    .flatten()
+                    .map(|ent| ent.name)
+                    .unwrap_or_default()
+            });
+        }
+
+        // `effective_strength()` reads Utc::now(), so it is snapshotted once per
+        // edge here rather than called from inside the comparator.
+        let mut scored: Vec<(&RelationshipEdge, f32, bool)> = all_edges
             .iter()
-            .map(|e| {
-                let is_protected = e.is_potentiated();
-                (e.uuid, e.effective_strength(), is_protected)
-            })
+            .map(|e| (e, e.effective_strength(), e.is_potentiated()))
             .collect();
 
         // Sort: unprotected+weak first (pruning candidates), protected+strong last (survivors)
         scored.sort_by(|a, b| {
-            // Protected edges sort after unprotected
-            match a.2.cmp(&b.2) {
-                CmpOrdering::Equal => {
-                    // Within same protection class, weaker edges first (prune candidates)
-                    a.1.total_cmp(&b.1)
-                }
-                other => other,
-            }
+            // Protected edges sort after unprotected; then weaker first.
+            a.2.cmp(&b.2)
+                .then_with(|| a.1.total_cmp(&b.1))
+                .then_with(|| peer_names[&peer_of(a.0)].cmp(&peer_names[&peer_of(b.0)]))
+                .then_with(|| {
+                    format!("{:?}", a.0.relation_type).cmp(&format!("{:?}", b.0.relation_type))
+                })
+                .then_with(|| a.0.uuid.cmp(&b.0.uuid))
         });
 
         // Prune excess: first N edges in sorted order are weakest/unprotected
         let prune_count = scored.len() - MAX_ENTITY_DEGREE;
-        let to_prune: Vec<Uuid> = scored.iter().take(prune_count).map(|s| s.0).collect();
+        let to_prune: Vec<Uuid> = scored.iter().take(prune_count).map(|s| s.0.uuid).collect();
 
         for edge_uuid in &to_prune {
             if let Err(e) = self.delete_relationship(edge_uuid) {
@@ -6529,6 +6651,30 @@ impl GraphMemory {
         self.record_memory_coactivation_impl(memory_ids, strengthen_only)
     }
 
+    /// OUTCOME-gated Hebbian update: mint and strengthen edges across memories
+    /// that were confirmed useful, not merely co-retrieved.
+    ///
+    /// The distinction is the whole point. `record_memory_coactivation` fires on
+    /// every recall over the full retrieved set, which is association without a
+    /// reward signal — frequently co-retrieved hubs strengthen fastest and climb
+    /// the ranking regardless of whether they helped. Measured, that cost 6.7pp
+    /// of p@1 (0.4100 -> 0.4767 with the L5 boost disabled) while recall@10 stayed
+    /// bit-identical: it was not finding worse memories, it was ordering them
+    /// worse. Rich-get-richer, unsupervised by usefulness.
+    ///
+    /// This entry point is called only with a set the caller has evidence for —
+    /// memories an answer actually cited. Minting is safe here for the same
+    /// reason it was unsafe there: an answer cites a handful of memories, so
+    /// all-pairs over a citation set is single-digit edges, where all-pairs over
+    /// a top-50 retrieval is ~1,225 per query. That unbounded minting was ~80%
+    /// of the graph and the OOM driver, which is why the retrieval path is
+    /// strengthen-only and this one is not.
+    ///
+    /// Returns the number of edges created or strengthened.
+    pub fn record_memory_coactivation_outcome(&self, memory_ids: &[Uuid]) -> Result<usize> {
+        self.record_memory_coactivation_impl(memory_ids, false)
+    }
+
     /// Co-retrieval Hebbian update. `strengthen_only = true`: reinforce edges that
     /// ALREADY exist between co-active memories; do NOT mint a new CoRetrieved edge
     /// for every co-retrieved pair. Un-gated all-pairs creation is the recall-time
@@ -7024,7 +7170,7 @@ impl GraphMemory {
         }
 
         // Sort by strength descending and limit
-        associations.sort_by(|a, b| b.1.total_cmp(&a.1));
+        associations.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         associations.truncate(max_results);
 
         Ok(associations)
@@ -7316,7 +7462,7 @@ impl GraphMemory {
             .max(1)
             .min(eligible.len());
 
-        eligible.sort_by(|a, b| b.1.total_cmp(&a.1));
+        eligible.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         let rescued: std::collections::HashSet<usize> =
             eligible.iter().take(budget).map(|(i, _)| *i).collect();
 
@@ -10523,6 +10669,67 @@ mod tests {
         assert_eq!(raw.connections.len(), 2, "both edges render unfiltered");
         assert_eq!(raw.filter.hidden_redundant_generic, 0);
         assert_eq!(raw.filter.hidden_weak_generic, 0);
+    }
+
+    #[test]
+    fn outcome_gated_coactivation_mints_where_the_retrieval_path_does_not() {
+        // The contract that makes the outcome-gated path worth having: SAME
+        // inputs, SAME empty starting graph, opposite result. The retrieval
+        // entry point is strengthen-only, so on a graph with no `mem_edge:`
+        // entries it has nothing to strengthen and mints nothing — which is
+        // precisely why the mem<->mem layer has been inert since f6b730ee.
+        // The outcome entry point mints, because the caller has evidence the
+        // set was useful.
+        //
+        // This test fails if someone "simplifies" the two entry points into
+        // one, which would either re-open the all-pairs flood or re-kill the
+        // layer.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect(); // 3 pairs
+
+        // Retrieval path on a cold graph: nothing exists, so nothing happens.
+        let retrieval = graph.record_memory_coactivation(&ids).unwrap();
+        assert_eq!(
+            retrieval, 0,
+            "retrieval-gated coactivation must mint nothing on a cold graph"
+        );
+        assert_eq!(
+            graph.get_stats().unwrap().relationship_count,
+            0,
+            "retrieval path must leave the graph empty"
+        );
+
+        // Outcome path on the same cold graph: all pairs are minted.
+        let minted = graph.record_memory_coactivation_outcome(&ids).unwrap();
+        assert_eq!(
+            minted, 3,
+            "outcome-gated coactivation must mint all 3 pairs"
+        );
+        assert_eq!(
+            graph.get_stats().unwrap().relationship_count,
+            3,
+            "outcome path must persist the minted edges"
+        );
+
+        // And a second confirmation strengthens rather than duplicating — the
+        // Hebbian part. Repeated evidence must not inflate edge count.
+        let again = graph.record_memory_coactivation_outcome(&ids).unwrap();
+        assert_eq!(again, 3, "second pass touches the same 3 pairs");
+        assert_eq!(
+            graph.get_stats().unwrap().relationship_count,
+            3,
+            "repeated confirmation must strengthen, never duplicate"
+        );
+        let edge = graph
+            .find_edge_between_entities(&ids[0], &ids[1])
+            .unwrap()
+            .expect("edge exists after minting");
+        assert!(
+            edge.activation_count >= 2,
+            "repeated confirmation must increment activation, got {}",
+            edge.activation_count
+        );
     }
 
     #[test]

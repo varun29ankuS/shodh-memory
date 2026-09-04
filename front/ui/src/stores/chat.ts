@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { streamMessage } from "@/lib/seat/client";
+import { dispatchUiCommand } from "./ui-commands";
 import type {
   ConversationDetail,
   ModelRef,
@@ -197,6 +198,12 @@ function applyEvent(convo: ConvoLive, event: SeatEvent): ConvoLive {
     case "agent_end":
     case "conversation_created":
       return convo;
+    case "ui_command":
+      // Handled as a side effect at the stream, not stored. Keeping it out of
+      // `ops` matters on replay: rebuilding a conversation from durable events
+      // would otherwise re-navigate the app to wherever the agent sent it
+      // three turns ago.
+      return convo;
     default:
       // Every remaining member of the union is a ChatOp.
       if (!last) return convo;
@@ -252,6 +259,11 @@ export function buildTurns(detail: ConversationDetail): ChatTurn[] {
       case "conversation_created":
       case "text_delta":
       case "thinking_delta":
+        break;
+      case "ui_command":
+        // Never replayed. Reopening a conversation must not move the
+        // operator's screen to wherever the agent sent it during a turn they
+        // finished reading yesterday.
         break;
       default:
         turn.ops.push(event);
@@ -336,6 +348,13 @@ export const useChat = create<ChatState>((set, get) => ({
       });
     };
     const onEvent = (event: SeatEvent) => {
+      if (event.type === "ui_command") {
+        // Dispatched immediately rather than queued: the point of the screen
+        // moving is that it moves while the sentence explaining it is still
+        // streaming, and the text-delta flush is deliberately 40ms behind.
+        dispatchUiCommand(event.command, event.reason);
+        return;
+      }
       queue.push(event);
       if (event.type === "text_delta" || event.type === "thinking_delta") {
         flushTimer ??= window.setTimeout(flush, 40);

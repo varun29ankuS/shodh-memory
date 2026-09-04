@@ -9,11 +9,11 @@ import {
   type GeoPermissibleObjects,
   type ZoomTransform,
 } from "d3";
-import { feature, mesh } from "topojson-client";
-import type { Topology, GeometryCollection } from "topojson-specification";
 import type { RecallMemory } from "@/lib/api";
 import { useSession } from "@/stores/session";
-import worldTopology from "@/assets/world-countries-110m.json";
+// Decoded once for the whole product. See lib/atlas.ts for the provenance of
+// the basemap and of India's boundary in particular.
+import { LAND, BORDERS, INDIA } from "@/lib/atlas";
 
 /**
  * The world basemap and the plotted points.
@@ -41,20 +41,6 @@ import worldTopology from "@/assets/world-countries-110m.json";
  * Baltimore in China.
  */
 
-/** The vendored file's `objects` — named so the decode below is not `any`. */
-type WorldTopology = Topology<{
-  countries: GeometryCollection<{ name: string }>;
-  land: GeometryCollection;
-}>;
-
-const world = worldTopology as unknown as WorldTopology;
-
-/** Decoded once at module scope: the topology is a constant, and re-deriving
- *  it per mount would re-walk 177 country geometries on every navigation. */
-const LAND = feature(world, world.objects.land) as unknown as GeoPermissibleObjects;
-/** Interior borders only — `(a, b) => a !== b` drops the coastline, which LAND
- *  already draws. Drawing both would double-stroke every shore. */
-const BORDERS = mesh(world, world.objects.countries, (a, b) => a !== b) as GeoPermissibleObjects;
 const GRATICULE = geoGraticule10() as unknown as GeoPermissibleObjects;
 
 interface GeoPoint {
@@ -85,6 +71,14 @@ function readTokens(el: HTMLElement) {
     ],
     active: v("--node-active", "#f4622e"),
     muted: v("--muted-foreground", "#8a8f98"),
+    // Land, borders and graticule are drawn from --foreground rather than
+    // --muted-foreground. The alphas below are low enough that the mark has to
+    // come from a token with real contrast against its own ground, and
+    // --foreground is the only one that inverts with the theme: near-black ink
+    // on paper, near-white on night. --muted-foreground is a MID tone in both,
+    // so on paper it sat a few percent away from the ground and the coastline
+    // effectively disappeared.
+    ink: v("--foreground", "#f7f8f8"),
     border: v("--border", "#23252a"),
   };
 }
@@ -225,6 +219,20 @@ export function GeoMap({
       } as unknown as GeoPermissibleObjects;
     }
 
+    /**
+     * How far out the zoom may go, as a multiple of the fitted scale.
+     *
+     * The projection is fitted to the DATA, so the fitted view is already
+     * tight — and a scaleExtent floor of 1 then makes that view the furthest
+     * out you can get. The comment above claiming "the world stays one scroll
+     * away" was false: zooming out did nothing, which is exactly what it looks
+     * like when zoom is broken.
+     *
+     * The floor is now the ratio between a world fit and the data fit, so
+     * scrolling out reaches the planet and stops there.
+     */
+    let minScale = 1;
+
     function sizeCanvas() {
       const rect = wrap!.getBoundingClientRect();
       const dpr = Math.max(1, window.devicePixelRatio || 1);
@@ -234,13 +242,20 @@ export function GeoMap({
       canvas!.height = Math.round(height * dpr);
       // Refit rather than rescale: fitExtent recomputes both scale and centre,
       // so the map fills a resized pane instead of drifting off one edge.
-      projection.fitExtent(
-        [
-          [12, 12],
-          [Math.max(24, width - 12), Math.max(24, height - 12)],
-        ],
-        fitTarget(),
-      );
+      const extent: [[number, number], [number, number]] = [
+        [12, 12],
+        [Math.max(24, width - 12), Math.max(24, height - 12)],
+      ];
+
+      // Measure the world fit first, then settle on the data fit. Both use the
+      // same extent, so the ratio is exactly how far out the user must be able
+      // to scroll to see the planet the data sits on.
+      projection.fitExtent(extent, LAND);
+      const worldScale = projection.scale();
+      projection.fitExtent(extent, fitTarget());
+      const dataScale = projection.scale();
+      minScale = dataScale > 0 ? Math.min(1, worldScale / dataScale) : 1;
+
       return dpr;
     }
 
@@ -257,7 +272,7 @@ export function GeoMap({
       // feature of the world.
       ctx!.beginPath();
       path(GRATICULE);
-      ctx!.strokeStyle = hexA(tokens.muted, 0.09);
+      ctx!.strokeStyle = hexA(tokens.ink, 0.07);
       ctx!.lineWidth = 0.5 / t.k;
       ctx!.stroke();
 
@@ -265,16 +280,31 @@ export function GeoMap({
       // it competes with them it is doing the wrong job.
       ctx!.beginPath();
       path(LAND);
-      ctx!.fillStyle = hexA(tokens.muted, 0.1);
+      ctx!.fillStyle = hexA(tokens.ink, 0.08);
       ctx!.fill();
-      ctx!.strokeStyle = hexA(tokens.muted, 0.32);
+      ctx!.strokeStyle = hexA(tokens.ink, 0.28);
       ctx!.lineWidth = 0.6 / t.k;
       ctx!.stroke();
 
       ctx!.beginPath();
       path(BORDERS);
-      ctx!.strokeStyle = hexA(tokens.muted, 0.2);
+      ctx!.strokeStyle = hexA(tokens.ink, 0.18);
       ctx!.lineWidth = 0.5 / t.k;
+      ctx!.stroke();
+
+      // India last, over the Natural Earth outline it corrects.
+      //
+      // Natural Earth draws national boundaries on lines of DE-FACTO CONTROL,
+      // which for India splits Jammu & Kashmir, places Aksai Chin outside the
+      // country and marks Arunachal Pradesh disputed. That is not a rendering
+      // preference and not a resolution problem: it is the wrong border, and
+      // shipping it to an Indian defence customer is a release blocker.
+      // Stroked at the same weight as the other borders so it reads as the
+      // national outline rather than an annotation.
+      ctx!.beginPath();
+      path(INDIA);
+      ctx!.strokeStyle = hexA(tokens.ink, 0.28);
+      ctx!.lineWidth = 0.6 / t.k;
       ctx!.stroke();
 
       ctx!.restore();
@@ -328,7 +358,7 @@ export function GeoMap({
     draw();
 
     const zoomBehavior = zoom<HTMLCanvasElement, unknown>()
-      .scaleExtent([1, 24])
+      .scaleExtent([minScale, 24])
       .on("zoom", (event) => {
         transformRef.current = event.transform;
         draw();
@@ -338,6 +368,10 @@ export function GeoMap({
 
     const observer = new ResizeObserver(() => {
       sizeCanvas();
+      // The floor is derived from the fit, and the fit changes with the pane,
+      // so the extent has to be reapplied or a resize silently re-traps the
+      // view at the old minimum.
+      zoomBehavior.scaleExtent([minScale, 24]);
       draw();
     });
     observer.observe(wrap);

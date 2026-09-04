@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
+import { GroundToggle } from "./GroundToggle";
 import type { Reachability } from "@/lib/api";
 import { StatusStrip } from "./StatusStrip";
 import { DESTINATIONS } from "./Sidebar";
@@ -8,7 +9,7 @@ import { DESTINATIONS } from "./Sidebar";
 /** Collapsed rail width, as the offset every fixed element reserves. The rail's
  *  *expanded* width is deliberately never reserved: doing so would make the
  *  expansion push content, which is the one thing it must not do. */
-export const RAIL_OFFSET = "pl-14";
+export const RAIL_OFFSET = "pl-56";
 
 /**
  * The header — and the one place every destination says what it is.
@@ -70,6 +71,7 @@ export function TopBar({
       <div className="ml-auto flex min-w-0 flex-1 items-center justify-end gap-3 pl-3">
         <StatusStrip reach={reach} />
         {children}
+        <GroundToggle />
       </div>
     </header>
   );

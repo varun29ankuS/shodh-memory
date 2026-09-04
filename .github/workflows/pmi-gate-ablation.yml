@@ -104,6 +104,7 @@ jobs:
           echo "## PMI² edge-gate ablation (gate_min=${{ github.event.inputs.gate_min || '0.0' }})" >> "$GITHUB_STEP_SUMMARY"
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json, re, sys
+          ANSI = re.compile(chr(27) + re.escape(chr(91)) + "[0-9;]*m")
           def load(f):
               d = json.load(open(f))
               full = d['layers'].get('full') or next(iter(d['layers'].values()))
@@ -114,7 +115,7 @@ jobs:
               pat = re.compile(r'(\w+)=(\d+)')
               for line in open(logfile, errors='ignore'):
                   if 'edge typing provenance' not in line: continue
-                  for k, v in pat.findall(line):
+                  for k, v in pat.findall(ANSI.sub('', line)):
                       if k in tot: tot[k] += int(v)
               tot['stored_total'] = tot['semantic']+tot['cue']+tot['pair_table']+tot['learned']+tot['generic']+tot['fragment_blocked']
               return tot
@@ -185,7 +186,7 @@ jobs:
               for line in open(path, errors="ignore"):
                   if "edge typing provenance" not in line:
                       continue
-                  for key, value in pat.findall(line):
+                  for key, value in pat.findall(ANSI.sub('', line)):
                       if key in totals:
                           totals[key] += int(value)
               totals["stored_total"] = (

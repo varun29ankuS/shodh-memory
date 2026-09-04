@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       limit:
-        description: 'Number of questions (representative mix via --shuffle). Blank = all 479.'
+        description: 'Total questions across ALL 10 shards (representative mix via --shuffle). Blank uses the default below - it does NOT mean all 479, GitHub substitutes the default for an empty input. ~7-12 min per question per shard.'
         required: false
         default: '50'
       extra_env:
@@ -40,9 +40,19 @@ concurrency:
 
 jobs:
   longmemeval:
-    name: LongMemEval-S
+    # SHARDED. Every LongMemEval-S question carries its OWN ~490-turn haystack,
+    # so cost is linear in questions and ingest-dominated at roughly 7-12 min
+    # each. A single job could not finish even the default 50 questions inside
+    # timeout-minutes: 300 - every unsharded run was cancelled at ~25/50 having
+    # produced no report at all. Ten disjoint (offset, limit) windows cover the
+    # suite exactly once and each finishes well inside the cap.
+    name: LongMemEval-S (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
       - uses: actions/checkout@v7
 
@@ -93,14 +103,29 @@ jobs:
             ${{ github.event.inputs.limit != '' && format('--limit {0}', github.event.inputs.limit) || '' }}
           wc -l tests/recall/longmemeval/manifest.jsonl
 
-      - name: Run LongMemEval
+      - name: Run LongMemEval shard
         run: |
           for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          TOTAL=$(wc -l < tests/recall/longmemeval/manifest.jsonl)
+          SHARDS=10
+          PER=$(( (TOTAL + SHARDS - 1) / SHARDS ))
+          OFFSET=$(( ${{ matrix.shard }} * PER ))
+          echo "shard ${{ matrix.shard }}/$SHARDS: offset=$OFFSET limit=$PER of $TOTAL"
           ./target/release/recall-eval \
             --longmemeval tests/recall/longmemeval \
             --layer ${{ github.event.inputs.layer || 'full' }} \
-            --output unused.json \
+            --longmemeval-offset "$OFFSET" \
+            --longmemeval-limit "$PER" \
+            --output "shard-${{ matrix.shard }}.json" \
             --storage ./lme-storage 2>&1 | tee longmemeval.log
+
+      - name: Upload shard report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lme-shard-${{ matrix.shard }}
+          path: shard-${{ matrix.shard }}.json
+          if-no-files-found: warn
 
       - name: Summary
         if: always()
@@ -114,3 +139,95 @@ jobs:
             grep -E "NER_BACKEND|LongMemEval-S:|recall@|LONGMEMEVAL_LAYER" longmemeval.log || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  aggregate:
+    # Recombines the shards. Every mean in the report is carried with its own
+    # count, so the suite total is a COUNT-WEIGHTED mean, never a mean of means -
+    # the shards are equal-sized by construction but the last one is short
+    # whenever the question count is not a multiple of ten, and per-category
+    # counts differ wildly between shards regardless.
+    name: LongMemEval-S (aggregate)
+    needs: longmemeval
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lme-shard-*
+          path: shards
+          merge-multiple: true
+
+      - name: Combine shard reports
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob, json, os, sys
+          from collections import defaultdict
+
+          files = sorted(glob.glob('shards/shard-*.json'))
+          reports = []
+          for f in files:
+              try:
+                  reports.append((f, json.load(open(f))))
+              except Exception as e:
+                  print(f'  !! unreadable shard {f}: {e}')
+
+          print('## LongMemEval-S - turn-level retrieval recall@10 (no LLM judge)')
+          print()
+          print('> NOT comparable to headline LongMemEval answer-accuracy SOTA, which')
+          print('> reads retrieved context with a large LLM. This is the retrieval half:')
+          print('> does our memory surface the gold evidence turns?')
+          print()
+
+          expected = 10
+          if len(reports) < expected:
+              missing = expected - len(reports)
+              print(f'> **WARNING: {missing} of {expected} shards produced no report.**')
+              print('> The figures below cover only the shards that completed and are NOT')
+              print('> a suite result. Do not quote them without this caveat.')
+              print()
+
+          if not reports:
+              print('No shard reports; nothing to aggregate.')
+              sys.exit(0)
+
+          cat_sum = defaultdict(float)
+          cat_n = defaultdict(int)
+          layer_sum = defaultdict(float)
+          layer_n = defaultdict(int)
+          for _, r in reports:
+              for cat, (mean, n) in r.get('by_category', {}).items():
+                  cat_sum[cat] += mean * n
+                  cat_n[cat] += n
+              for lay, (mean, n) in r.get('layers', {}).items():
+                  layer_sum[lay] += mean * n
+                  layer_n[lay] += n
+
+          total_n = sum(cat_n.values())
+          overall = sum(cat_sum.values()) / total_n if total_n else 0.0
+          backends = {r.get('ner_backend', '?') for _, r in reports}
+
+          print('```')
+          print(f'shards        : {len(reports)}/{expected}')
+          print(f'questions     : {total_n}')
+          print(f'NER backend   : {", ".join(sorted(backends))}')
+          print(f'recall@10     : {overall:.4f}')
+          print()
+          for cat in sorted(cat_n):
+              m = cat_sum[cat] / cat_n[cat] if cat_n[cat] else 0.0
+              print(f'  {cat:18} n={cat_n[cat]:<5} recall@10 = {m:.4f}')
+          if len(layer_n) > 1:
+              print()
+              print('  per-layer ablation (same haystacks):')
+              for lay in sorted(layer_n):
+                  m = layer_sum[lay] / layer_n[lay] if layer_n[lay] else 0.0
+                  print(f'    {lay:16} n={layer_n[lay]:<5} recall@10 = {m:.4f}')
+          print('```')
+
+          # A number without its n invites being quoted as if it were the suite.
+          if total_n < 40:
+              print()
+              print(f'> **n = {total_n}. The 95% interval here is roughly +/-{1.96*(0.25/total_n)**0.5:.2f}** -')
+              print('> too wide to separate retrieval legs. Treat as a smoke signal, not a result.')
+          PY
+

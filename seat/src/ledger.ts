@@ -68,10 +68,35 @@ export interface ImplicitFeedbackData {
 	weakened: string[];
 }
 
+/**
+ * A turn in which tool policy removed something from the model's reach.
+ *
+ * Recorded because "the agent could not do that" is worth nothing to whoever
+ * approves the deployment without a line saying when it was stopped and by
+ * which rule. This is the difference between a constraint and a claim about
+ * one.
+ *
+ * Written once per turn rather than once per tool: the turn is the unit an
+ * auditor reads, and one line per withheld tool per turn would bury the
+ * memory events this file exists for.
+ *
+ * NOT revertible in the compensating sense — a past turn's reach cannot be
+ * widened after the fact — so a revert of one of these carries
+ * `compensation: { kind: "none" }` and exists only to annotate.
+ */
+export interface PolicyWithheldData {
+	/** Sorted, so the same policy against the same server logs identically. */
+	withheld: { tool: string; by: string; reason: string }[];
+	/** How many tools the model WAS offered, so the line reads as a ratio
+	 *  rather than an unbounded list of absences. */
+	offered: number;
+}
+
 export type LedgerEntry =
 	| LedgerEntryBase<"memory_write", MemoryWriteData>
 	| LedgerEntryBase<"reinforce", ReinforceData>
 	| LedgerEntryBase<"implicit_feedback", ImplicitFeedbackData>
+	| LedgerEntryBase<"policy_withheld", PolicyWithheldData>
 	| LedgerEntryBase<"revert", RevertData>;
 
 interface LedgerEntryBase<K extends string, D> {
@@ -241,6 +266,17 @@ export class LearningLedger {
 					"Compensating action: opposite explicit reinforce per direction. The backend's " +
 					"implicit momentum and Hebbian updates are countered, not exactly undone.";
 			}
+		} else if (original.kind === "policy_withheld") {
+			// A past turn's reach cannot be widened after the fact, so there is
+			// nothing to compensate. The revert exists to annotate — an operator
+			// marking that a withholding was wrong is itself a record worth
+			// keeping, and silently refusing to revert would leave them no way
+			// to say so in the file that is supposed to hold the whole history.
+			compensation = { kind: "none" };
+			note =
+				`Policy withheld ${original.data.withheld.length} tool(s) on this turn. ` +
+				"Nothing to undo: the turn has already run with the narrower tool set. " +
+				"Widening reach is a change to the policy file, not a revert.";
 		} else {
 			const outcome = original.data.outcome;
 			if (outcome === "neutral") {

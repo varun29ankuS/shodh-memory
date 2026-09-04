@@ -114,6 +114,83 @@ pub const DELETION_RATIO_THRESHOLD: f32 = 0.30;
 /// Below this threshold, rebuild is strongly recommended
 pub const MIN_ACCEPTABLE_RECALL: f32 = 0.85;
 
+/// Environment variable selecting the query-time search list size (DiskANN `L`).
+pub const SEARCH_EF_ENV: &str = "SHODH_VAMANA_EF";
+
+/// Parse a query-time search list size from its raw environment value.
+///
+/// Returns `None` — meaning "leave the beam at the requested candidate count",
+/// i.e. the historical behaviour — for an absent, empty, unparseable or zero
+/// value. Split out as a pure function so it can be unit tested without
+/// mutating process environment (which races under a parallel test runner).
+fn parse_search_ef(raw: Option<&str>) -> Option<usize> {
+    raw?.trim().parse::<usize>().ok().filter(|&v| v > 0)
+}
+
+/// Query-time search list size from [`SEARCH_EF_ENV`], resolved once per process.
+///
+/// `None` (the default, variable unset) keeps `L = k`, so the shipped search
+/// path is unchanged. A value larger than the internal candidate count widens
+/// the beam; a smaller one is ignored (the beam is clamped up to `k`).
+///
+/// Cached in a `OnceLock` because `search()` is on the per-query hot path and
+/// the eval/production environment is fixed at process start.
+fn configured_search_ef() -> Option<usize> {
+    static SEARCH_EF: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *SEARCH_EF.get_or_init(|| {
+        let parsed = parse_search_ef(std::env::var(SEARCH_EF_ENV).ok().as_deref());
+        if let Some(ef) = parsed {
+            info!("Vamana query-time search list size ({SEARCH_EF_ENV}) = {ef}");
+        }
+        parsed
+    })
+}
+
+/// Environment variable enabling α-RNG pruning on the incremental insert path.
+pub const INSERT_PRUNE_ENV: &str = "SHODH_VAMANA_INSERT_PRUNE";
+
+/// Parse the insert-prune flag from its raw environment value.
+///
+/// Only `1` / `true` (case-insensitive, trimmed) enable it; anything else —
+/// absent, empty, `0`, garbage — leaves the historical greedy-kNN insert
+/// untouched. A pure function so it is unit-testable without mutating process
+/// environment (which races under a parallel test runner).
+fn parse_insert_prune(raw: Option<&str>) -> bool {
+    // Opt-OUT. Unset means ON, because a-RNG construction is what makes this a
+    // Vamana index rather than a greedy kNN graph; skipping it is the deviation,
+    // not the default. Only an explicit `0`/`false` disables it.
+    !matches!(raw.map(str::trim), Some(v) if v == "0" || v.eq_ignore_ascii_case("false"))
+}
+
+/// Insert-prune policy from [`INSERT_PRUNE_ENV`], resolved once per process.
+///
+/// DEFAULT ON. α-RNG construction is what makes this a Vamana index; the
+/// incremental path skipped it "for speed" and silently built a greedy kNN
+/// graph instead -- one whose own true neighbours greedy search could not
+/// reach (45.6% self-recall at beam=k on clustered data, against 99.9% with
+/// α-RNG). No beam width recovers a neighbour the graph has no edge to, which
+/// is why widening `ef` only ever recovered a third of the loss.
+///
+/// `SHODH_VAMANA_INSERT_PRUNE=0` restores the historical greedy path bit-for-bit
+/// for A/B measurement. It is an escape hatch, not a performance option: the
+/// insert-latency it buys costs index navigability.
+///
+/// Cached in a `OnceLock`: ingest is a hot path and the eval/production
+/// environment is fixed at process start. The `info!` line doubles as the
+/// CI-log proof that the flag actually reached the live insert path.
+fn configured_insert_prune() -> bool {
+    static INSERT_PRUNE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *INSERT_PRUNE.get_or_init(|| {
+        let enabled = parse_insert_prune(std::env::var(INSERT_PRUNE_ENV).ok().as_deref());
+        if !enabled {
+            info!(
+                "Vamana insert-time α-RNG pruning DISABLED via {INSERT_PRUNE_ENV} — the index                  will be a greedy kNN graph, not a Vamana graph"
+            );
+        }
+        enabled
+    })
+}
+
 /// Main Vamana index
 pub struct VamanaIndex {
     pub(crate) config: VamanaConfig,
@@ -568,14 +645,44 @@ impl VamanaIndex {
         }
     }
 
-    /// Greedy search for nearest neighbors
+    /// Greedy search for nearest neighbors with the search list tied to `k`.
+    ///
+    /// Equivalent to [`Self::greedy_search_beam`] with `beam == k`.
+    fn greedy_search(&self, query: &[f32], k: usize, entry: u32) -> Result<Vec<SearchCandidate>> {
+        self.greedy_search_beam(query, k, k, entry)
+    }
+
+    /// Greedy search over the Vamana graph keeping a search list of
+    /// `L = max(beam, k)` candidates, returning the best `k` of them.
+    ///
+    /// DiskANN searches with a list size `L >= k` and reports the top `k` from
+    /// it. A larger `L` explores more of the graph, so both the *reach* (which
+    /// true neighbours are found at all) and the *order* of the returned `k`
+    /// move towards exact. This index previously hard-wired `L = k`, which is
+    /// maximally myopic for small `k` — at `k = 1` it degenerates to pure
+    /// hill-climbing, and `VamanaConfig::search_list_size` was consulted only
+    /// for `with_capacity` hints, never as an actual query-time beam.
+    ///
+    /// `beam` is clamped UP to `k`, so it can only ever widen the search; the
+    /// `beam == k` call site ([`Self::greedy_search`]) behaves exactly as the
+    /// previous implementation did.
     ///
     /// Optimized to use zero-copy slice access for vector data.
     /// Holds both graph and vector storage locks for the duration of the search
     /// to avoid per-neighbor lock acquisition overhead.
-    fn greedy_search(&self, query: &[f32], k: usize, entry: u32) -> Result<Vec<SearchCandidate>> {
+    fn greedy_search_beam(
+        &self,
+        query: &[f32],
+        k: usize,
+        beam: usize,
+        entry: u32,
+    ) -> Result<Vec<SearchCandidate>> {
         let graph = self.graph.read();
         let storage = self.vectors.read(); // Hold lock for entire search (zero-copy access)
+
+        // Search list size. Never below k — a beam smaller than the requested
+        // result count could not return k results.
+        let list_size = beam.max(k);
 
         let search_cap = self.config.search_list_size;
         let mut visited = HashSet::with_capacity(search_cap);
@@ -627,7 +734,8 @@ impl VamanaIndex {
                 let dist = self.distance(query, neighbor_slice);
 
                 // Defensive: check if closer than worst in w, or w not yet full
-                let should_add = w.len() < k || w.peek().map(|p| dist < p.distance).unwrap_or(true);
+                let should_add =
+                    w.len() < list_size || w.peek().map(|p| dist < p.distance).unwrap_or(true);
                 if should_add {
                     candidates.push(Reverse(SearchCandidate {
                         id: neighbor_id,
@@ -639,19 +747,21 @@ impl VamanaIndex {
                         distance: dist,
                     });
 
-                    if w.len() > k {
+                    if w.len() > list_size {
                         w.pop();
                     }
                 }
             }
         }
 
-        // Extract results
+        // Extract results: the search list holds up to `list_size` candidates;
+        // report only the best `k`. A no-op when `list_size == k` (the default).
         let mut results = Vec::new();
         while let Some(candidate) = w.pop() {
             results.push(candidate);
         }
         results.reverse();
+        results.truncate(k);
 
         Ok(results)
     }
@@ -663,12 +773,28 @@ impl VamanaIndex {
     /// - Cached dist_ne (node to existing) to avoid O(n²) distance recomputation
     /// - Pre-loaded candidate vectors to minimize storage lookups
     fn robust_prune(&self, node_id: u32, candidates: &[SearchCandidate]) -> Result<Vec<u32>> {
+        let storage = self.vectors.read(); // Hold lock for entire prune operation
+        self.robust_prune_in(&storage, node_id, candidates)
+    }
+
+    /// α-RNG prune against an already-held storage reference.
+    ///
+    /// Split out from [`Self::robust_prune`] so callers that already hold the
+    /// vector-storage lock (the insert path holds `graph.write()` +
+    /// `vectors.read()` while fixing up reverse edges) can prune without
+    /// re-acquiring it — parking_lot RwLocks are not re-entrant, and a second
+    /// read acquisition with a writer waiting can deadlock.
+    fn robust_prune_in(
+        &self,
+        storage: &VectorStorage,
+        node_id: u32,
+        candidates: &[SearchCandidate],
+    ) -> Result<Vec<u32>> {
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
 
-        let storage = self.vectors.read(); // Hold lock for entire prune operation
-        let node_slice = Self::get_slice_from_storage(&storage, node_id)?;
+        let node_slice = Self::get_slice_from_storage(storage, node_id)?;
 
         // Sort candidates by distance (NaN values sort to end), tie-break by id for determinism
         let mut sorted_candidates = candidates.to_vec();
@@ -686,7 +812,7 @@ impl VamanaIndex {
                 if c.id == node_id {
                     None
                 } else {
-                    Self::get_slice_from_storage(&storage, c.id)
+                    Self::get_slice_from_storage(storage, c.id)
                         .ok()
                         .map(|slice| (c.id, slice.to_vec(), c.distance))
                 }
@@ -761,7 +887,27 @@ impl VamanaIndex {
     }
 
     /// Search for k nearest neighbors (excludes soft-deleted vectors)
+    ///
+    /// The search list size is taken from `SHODH_VAMANA_EF` (see
+    /// [`configured_search_ef`]); unset — the default — leaves the beam equal
+    /// to the requested candidate count, exactly as before.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(u32, f32)>> {
+        self.search_with_ef(query, k, configured_search_ef())
+    }
+
+    /// Search for k nearest neighbors with an explicit search list size.
+    ///
+    /// `ef` is the DiskANN search list size `L`. `None` (and any value below
+    /// the internal candidate count) leaves the beam at the candidate count,
+    /// which is the historical behaviour. A larger `ef` widens the beam without
+    /// changing how many results are returned, trading query time for a top-`k`
+    /// that is closer to exact in both membership and order.
+    pub fn search_with_ef(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: Option<usize>,
+    ) -> Result<Vec<(u32, f32)>> {
         // Check if index is empty
         if self.num_vectors.load(std::sync::atomic::Ordering::Acquire) == 0 {
             return Ok(Vec::new());
@@ -794,7 +940,9 @@ impl VamanaIndex {
             k
         };
 
-        let candidates = self.greedy_search(query, search_k, entry)?;
+        // The beam only ever widens: `greedy_search_beam` clamps it up to
+        // `search_k`, so `ef = None` reproduces the historical `L = k` search.
+        let candidates = self.greedy_search_beam(query, search_k, ef.unwrap_or(search_k), entry)?;
 
         // Filter out deleted vectors and take k results
         let results: Vec<(u32, f32)> = candidates
@@ -849,8 +997,32 @@ impl VamanaIndex {
         self.deleted_ids.write().clear();
     }
 
-    /// Add a single vector (incremental indexing) - OPTIMIZED
+    /// Add a single vector (incremental indexing).
+    ///
+    /// Neighbor selection policy comes from `SHODH_VAMANA_INSERT_PRUNE` (see
+    /// [`configured_insert_prune`]); unset — the default — keeps the historical
+    /// greedy top-k selection bit-for-bit.
     pub fn add_vector(&mut self, vector: Vec<f32>) -> Result<u32> {
+        self.add_vector_with_policy(vector, configured_insert_prune())
+    }
+
+    /// Add a single vector with an explicit neighbor-selection policy.
+    ///
+    /// `alpha_prune = false` is the historical incremental insert: the new
+    /// node's neighbors are the raw greedy top-`max_degree` (no α-RNG
+    /// diversification), and a neighbor whose reverse edge overflows
+    /// `max_degree` keeps its `max_degree` CLOSEST neighbors. Both choices
+    /// optimize insert speed and both destroy exactly the property greedy
+    /// search needs: neighbor lists degenerate into tight same-cluster cliques
+    /// with no long-range edges, so the search surface develops local minima
+    /// that no query-time beam can fully climb out of.
+    ///
+    /// `alpha_prune = true` is the DiskANN/FreshDiskANN insert: candidates come
+    /// from a `search_list_size`-wide greedy search, the new node's neighbors
+    /// are α-RNG pruned ([`Self::robust_prune`]), and overflowing reverse
+    /// neighborhoods are re-pruned with the same α-RNG rule over their true
+    /// distances — the construction `build()` uses, applied incrementally.
+    pub fn add_vector_with_policy(&mut self, vector: Vec<f32>, alpha_prune: bool) -> Result<u32> {
         let current_count = self.num_vectors.load(std::sync::atomic::Ordering::Acquire);
         let id = current_count as u32;
 
@@ -898,9 +1070,17 @@ impl VamanaIndex {
             return Ok(id);
         }
 
-        // OPTIMIZATION: Use simpler neighbor selection for incremental adds
-        let neighbors = if self.graph.read().is_empty() {
+        // Neighbor selection. Historical path (alpha_prune = false): raw greedy
+        // top-max_degree, no pruning. α-RNG path: candidates from a
+        // search_list_size-wide beam, then robust_prune — same rule as build().
+        let neighbors: Vec<u32> = if self.graph.read().is_empty() {
             Vec::new()
+        } else if alpha_prune {
+            let beam = self.config.search_list_size.max(self.config.max_degree);
+            let candidates = self.greedy_search_beam(&vector, beam, beam, *self.medoid.read())?;
+            // The new vector is already in storage at `id`, so robust_prune can
+            // read it; it is NOT yet in the graph, so the search cannot visit it.
+            self.robust_prune(id, &candidates)?
         } else {
             // Just find k-nearest neighbors without expensive pruning
             let candidates =
@@ -931,7 +1111,7 @@ impl VamanaIndex {
 
             graph[neighbor_id as usize].neighbors.push(id);
 
-            // Prune by distance when over max_degree
+            // Re-prune when the reverse edge overflows max_degree
             if graph[neighbor_id as usize].neighbors.len() > self.config.max_degree {
                 // Get neighbor's vector for distance calculations
                 if let Ok(neighbor_vec) = Self::get_vector_from_storage(&vectors, neighbor_id) {
@@ -950,12 +1130,31 @@ impl VamanaIndex {
                     neighbor_distances
                         .sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
 
-                    // Keep only max_degree closest neighbors
-                    graph[neighbor_id as usize].neighbors = neighbor_distances
-                        .into_iter()
-                        .take(self.config.max_degree)
-                        .map(|(id, _)| id)
-                        .collect();
+                    if alpha_prune {
+                        // α-RNG over the neighbor's TRUE distances. Distance-only
+                        // keep-closest (the historical path below) turns hub
+                        // neighborhoods into same-cluster cliques: every new
+                        // same-cluster insert evicts the long-range edge greedy
+                        // search navigates by. robust_prune keeps the closest
+                        // candidate AND the diverse ones — `robust_prune_in`
+                        // because the vectors lock is already held here.
+                        let candidates: Vec<SearchCandidate> = neighbor_distances
+                            .into_iter()
+                            .map(|(n_id, dist)| SearchCandidate {
+                                id: n_id,
+                                distance: dist,
+                            })
+                            .collect();
+                        graph[neighbor_id as usize].neighbors =
+                            self.robust_prune_in(&vectors, neighbor_id, &candidates)?;
+                    } else {
+                        // Historical: keep only max_degree closest neighbors
+                        graph[neighbor_id as usize].neighbors = neighbor_distances
+                            .into_iter()
+                            .take(self.config.max_degree)
+                            .map(|(id, _)| id)
+                            .collect();
+                    }
                 } else {
                     // Fallback: truncate if vector access fails
                     graph[neighbor_id as usize]
@@ -1800,5 +1999,600 @@ mod tests {
         // Should take no action on fresh index
         let result = index.auto_maintain().unwrap();
         assert_eq!(result, "no_action");
+    }
+
+    // ---------------------------------------------------------------------
+    // Query-time search list size (SHODH_VAMANA_EF)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_search_ef_rejects_non_positive_and_garbage() {
+        assert_eq!(parse_search_ef(None), None);
+        assert_eq!(parse_search_ef(Some("")), None);
+        assert_eq!(parse_search_ef(Some("   ")), None);
+        assert_eq!(parse_search_ef(Some("0")), None);
+        assert_eq!(parse_search_ef(Some("-4")), None);
+        assert_eq!(parse_search_ef(Some("abc")), None);
+        assert_eq!(parse_search_ef(Some("1.5")), None);
+        assert_eq!(parse_search_ef(Some("1")), Some(1));
+        assert_eq!(parse_search_ef(Some(" 256 ")), Some(256));
+    }
+
+    /// Deterministic index built only through `add_vector`, which is the path
+    /// production and the recall harness actually use (no RNG: the random graph
+    /// initialisation lives in `build()`, which this never calls).
+    fn deterministic_incremental_index(n: usize, dim: usize, max_degree: usize) -> VamanaIndex {
+        let mut index = VamanaIndex::new(VamanaConfig {
+            dimension: dim,
+            max_degree,
+            search_list_size: 100,
+            alpha: 1.2,
+            use_mmap: false,
+            ..Default::default()
+        })
+        .unwrap();
+
+        // Deterministic pseudo-random unit vectors: a fixed integer hash, so the
+        // fixture is identical on every machine and every run.
+        for i in 0..n {
+            let mut v = Vec::with_capacity(dim);
+            for d in 0..dim {
+                let h = ((i as u64).wrapping_mul(6_364_136_223_846_793_005)
+                    ^ (d as u64).wrapping_mul(1_442_695_040_888_963_407))
+                .wrapping_mul(2_862_933_555_777_941_757);
+                // 31 random bits mapped to [-1, 1)
+                v.push(((h >> 33) as f32 / (1u64 << 31) as f32) * 2.0 - 1.0);
+            }
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            for x in &mut v {
+                *x /= norm;
+            }
+            index.add_vector(v).unwrap();
+        }
+        index
+    }
+
+    #[test]
+    fn test_search_ef_none_matches_beam_equal_k() {
+        let index = deterministic_incremental_index(300, 16, 4);
+        let query = index.get_vector(7).unwrap();
+
+        // `ef = None` and any `ef <= k` must both clamp to the k-wide beam,
+        // reproducing the historical search exactly.
+        let base = index.search_with_ef(&query, 10, None).unwrap();
+        let clamped = index.search_with_ef(&query, 10, Some(1)).unwrap();
+        let equal = index.search_with_ef(&query, 10, Some(10)).unwrap();
+
+        assert_eq!(base, clamped, "ef below k must clamp up to k");
+        assert_eq!(base, equal, "ef == k must be the historical behaviour");
+        assert_eq!(base.len(), 10);
+    }
+
+    #[test]
+    fn test_search_ef_returns_exactly_k_in_ascending_distance() {
+        let index = deterministic_incremental_index(300, 16, 4);
+        let query = index.get_vector(11).unwrap();
+
+        let wide = index.search_with_ef(&query, 10, Some(200)).unwrap();
+        assert_eq!(
+            wide.len(),
+            10,
+            "a wider beam must not change how many results are returned"
+        );
+
+        // Exercise the inner contract directly: `search_with_ef` also applies
+        // its own `.take(k)` when filtering soft-deleted ids, so going through
+        // the public path alone cannot tell whether `greedy_search_beam` honours
+        // "search with L, report k" or leaks the whole search list upward.
+        let entry = *index.medoid.read();
+        let raw = index.greedy_search_beam(&query, 10, 200, entry).unwrap();
+        assert_eq!(
+            raw.len(),
+            10,
+            "greedy_search_beam must report k, not the full search list"
+        );
+        for pair in wide.windows(2) {
+            assert!(
+                pair[0].1 <= pair[1].1,
+                "results must stay sorted by ascending distance: {:?}",
+                wide
+            );
+        }
+    }
+
+    #[test]
+    fn test_search_ef_widens_beam_and_recovers_true_neighbors() {
+        // Production `max_degree` is 32; the harness index is built purely by
+        // `add_vector`, so this fixture is the same regime the eval runs in.
+        let index = deterministic_incremental_index(3000, 384, 32);
+
+        let k = 10;
+        let mut base_hits = 0usize;
+        let mut wide_hits = 0usize;
+        let mut total = 0usize;
+
+        for q in [3u32, 29, 71, 130, 244, 301, 388, 415, 502, 577] {
+            let query = index.get_vector(q).unwrap();
+            let exact: HashSet<u32> = index
+                .brute_force_search(&query, k)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+
+            let base: HashSet<u32> = index
+                .search_with_ef(&query, k, None)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            let wide: HashSet<u32> = index
+                .search_with_ef(&query, k, Some(256))
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+
+            let base_q = base.intersection(&exact).count();
+            let wide_q = wide.intersection(&exact).count();
+
+            // Widening the search list can only ever ADD explored nodes, so it
+            // must never lose a true neighbour the narrow beam already found.
+            assert!(
+                wide_q >= base_q,
+                "query {q}: widening the beam lost ground ({base_q} -> {wide_q})"
+            );
+
+            base_hits += base_q;
+            wide_hits += wide_q;
+            total += exact.len();
+        }
+
+        // The default beam must be genuinely lossy on this fixture — if it were
+        // not, the test could not tell a working `ef` from an ignored one.
+        assert!(
+            base_hits < total,
+            "fixture must be lossy at beam == k, got {base_hits}/{total}"
+        );
+        // ...and the wider beam must strictly recover some of that loss.
+        assert!(
+            wide_hits > base_hits,
+            "ef=256 must beat beam==k: {base_hits}/{total} vs {wide_hits}/{total}"
+        );
+        eprintln!("vamana ef ablation: beam=k {base_hits}/{total}, ef=256 {wide_hits}/{total}");
+    }
+
+    // ---------------------------------------------------------------------
+    // Insert-time α-RNG pruning (SHODH_VAMANA_INSERT_PRUNE)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_insert_prune_is_opt_out_and_fails_safe() {
+        // α-RNG construction is the default; only an explicit 0/false disables
+        // it. A typo must fail SAFE, i.e. leave the index navigable.
+        assert!(parse_insert_prune(None), "unset must mean α-RNG ON");
+        assert!(parse_insert_prune(Some("")));
+        assert!(parse_insert_prune(Some("1")));
+        assert!(parse_insert_prune(Some("true")));
+        assert!(parse_insert_prune(Some("yes")));
+        assert!(parse_insert_prune(Some("2")));
+        assert!(
+            parse_insert_prune(Some("flase")),
+            "a typo must not disable it"
+        );
+        assert!(!parse_insert_prune(Some("0")));
+        assert!(!parse_insert_prune(Some("false")));
+        assert!(!parse_insert_prune(Some("FALSE")));
+        assert!(!parse_insert_prune(Some(" false ")));
+    }
+
+    /// The α-RNG rule must keep the closest candidate AND the geometrically
+    /// diverse one, dropping a near-duplicate of an already-kept neighbor —
+    /// keep-closest would keep the duplicate and drop the diverse candidate.
+    #[test]
+    fn test_robust_prune_keeps_diverse_over_near_duplicate() {
+        let mut index = VamanaIndex::new(VamanaConfig {
+            dimension: 4,
+            max_degree: 2,
+            search_list_size: 10,
+            alpha: 1.2,
+            use_mmap: false,
+            ..Default::default()
+        })
+        .unwrap();
+
+        // All unit vectors; NormalizedDotProduct distance = -dot.
+        let node = vec![1.0, 0.0, 0.0, 0.0]; // id 0: the node being pruned
+        let close_a = vec![0.992, 0.126_231_93, 0.0, 0.0]; // id 1: closest
+        let close_b = vec![0.990, 0.141_067_36, 0.0, 0.0]; // id 2: near-duplicate of id 1
+        let diverse = vec![0.0, 1.0, 0.0, 0.0]; // id 3: far but diverse
+        for v in [&node, &close_a, &close_b, &diverse] {
+            let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            assert!((n - 1.0).abs() < 1e-3, "fixture vectors must be unit norm");
+        }
+        {
+            let mut storage = index.vectors.write();
+            *storage = VectorStorage::Memory(vec![node.clone(), close_a, close_b, diverse]);
+        }
+        index
+            .num_vectors
+            .store(4, std::sync::atomic::Ordering::Release);
+
+        let dist = |a: &[f32], b: &[f32]| -a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+        let storage = index.vectors.read();
+        let candidates: Vec<SearchCandidate> = (1..4)
+            .map(|id| SearchCandidate {
+                id,
+                distance: dist(
+                    &node,
+                    &VamanaIndex::get_vector_from_storage(&storage, id).unwrap(),
+                ),
+            })
+            .collect();
+
+        let pruned = index.robust_prune_in(&storage, 0, &candidates).unwrap();
+        assert_eq!(
+            pruned,
+            vec![1, 3],
+            "α-RNG must keep the closest (1) and the diverse (3) candidates and \
+             drop the near-duplicate (2); keep-closest would produce [1, 2]"
+        );
+    }
+
+    /// End-to-end through `add_vector_with_policy`: when a hub's reverse edges
+    /// overflow max_degree, the α path must retain its long-range (diverse)
+    /// edge while the historical path evicts it for a same-cluster duplicate.
+    /// This is exactly the structural difference that costs task recall: greedy
+    /// search navigates BY those long-range edges.
+    #[test]
+    fn test_insert_prune_reverse_edges_keep_long_range_link() {
+        let build = |alpha_prune: bool| -> VamanaIndex {
+            let mut index = VamanaIndex::new(VamanaConfig {
+                dimension: 4,
+                max_degree: 2,
+                search_list_size: 10,
+                alpha: 1.2,
+                use_mmap: false,
+                ..Default::default()
+            })
+            .unwrap();
+            let vectors = [
+                vec![1.0, 0.0, 0.0, 0.0],            // 0: hub H (medoid/entry)
+                vec![0.0, 1.0, 0.0, 0.0],            // 1: far diverse F
+                vec![0.992, 0.126_231_93, 0.0, 0.0], // 2: close c1
+                vec![0.990, 0.141_067_36, 0.0, 0.0], // 3: close c2 ≈ c1
+            ];
+            for v in vectors {
+                index.add_vector_with_policy(v, alpha_prune).unwrap();
+            }
+            index
+        };
+
+        let alpha = build(true);
+        let alpha_hub = alpha.graph.read()[0].neighbors.clone();
+        assert!(
+            alpha_hub.contains(&1),
+            "α-RNG reverse pruning must keep the hub's long-range edge to the \
+             diverse node, got {alpha_hub:?}"
+        );
+        assert!(
+            alpha_hub.len() <= 2,
+            "reverse edges must stay within max_degree, got {alpha_hub:?}"
+        );
+
+        let greedy = build(false);
+        let greedy_hub = greedy.graph.read()[0].neighbors.clone();
+        assert!(
+            !greedy_hub.contains(&1),
+            "fixture must be discriminating: the historical keep-closest path \
+             evicts the long-range edge (got {greedy_hub:?}); if it no longer \
+             does, this test cannot tell the two policies apart"
+        );
+    }
+
+    /// Front half of the insert policy: the NEW node's own neighbor list must
+    /// be α-diversified, not the raw greedy top-k. The fixture is built so the
+    /// greedy graph has already lost its long-range edge by the fifth insert —
+    /// the greedy candidate search cannot even REACH the diverse node — while
+    /// the α graph both reaches it and selects it over a redundant
+    /// near-duplicate. Catches the mutation where `add_vector_with_policy`
+    /// α-prunes reverse edges but silently keeps greedy selection for the new
+    /// node itself (the reverse-edge test alone cannot see that break).
+    #[test]
+    fn test_insert_prune_diversifies_new_node_neighbors() {
+        let build = |alpha_prune: bool| -> VamanaIndex {
+            let mut index = VamanaIndex::new(VamanaConfig {
+                dimension: 4,
+                max_degree: 2,
+                search_list_size: 10,
+                alpha: 1.2,
+                use_mmap: false,
+                ..Default::default()
+            })
+            .unwrap();
+            let vectors = [
+                vec![1.0, 0.0, 0.0, 0.0],            // 0: hub H (medoid/entry)
+                vec![0.0, 1.0, 0.0, 0.0],            // 1: far diverse F
+                vec![0.992, 0.126_231_93, 0.0, 0.0], // 2: close c1
+                vec![0.990, 0.141_067_36, 0.0, 0.0], // 3: close c2 ≈ c1
+                vec![0.924, -0.382_499_5, 0.0, 0.0], // 4: X, outside the c-cluster
+            ];
+            for v in vectors {
+                index.add_vector_with_policy(v, alpha_prune).unwrap();
+            }
+            index
+        };
+
+        let alpha = build(true);
+        let alpha_new = alpha.graph.read()[4].neighbors.clone();
+        assert!(
+            alpha_new.contains(&1),
+            "α selection for the new node must keep the diverse far node, got {alpha_new:?}"
+        );
+        assert!(
+            !alpha_new.contains(&2) && !alpha_new.contains(&3),
+            "α selection must drop cluster members redundant with the hub, got {alpha_new:?}"
+        );
+
+        let greedy = build(false);
+        let greedy_new = greedy.graph.read()[4].neighbors.clone();
+        assert!(
+            !greedy_new.contains(&1),
+            "fixture must be discriminating: greedy selection cannot reach or \
+             keep the diverse node (got {greedy_new:?}); if it now does, this \
+             test cannot tell the two policies apart"
+        );
+    }
+
+    /// Deterministic CLUSTERED fixture built only through the incremental
+    /// insert path. Uniform-random unit vectors are the easy case for a greedy
+    /// kNN graph (near-orthogonal, no local minima); real MiniLM embeddings of
+    /// a conversational corpus are tightly clustered near-duplicates, which is
+    /// where greedy top-k neighbor lists degenerate into same-cluster cliques.
+    fn clustered_incremental_index(
+        n: usize,
+        dim: usize,
+        clusters: usize,
+        max_degree: usize,
+        alpha_prune: bool,
+    ) -> VamanaIndex {
+        let mut index = VamanaIndex::new(VamanaConfig {
+            dimension: dim,
+            max_degree,
+            search_list_size: 100,
+            alpha: 1.2,
+            use_mmap: false,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let h = |a: u64, b: u64| -> f32 {
+            let x = (a.wrapping_mul(6_364_136_223_846_793_005)
+                ^ b.wrapping_mul(1_442_695_040_888_963_407))
+            .wrapping_mul(2_862_933_555_777_941_757);
+            ((x >> 33) as f32 / (1u64 << 31) as f32) * 2.0 - 1.0
+        };
+
+        for i in 0..n {
+            let c = (i % clusters) as u64;
+            let mut v = Vec::with_capacity(dim);
+            for d in 0..dim {
+                // Cluster center + small within-cluster noise: after
+                // normalization neighbors within a cluster have cosine ≈ 0.9+,
+                // matching embedded near-duplicate conversation turns.
+                let center = h(c.wrapping_add(1_000_003), d as u64);
+                let noise = h(i as u64, d.wrapping_add(7_777_777) as u64);
+                v.push(center + 0.15 * noise);
+            }
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            for x in &mut v {
+                *x /= norm;
+            }
+            index.add_vector_with_policy(v, alpha_prune).unwrap();
+        }
+        index
+    }
+
+    /// The shipped index must be NAVIGABLE, not merely populated.
+    ///
+    /// This is the guard that did not exist when `add_vector` was allowed to skip
+    /// the α-RNG rule "for speed". Nothing failed when that landed. The index kept
+    /// accepting vectors, kept returning results, and kept passing every test —
+    /// it had simply stopped being a Vamana graph. Greedy search could not reach
+    /// over half of the index's own true neighbours, and no beam width recovers a
+    /// neighbour the graph has no edge to, which is why widening `ef` only ever
+    /// bought back a third of the loss.
+    ///
+    /// The comparative test above proves α-RNG beats greedy. That is not the same
+    /// guarantee: two equally broken constructions would still satisfy it. This
+    /// one pins an absolute floor on the DEFAULT policy, so a future trade of
+    /// construction quality for insert latency fails here rather than showing up
+    /// months later as an unexplained retrieval deficit.
+    #[test]
+    fn shipped_default_index_is_navigable_on_clustered_data() {
+        // α-RNG measures 99.9% on this fixture and greedy 45.6%; 0.90 sits far
+        // from both, so the test discriminates the construction rule rather than
+        // tracking fixture noise.
+        const SELF_RECALL_FLOOR: f64 = 0.90;
+
+        let n = 1200;
+        let dim = 384;
+        let clusters = 40;
+        let k = 120;
+
+        // `parse_insert_prune(None)` is the SHIPPED default with the variable
+        // unset — deliberately not `configured_insert_prune()`, whose OnceLock
+        // can be poisoned by whichever test in this binary reads the env first.
+        let default_policy = parse_insert_prune(None);
+        let index = clustered_incremental_index(n, dim, clusters, 32, default_policy);
+
+        let queries: Vec<u32> = (0..40).map(|i| (i * 29 + 3) % n as u32).collect();
+        let mut hits = 0usize;
+        let mut total = 0usize;
+        for &q in &queries {
+            let query = index.get_vector(q).unwrap();
+            let exact: std::collections::HashSet<u32> = index
+                .brute_force_search(&query, k)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            total += exact.len();
+            hits += index
+                .search_with_ef(&query, k, None)
+                .unwrap()
+                .into_iter()
+                .filter(|(id, _)| exact.contains(id))
+                .count();
+        }
+
+        let ratio = hits as f64 / total as f64;
+        eprintln!(
+            "shipped default (insert_prune={default_policy}): index self-recall \
+             {hits}/{total} = {ratio:.4} at beam=k"
+        );
+        assert!(
+            ratio >= SELF_RECALL_FLOOR,
+            "the shipped index cannot navigate to its own true neighbours: \
+             {hits}/{total} = {ratio:.4} at beam=k, floor {SELF_RECALL_FLOOR}. \
+             The construction rule has regressed — greedy top-k inserts build a \
+             kNN graph, not a Vamana graph."
+        );
+    }
+    /// Root-cause fixture for the ANN-vs-exact gap at the pipeline's real
+    /// operating point (k = 120, max_degree = 32, incremental inserts only):
+    /// on clustered vectors the greedy-insert graph must be measurably lossy
+    /// at beam = k, and α-RNG insert pruning must recover part of that loss
+    /// with NO query-time change. If the α graph stopped beating the greedy
+    /// graph here, the insert-prune path is broken (e.g. the policy flag is
+    /// being ignored) — that is the mutation this test is built to catch.
+    #[test]
+    fn test_insert_prune_recovers_index_recall_on_clustered_fixture() {
+        let n = 1200;
+        let dim = 384;
+        let clusters = 40;
+        let k = 120;
+
+        let greedy = clustered_incremental_index(n, dim, clusters, 32, false);
+        let alpha = clustered_incremental_index(n, dim, clusters, 32, true);
+
+        let queries: Vec<u32> = (0..40).map(|i| (i * 29 + 3) % n as u32).collect();
+        let mut greedy_hits = 0usize;
+        let mut alpha_hits = 0usize;
+        let mut greedy_hits_ef = 0usize;
+        let mut alpha_hits_ef = 0usize;
+        let mut total = 0usize;
+
+        for &q in &queries {
+            let query = greedy.get_vector(q).unwrap();
+            let exact: HashSet<u32> = greedy
+                .brute_force_search(&query, k)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            total += exact.len();
+
+            let hits = |index: &VamanaIndex, ef: Option<usize>| -> usize {
+                index
+                    .search_with_ef(&query, k, ef)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|(id, _)| exact.contains(id))
+                    .count()
+            };
+            greedy_hits += hits(&greedy, None);
+            alpha_hits += hits(&alpha, None);
+            greedy_hits_ef += hits(&greedy, Some(512));
+            alpha_hits_ef += hits(&alpha, Some(512));
+        }
+
+        eprintln!(
+            "clustered fixture (n={n}, dim={dim}, clusters={clusters}, k={k}): \
+             greedy beam=k {greedy_hits}/{total}, α beam=k {alpha_hits}/{total}, \
+             greedy ef=512 {greedy_hits_ef}/{total}, α ef=512 {alpha_hits_ef}/{total}"
+        );
+
+        // The greedy-insert graph must be genuinely lossy on clustered data at
+        // the production operating point, or this fixture can't discriminate.
+        assert!(
+            greedy_hits < total,
+            "fixture must be lossy for greedy inserts at beam == k, got {greedy_hits}/{total}"
+        );
+        // α-RNG insert pruning must strictly improve index recall at the SAME
+        // query cost (beam = k). This is the root-cause claim: the loss is
+        // graph STRUCTURE, not just beam width.
+        assert!(
+            alpha_hits > greedy_hits,
+            "α-RNG insert pruning must beat greedy inserts at beam == k: \
+             {greedy_hits}/{total} vs {alpha_hits}/{total}"
+        );
+        // Widening the beam must not erase the structural advantage entirely
+        // in the wrong direction: the α graph may not do WORSE than the greedy
+        // graph when both search at ef=512.
+        assert!(
+            alpha_hits_ef >= greedy_hits_ef,
+            "α graph must not lose to greedy graph at ef=512: \
+             {greedy_hits_ef}/{total} vs {alpha_hits_ef}/{total}"
+        );
+    }
+
+    /// `add_vector` (env-driven) and `add_vector_with_policy(_, false)` must
+    /// build the identical graph when the flag is unset — the default path is
+    /// bit-identical to the pre-flag implementation.
+    #[test]
+    fn test_add_vector_default_matches_policy_true() {
+        // Guard: only meaningful when the env flag is unset (the CI/test
+        // default). If someone exports SHODH_VAMANA_INSERT_PRUNE=0 globally,
+        // failing loudly here is correct — the "default" path would no longer
+        // be the shipped default.
+        assert!(
+            configured_insert_prune(),
+            "{INSERT_PRUNE_ENV} must be unset when running the test suite"
+        );
+
+        let make = |policy: Option<bool>| -> Vec<Vec<u32>> {
+            let mut index = VamanaIndex::new(VamanaConfig {
+                dimension: 16,
+                max_degree: 4,
+                search_list_size: 20,
+                alpha: 1.2,
+                use_mmap: false,
+                ..Default::default()
+            })
+            .unwrap();
+            for i in 0..120usize {
+                let mut v: Vec<f32> = (0..16)
+                    .map(|d| {
+                        let x = ((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                            ^ (d as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9))
+                        .wrapping_mul(0x94D0_49BB_1331_11EB);
+                        ((x >> 33) as f32 / (1u64 << 31) as f32) * 2.0 - 1.0
+                    })
+                    .collect();
+                let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                for x in &mut v {
+                    *x /= norm;
+                }
+                match policy {
+                    Some(p) => index.add_vector_with_policy(v, p).unwrap(),
+                    None => index.add_vector(v).unwrap(),
+                };
+            }
+            let graph = index.graph.read();
+            graph.iter().map(|node| node.neighbors.clone()).collect()
+        };
+
+        assert_eq!(
+            make(None),
+            make(Some(true)),
+            "env-default add_vector must match the explicit historical policy"
+        );
+        assert_ne!(
+            make(Some(false)),
+            make(Some(true)),
+            "the two policies must build different graphs on this fixture — if \
+             they don't, the α path is silently not running"
+        );
     }
 }

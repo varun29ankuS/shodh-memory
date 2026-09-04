@@ -1,0 +1,18 @@
+{
+  "servers": [
+    {
+      "name": "shodh",
+      "command": "node",
+      "args": ["../mcp-server/dist/index.js"],
+      "env": {
+        "SHODH_API_URL": "http://127.0.0.1:3030",
+        "SHODH_API_KEY": "${SHODH_DEV_API_KEY}"
+      }
+    },
+    {
+      "name": "corpus",
+      "command": "node",
+      "args": ["../connectors/corpus/index.js", "/path/to/the/documents"]
+    }
+  ]
+}
