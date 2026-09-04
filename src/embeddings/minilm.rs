@@ -80,18 +80,18 @@ impl LazyModel {
         let builder = Session::builder()
             .context("Failed to create session builder")?
             .with_intra_threads(num_threads)
-            .context("Failed to set intra thread count")?
+            .map_err(|e| anyhow::anyhow!("Failed to set intra thread count: {e}"))?
             .with_inter_threads(1)
-            .context("Failed to set inter thread count")?;
+            .map_err(|e| anyhow::anyhow!("Failed to set inter thread count: {e}"))?;
 
         // Disable thread pool spinning to prevent Eigen spin-to-block deadlock
         // on macOS ARM64 heterogeneous cores (P-core/E-core architecture).
         // See: microsoft/onnxruntime#10270, pykeio/ort#516
-        let builder = builder
+        let mut builder = builder
             .with_intra_op_spinning(false)
-            .context("Failed to disable intra-op spinning")?
+            .map_err(|e| anyhow::anyhow!("Failed to disable intra-op spinning: {e}"))?
             .with_inter_op_spinning(false)
-            .context("Failed to disable inter-op spinning")?;
+            .map_err(|e| anyhow::anyhow!("Failed to disable inter-op spinning: {e}"))?;
 
         let session = builder
             .commit_from_file(&config.model_path)

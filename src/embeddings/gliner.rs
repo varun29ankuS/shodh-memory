@@ -172,17 +172,17 @@ impl LazyGlinerModel {
         let builder = Session::builder()
             .context("Failed to create GLiNER session builder")?
             .with_intra_threads(num_threads)
-            .context("Failed to set GLiNER intra thread count")?
+            .map_err(|e| anyhow::anyhow!("Failed to set GLiNER intra thread count: {e}"))?
             .with_inter_threads(1)
-            .context("Failed to set GLiNER inter thread count")?;
+            .map_err(|e| anyhow::anyhow!("Failed to set GLiNER inter thread count: {e}"))?;
 
         // Disable thread pool spinning (Eigen spin-to-block deadlock on macOS
         // ARM64 heterogeneous cores). See microsoft/onnxruntime#10270, pykeio/ort#516.
-        let builder = builder
+        let mut builder = builder
             .with_intra_op_spinning(false)
-            .context("Failed to disable GLiNER intra-op spinning")?
+            .map_err(|e| anyhow::anyhow!("Failed to disable GLiNER intra-op spinning: {e}"))?
             .with_inter_op_spinning(false)
-            .context("Failed to disable GLiNER inter-op spinning")?;
+            .map_err(|e| anyhow::anyhow!("Failed to disable GLiNER inter-op spinning: {e}"))?;
 
         let session = builder
             .commit_from_file(&config.model_path)
