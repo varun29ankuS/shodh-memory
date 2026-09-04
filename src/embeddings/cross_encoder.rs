@@ -140,7 +140,10 @@ impl CrossEncoder {
             .commit_from_file(&model_path)
             .context("cross-encoder: load onnx")?;
 
-        let has_token_type_ids = session.inputs().iter().any(|i| i.name() == "token_type_ids");
+        let has_token_type_ids = session
+            .inputs()
+            .iter()
+            .any(|i| i.name() == "token_type_ids");
 
         let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow::anyhow!("cross-encoder: load tokenizer: {e}"))?;
