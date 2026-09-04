@@ -321,6 +321,25 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
     // ------------------------------------------------------------------
     let mut failures: Vec<Failure> = passes[0].failures.clone();
     if repeats > 1 {
+        // Compare the BUILT GRAPHS first. Every repeat ingests the same corpus
+        // into its own fresh storage directory, so a rank-list divergence can
+        // just as easily be two different graphs as an unstable sort. Reporting
+        // the rankings alone hid that distinction for weeks and produced two
+        // fixes aimed at query time for a defect that may be at ingest.
+        //
+        // Content-addressed and uuid-free: ids are re-rolled every ingest by
+        // design, so only names and typed relations are compared.
+        for (i, pass) in passes.iter().enumerate().skip(1) {
+            if let Some(delta) = passes[0].graph.diff(&pass.graph) {
+                failures.push(Failure {
+                    kind: "infrastructure".to_string(),
+                    detail: format!(
+                        "non-determinism: INGEST built a different graph in repeat {i} than in                          repeat 0 — {delta}. Rank divergences below are a CONSEQUENCE of this,                          not an unstable sort."
+                    ),
+                });
+            }
+        }
+
         for mode in &layer_modes {
             let ref_pass = passes[0]
                 .per_mode
@@ -600,6 +619,110 @@ struct ModePassResult {
 struct OnePassResult {
     per_mode: BTreeMap<LayerMode, ModePassResult>,
     failures: Vec<Failure>,
+    /// Content-addressed description of the graph this pass built. Empty
+    /// unless `SHODH_GRAPH_FINGERPRINT=1`.
+    graph: GraphFingerprint,
+}
+
+/// A CONTENT-ADDRESSED description of a built graph, for comparing two ingests.
+///
+/// Deliberately carries no UUIDs. Entity ids are re-rolled on every ingest by
+/// design, so a uuid-bearing fingerprint would report a difference on every
+/// run and prove nothing. Two ingests of one corpus should agree on the NAMES
+/// and the typed relations between them; anything else is the defect.
+///
+/// Exists because the L1 determinism guard compares two SEPARATELY BUILT
+/// graphs -- `run_suite` gives every repeat its own storage directory -- and
+/// that was read for weeks as a query-time float-ordering bug. Measured
+/// 2026-09-03: the diverging scores differ by 0.8% to 68%, never at ULP scale,
+/// while every query-time source (ONNX threads, rayon, the scoring clock,
+/// recall-path writes) is already pinned. The rank lists are a downstream
+/// shadow; the graphs are where to look.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct GraphFingerprint {
+    /// `name|Label,Label`, sorted.
+    pub entities: Vec<String>,
+    /// `from|Relation|to`, sorted, de-duplicated by edge uuid first.
+    pub edges: Vec<String>,
+}
+
+impl GraphFingerprint {
+    /// Human-readable symmetric difference, or `None` when the two agree.
+    fn diff(&self, other: &Self) -> Option<String> {
+        let sample = |a: &[String], b: &[String]| -> Vec<String> {
+            let bset: std::collections::HashSet<&str> = b.iter().map(|s| s.as_str()).collect();
+            a.iter()
+                .filter(|s| !bset.contains(s.as_str()))
+                .take(4)
+                .cloned()
+                .collect()
+        };
+        if self.entities == other.entities && self.edges == other.edges {
+            return None;
+        }
+        let only_a_e = sample(&self.entities, &other.entities);
+        let only_b_e = sample(&other.entities, &self.entities);
+        let only_a_r = sample(&self.edges, &other.edges);
+        let only_b_r = sample(&other.edges, &self.edges);
+        Some(format!(
+            "entities {} vs {} (only in r0: {:?}; only in this repeat: {:?});              edges {} vs {} (only in r0: {:?}; only in this repeat: {:?})",
+            self.entities.len(),
+            other.entities.len(),
+            only_a_e,
+            only_b_e,
+            self.edges.len(),
+            other.edges.len(),
+            only_a_r,
+            only_b_r,
+        ))
+    }
+}
+
+/// Build the fingerprint. Off unless `SHODH_GRAPH_FINGERPRINT=1`, because it
+/// walks every entity and its edges.
+fn fingerprint_graph(manager: &MultiUserMemoryManager) -> GraphFingerprint {
+    if !std::env::var("SHODH_GRAPH_FINGERPRINT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return GraphFingerprint::default();
+    }
+    let Ok(graph) = manager.get_user_graph(EVAL_USER) else {
+        return GraphFingerprint::default();
+    };
+    let g = graph.read();
+    let Ok(all) = g.get_all_entities() else {
+        return GraphFingerprint::default();
+    };
+    let name_of: HashMap<Uuid, String> = all.iter().map(|e| (e.uuid, e.name.clone())).collect();
+
+    let mut entities: Vec<String> = all
+        .iter()
+        .map(|e| {
+            let mut labels: Vec<String> = e.labels.iter().map(|l| format!("{l:?}")).collect();
+            labels.sort();
+            format!("{}|{}", e.name, labels.join(","))
+        })
+        .collect();
+    entities.sort();
+    entities.dedup();
+
+    let mut seen: std::collections::HashSet<Uuid> = Default::default();
+    let mut edges: Vec<String> = Vec::new();
+    for e in &all {
+        for edge in g.get_entity_relationships(&e.uuid).unwrap_or_default() {
+            if !seen.insert(edge.uuid) {
+                continue;
+            }
+            let from = name_of.get(&edge.from_entity).cloned().unwrap_or_default();
+            let to = name_of.get(&edge.to_entity).cloned().unwrap_or_default();
+            edges.push(format!("{from}|{:?}|{to}", edge.relation_type));
+        }
+    }
+    edges.sort();
+    edges.dedup();
+
+    GraphFingerprint { entities, edges }
 }
 
 /// Run a single ingest pass, then run the case loop once per `LayerMode`.
@@ -997,7 +1120,11 @@ fn run_one_pass(
         }
     }
 
-    Ok(OnePassResult { per_mode, failures })
+    Ok(OnePassResult {
+        per_mode,
+        failures,
+        graph: fingerprint_graph(&manager),
+    })
 }
 
 /// Pin parallel runtimes to a single thread for the harness process.
@@ -3416,6 +3543,55 @@ mod tests {
             "HARNESS-LEVEL ZERO REPRODUCED LOCALLY: full-layer root-cause \
              r@10 = 0 — the zero is in the harness path, not the CI environment"
         );
+    }
+
+    #[test]
+    fn identical_graphs_report_no_difference() {
+        // The failure mode that would make this instrument worse than nothing:
+        // reporting a difference on every run (uuid churn, unsorted vectors)
+        // would train a reader to ignore it, exactly as the rank-list report
+        // was ignored. Two ingests that agree must be SILENT.
+        let g = GraphFingerprint {
+            entities: vec!["Andrew|Person".into(), "Maria|Person".into()],
+            edges: vec!["Andrew|Knows|Maria".into()],
+        };
+        assert!(g.diff(&g.clone()).is_none());
+    }
+
+    #[test]
+    fn a_missing_edge_is_named_not_just_counted() {
+        // A count-only report ("edges 5 vs 4") says a graph differs without
+        // saying how, which is the state this instrument exists to end.
+        let a = GraphFingerprint {
+            entities: vec!["Andrew|Person".into()],
+            edges: vec!["Andrew|Knows|Maria".into(), "Andrew|WorksAt|Acme".into()],
+        };
+        let b = GraphFingerprint {
+            entities: vec!["Andrew|Person".into()],
+            edges: vec!["Andrew|Knows|Maria".into()],
+        };
+        let delta = a.diff(&b).expect("a dropped edge must be reported");
+        assert!(
+            delta.contains("Andrew|WorksAt|Acme"),
+            "the report must NAME the missing edge, got: {delta}"
+        );
+        assert!(delta.contains("edges 2 vs 1"), "and the counts: {delta}");
+    }
+
+    #[test]
+    fn a_relabelled_entity_is_a_difference() {
+        // The speaker-authority work turns Concept into Person for the same
+        // name. If the fingerprint keyed on name alone, that whole class of
+        // ingest change would be invisible here.
+        let a = GraphFingerprint {
+            entities: vec!["Andrew|Person".into()],
+            edges: vec![],
+        };
+        let b = GraphFingerprint {
+            entities: vec!["Andrew|Concept".into()],
+            edges: vec![],
+        };
+        assert!(a.diff(&b).is_some(), "a label change must register");
     }
 
     #[test]
