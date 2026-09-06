@@ -87,6 +87,71 @@ jobs:
           [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
           ls -la "$MODEL_DIR"
 
+      # WITHOUT THIS THE WHOLE SUITE MEASURES A DIFFERENT EXTRACTOR. The neural
+      # recogniser is GLiNER; with no model the pipeline degrades to the
+      # rule-based fallback, which decides which entities exist, which decides
+      # which edges exist. This workflow never fetched it, so every LongMemEval
+      # number produced here before today has that provenance question against
+      # it -- including the 0.7293 of 2026-08-20. `guard_ner_backend` now
+      # hard-fails on the fallback rather than reporting a number from it.
+      - name: Cache GLiNER typer assets
+        id: gliner-cache
+        uses: actions/cache@v6
+        with:
+          path: models/gliner-bi-edge
+          key: gliner-bi-edge-onnx-v1
+
+      - name: Fetch GLiNER typer assets
+        if: steps.gliner-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p models/gliner-bi-edge
+          gh release download gliner-bi-edge-onnx-v1 --repo "$GITHUB_REPOSITORY" --dir models/gliner-bi-edge
+
+      - name: Verify GLiNER assets (hard gate)
+        run: |
+          GL="${{ github.workspace }}/models/gliner-bi-edge"
+          test -s "$GL/model.onnx" || { echo "::error::GLiNER model missing - refusing to measure fallback NER"; exit 1; }
+          test -s "$GL/tokenizer.json" || { echo "::error::GLiNER tokenizer missing"; exit 1; }
+          test -s "$GL/label_embeddings.bin" || { echo "::error::GLiNER label embeddings missing"; exit 1; }
+          echo "SHODH_GLINER_MODEL_PATH=$GL" >> "$GITHUB_ENV"
+
+      # Only when an arm asks for the reranker. A CE arm without the CE model
+      # would otherwise fall back to the unreranked ranking and report a zero
+      # that reads as "the reranker does nothing"; guard_cross_encoder() fails
+      # the harness instead, and this step is what stops it being reached.
+      - name: Cache cross-encoder assets
+        if: contains(github.event.inputs.extra_env, 'SHODH_CE_RERANK=1')
+        id: ce-cache
+        uses: actions/cache@v6
+        with:
+          path: models/cross-encoder-ms-marco-minilm-l6
+          key: ce-ms-marco-minilm-l6-233902d2-v1
+
+      - name: Fetch cross-encoder assets
+        if: contains(github.event.inputs.extra_env, 'SHODH_CE_RERANK=1') && steps.ce-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          CE="${{ github.workspace }}/models/cross-encoder-ms-marco-minilm-l6"
+          mkdir -p "$CE"
+          REV=233902d25c440f23af6f7d6e94d2946bac0bee0a
+          BASE="https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2/resolve/$REV"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          dl "$CE/model_quint8_avx2.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          dl "$CE/model.onnx"             "$BASE/onnx/model.onnx"
+          dl "$CE/tokenizer.json"         "$BASE/tokenizer.json"
+
+      - name: Verify cross-encoder assets (hard gate)
+        if: contains(github.event.inputs.extra_env, 'SHODH_CE_RERANK=1')
+        run: |
+          CE="${{ github.workspace }}/models/cross-encoder-ms-marco-minilm-l6"
+          echo "5d3e70fd0c9ff14b9b5169a51e957b7a9c74897afd0a35ce4bd318150c1d4d4a  $CE/model.onnx" > /tmp/ce.sha
+          echo "c80a8b34256ea453093d612e3ac48d3d965a0c0a48c7906709af8b8e28461bf9  $CE/model_quint8_avx2.onnx" >> /tmp/ce.sha
+          echo "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66  $CE/tokenizer.json" >> /tmp/ce.sha
+          sha256sum -c /tmp/ce.sha || { echo "::error::cross-encoder assets do not match the pinned sha256"; exit 1; }
+          echo "SHODH_CE_MODEL_PATH=$CE" >> "$GITHUB_ENV"
+
       - name: Download LongMemEval-S + build fixtures
         run: |
           python3 -m pip install --quiet huggingface_hub
