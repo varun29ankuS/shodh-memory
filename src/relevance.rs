@@ -1107,7 +1107,11 @@ impl RelevanceEngine {
             )
             .collect();
 
-        results.sort_by(|a, b| b.relevance_score.total_cmp(&a.relevance_score));
+        results.sort_by(|a, b| {
+            b.relevance_score
+                .total_cmp(&a.relevance_score)
+                .then_with(|| a.id.cmp(&b.id))
+        });
 
         // Quality-based filtering: only return memories above minimum relevance
         const MIN_RELEVANCE_SCORE: f32 = 0.25;

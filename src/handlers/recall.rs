@@ -959,7 +959,11 @@ pub async fn recall(
             unique_facts.entry(fact.id.clone()).or_insert(fact);
         }
         let mut sorted_facts: Vec<RecallFact> = unique_facts.into_values().collect();
-        sorted_facts.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
+        sorted_facts.sort_by(|a, b| {
+            b.confidence
+                .total_cmp(&a.confidence)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         sorted_facts.truncate(5);
         sorted_facts
     };
@@ -2237,7 +2241,7 @@ pub async fn proactive_context(
                 .collect();
 
             // Sort by boosted score (highest first)
-            enriched.sort_by(|a, b| b.1.total_cmp(&a.1));
+            enriched.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.id.cmp(&b.0.id)));
 
             // --- Adaptive involuntary memory constraints (Berntsen 2009) ---
             // These operate ONLY on proactive_context, not voluntary recall.
@@ -2264,7 +2268,7 @@ pub async fn proactive_context(
                         .max(ELABORATION_QUALITY_MIN);
                     *score *= quality;
                 }
-                enriched.sort_by(|a, b| b.1.total_cmp(&a.1));
+                enriched.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.id.cmp(&b.0.id)));
             }
 
             // (B) Steeper proactive recency — involuntary memories favor recent events.
@@ -2281,7 +2285,7 @@ pub async fn proactive_context(
                     let proactive_recency_factor = (-differential_rate * hours_old).exp();
                     *score *= proactive_recency_factor;
                 }
-                enriched.sort_by(|a, b| b.1.total_cmp(&a.1));
+                enriched.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.id.cmp(&b.0.id)));
             }
 
             // (C) Habituation — penalize memories surfaced repeatedly without utility.
@@ -2303,7 +2307,7 @@ pub async fn proactive_context(
                         }
                     }
                 }
-                enriched.sort_by(|a, b| b.1.total_cmp(&a.1));
+                enriched.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.id.cmp(&b.0.id)));
             }
 
             // (D) Lateral inhibition — similar candidates suppress each other.
@@ -2334,7 +2338,7 @@ pub async fn proactive_context(
                     }
                 }
                 // Final sort after all biological constraints applied
-                enriched.sort_by(|a, b| b.1.total_cmp(&a.1));
+                enriched.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.id.cmp(&b.0.id)));
             }
 
             // Normalize scores before applying the public threshold. Raw pipeline scores are
@@ -2863,7 +2867,11 @@ pub async fn proactive_context(
                 }
                 // Deduplicate by text similarity: if two facts share >80% words, keep higher confidence
                 let mut sorted: Vec<ProactiveFact> = found.into_values().collect();
-                sorted.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
+                sorted.sort_by(|a, b| {
+                    b.confidence
+                        .total_cmp(&a.confidence)
+                        .then_with(|| a.id.cmp(&b.id))
+                });
                 let mut deduped: Vec<ProactiveFact> = Vec::new();
                 for fact in sorted {
                     let fact_words: std::collections::HashSet<&str> =

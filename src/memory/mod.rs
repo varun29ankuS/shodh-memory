@@ -3238,7 +3238,10 @@ impl MemorySystem {
                             }
                         }
                     }
-                    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    // Strength desc -> bridge name asc: `take(graph_expand_k)` below cuts
+                    // a plateau of equal-strength neighbours, and the BM25 query text must
+                    // not depend on which one the graph happened to yield first.
+                    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                     graph_bridges = scored
                         .into_iter()
                         .take(graph_expand_k)
@@ -10052,7 +10055,13 @@ impl MemorySystem {
             }
         }
 
-        results.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
+        // Confidence desc -> fact id asc. Facts are accumulated across entities through a
+        // HashSet dedup, so equal-confidence facts have no inherent order to fall back on.
+        results.sort_by(|a, b| {
+            b.confidence
+                .total_cmp(&a.confidence)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         Ok(results)
     }
 

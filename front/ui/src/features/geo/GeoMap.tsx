@@ -9,11 +9,11 @@ import {
   type GeoPermissibleObjects,
   type ZoomTransform,
 } from "d3";
-import { feature, mesh } from "topojson-client";
-import type { Topology, GeometryCollection } from "topojson-specification";
 import type { RecallMemory } from "@/lib/api";
 import { useSession } from "@/stores/session";
-import worldTopology from "@/assets/world-countries-110m.json";
+// Decoded once for the whole product. See lib/atlas.ts for the provenance of
+// the basemap and of India's boundary in particular.
+import { LAND, BORDERS, INDIA } from "@/lib/atlas";
 
 /**
  * The world basemap and the plotted points.
@@ -41,20 +41,6 @@ import worldTopology from "@/assets/world-countries-110m.json";
  * Baltimore in China.
  */
 
-/** The vendored file's `objects` — named so the decode below is not `any`. */
-type WorldTopology = Topology<{
-  countries: GeometryCollection<{ name: string }>;
-  land: GeometryCollection;
-}>;
-
-const world = worldTopology as unknown as WorldTopology;
-
-/** Decoded once at module scope: the topology is a constant, and re-deriving
- *  it per mount would re-walk 177 country geometries on every navigation. */
-const LAND = feature(world, world.objects.land) as unknown as GeoPermissibleObjects;
-/** Interior borders only — `(a, b) => a !== b` drops the coastline, which LAND
- *  already draws. Drawing both would double-stroke every shore. */
-const BORDERS = mesh(world, world.objects.countries, (a, b) => a !== b) as GeoPermissibleObjects;
 const GRATICULE = geoGraticule10() as unknown as GeoPermissibleObjects;
 
 interface GeoPoint {
@@ -304,6 +290,21 @@ export function GeoMap({
       path(BORDERS);
       ctx!.strokeStyle = hexA(tokens.ink, 0.18);
       ctx!.lineWidth = 0.5 / t.k;
+      ctx!.stroke();
+
+      // India last, over the Natural Earth outline it corrects.
+      //
+      // Natural Earth draws national boundaries on lines of DE-FACTO CONTROL,
+      // which for India splits Jammu & Kashmir, places Aksai Chin outside the
+      // country and marks Arunachal Pradesh disputed. That is not a rendering
+      // preference and not a resolution problem: it is the wrong border, and
+      // shipping it to an Indian defence customer is a release blocker.
+      // Stroked at the same weight as the other borders so it reads as the
+      // national outline rather than an annotation.
+      ctx!.beginPath();
+      path(INDIA);
+      ctx!.strokeStyle = hexA(tokens.ink, 0.28);
+      ctx!.lineWidth = 0.6 / t.k;
       ctx!.stroke();
 
       ctx!.restore();
