@@ -290,11 +290,32 @@ fn spread_single_direction(
         // HashMap iteration order produces slightly different sums and flips
         // near-tie ranks between repeats (the query-time residual after the
         // ingest-order fixes). Sorting by Uuid pins the accumulation order.
-        let mut current_activated: Vec<(Uuid, f32)> =
-            activation_map.iter().map(|(id, act)| (*id, *act)).collect();
-        current_activated.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        // Order by entity NAME, not by Uuid.
+        //
+        // Sorting by Uuid pins the accumulation order WITHIN one process and is
+        // a random permutation ACROSS ingests, because entity UUIDs are
+        // re-rolled every time the corpus is ingested. The cross-repeat
+        // determinism guard re-ingests on every repeat, so a Uuid sort here
+        // leaves exactly the ULP wobble it was added to remove — which is the
+        // same conclusion the PPR frontier below already reached and fixed.
+        //
+        // Names are a pure function of graph content, so they are stable across
+        // ingests; uuid stays as the total-order fallback for duplicate names.
+        let mut current_activated: Vec<(String, Uuid, f32)> = activation_map
+            .iter()
+            .map(|(id, act)| {
+                let name = graph
+                    .get_entity(id)
+                    .ok()
+                    .flatten()
+                    .map(|e| e.name)
+                    .unwrap_or_default();
+                (name, *id, *act)
+            })
+            .collect();
+        current_activated.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 
-        for (entity_uuid, source_activation) in current_activated {
+        for (_name, entity_uuid, source_activation) in current_activated {
             if source_activation < threshold {
                 continue;
             }
@@ -1021,7 +1042,13 @@ fn reachable_inject(
     // Bound the injected set to the strongest-path reachable entities.
     if best.len() > REACH_MAX_ENTITIES {
         let mut items: Vec<(Uuid, f32)> = best.into_iter().collect();
-        items.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+        // Score desc -> entity id asc. `best` is a HashMap, so `into_iter` yields a
+        // per-map random order (Rust seeds every map separately, so the order differs
+        // between two maps in the SAME process), and the truncate below cuts through
+        // equal-score plateaus. Without a total order the injected entity set differs
+        // between two repeats of one query. This is the RH-12 hazard already guarded
+        // on the memory sort downstream; this sort is one layer upstream and was missed.
+        items.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         items.truncate(REACH_MAX_ENTITIES);
         return Ok(items.into_iter().collect());
     }
@@ -1098,7 +1125,14 @@ fn traverse_beam(
         if next.is_empty() {
             break;
         }
-        next.sort_unstable_by(|a, b| b.score.total_cmp(&a.score));
+        // Score desc -> endpoint id asc. Paths are pushed in graph-iteration order and
+        // the beam cut below lands mid-plateau whenever two walks score equally, so
+        // which path survives must not depend on the order neighbours arrived in.
+        next.sort_unstable_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.endpoint.cmp(&b.endpoint))
+        });
         next.truncate(BEAM);
         for p in &next {
             let e = reached.entry(p.endpoint).or_insert(0.0);
