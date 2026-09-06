@@ -130,13 +130,13 @@ impl CrossEncoder {
         let session = Session::builder()
             .context("cross-encoder: session builder")?
             .with_intra_threads(num_threads)
-            .context("cross-encoder: intra threads")?
+            .map_err(|e| anyhow::anyhow!("cross-encoder: intra threads: {e}"))?
             .with_inter_threads(1)
-            .context("cross-encoder: inter threads")?
+            .map_err(|e| anyhow::anyhow!("cross-encoder: inter threads: {e}"))?
             .with_intra_op_spinning(false)
-            .context("cross-encoder: intra spinning")?
+            .map_err(|e| anyhow::anyhow!("cross-encoder: intra spinning: {e}"))?
             .with_inter_op_spinning(false)
-            .context("cross-encoder: inter spinning")?
+            .map_err(|e| anyhow::anyhow!("cross-encoder: inter spinning: {e}"))?
             .commit_from_file(&model_path)
             .context("cross-encoder: load onnx")?;
 
