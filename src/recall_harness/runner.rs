@@ -699,7 +699,18 @@ fn fingerprint_graph(manager: &MultiUserMemoryManager) -> GraphFingerprint {
         .map(|e| {
             let mut labels: Vec<String> = e.labels.iter().map(|l| format!("{l:?}")).collect();
             labels.sort();
-            format!("{}|{}", e.name, labels.join(","))
+            // Salience and mention_count are accumulated during ingest, so
+            // they are exactly the kind of state that can differ when the same
+            // corpus is ingested twice. Carrying them makes the fingerprint a
+            // statement about the graph the retriever actually sees rather than
+            // only about its shape.
+            format!(
+                "{}|{}|{:08x}|{}",
+                e.name,
+                labels.join(","),
+                e.salience.to_bits(),
+                e.mention_count
+            )
         })
         .collect();
     entities.sort();
@@ -714,7 +725,21 @@ fn fingerprint_graph(manager: &MultiUserMemoryManager) -> GraphFingerprint {
             }
             let from = name_of.get(&edge.from_entity).cloned().unwrap_or_default();
             let to = name_of.get(&edge.to_entity).cloned().unwrap_or_default();
-            edges.push(format!("{from}|{:?}|{to}", edge.relation_type));
+            // Strength is part of the graph, not decoration: it is what the
+            // walk multiplies and what the beam cuts on. Two ingests can agree
+            // on every (from, relation, to) triple and still disagree on the
+            // weights, which is a graph that LOOKS identical to a structural
+            // fingerprint and scores differently -- exactly the percent-scale
+            // divergence this instrument failed to explain on its first pass.
+            //
+            // Compared by BITS. A tolerance here would hide the ULP-level drift
+            // that a tolerance is usually added to forgive, and the whole point
+            // is to distinguish "same graph" from "nearly the same graph".
+            edges.push(format!(
+                "{from}|{:?}|{to}|{:08x}",
+                edge.relation_type,
+                edge.strength.to_bits()
+            ));
         }
     }
     edges.sort();
@@ -3575,6 +3600,26 @@ mod tests {
             "the report must NAME the missing edge, got: {delta}"
         );
         assert!(delta.contains("edges 2 vs 1"), "and the counts: {delta}");
+    }
+
+    #[test]
+    fn a_reweighted_edge_is_a_difference() {
+        // The gap that made the first version of this instrument report
+        // "graphs identical" while the rankings diverged by 0.8-68%. Same
+        // triple, different strength, is a DIFFERENT graph as far as the walk
+        // is concerned, and a structural-only fingerprint calls it a match.
+        let a = GraphFingerprint {
+            entities: vec![],
+            edges: vec!["Andrew|Causes|Maria|3f800000".into()],
+        };
+        let b = GraphFingerprint {
+            entities: vec![],
+            edges: vec!["Andrew|Causes|Maria|3f7ffffe".into()],
+        };
+        assert!(
+            a.diff(&b).is_some(),
+            "an edge whose strength changed must register as a difference"
+        );
     }
 
     #[test]
