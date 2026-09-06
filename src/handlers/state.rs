@@ -1259,6 +1259,15 @@ impl MultiUserMemoryManager {
     /// Uses double-checked locking to prevent TOCTOU races where concurrent
     /// first-access requests both miss the cache and try to open RocksDB.
     /// RocksDB holds exclusive file locks, so the second open would fail.
+    /// The per-user state directory, with the identifier validated as a single path component
+    /// BEFORE it is joined — `user_id` arrives from HTTP/MCP/CLI callers, and `../` or an
+    /// absolute path in it would escape `base_path` at every join below.
+    fn user_dir(&self, user_id: &str) -> Result<std::path::PathBuf> {
+        Ok(self
+            .base_path
+            .join(crate::path_guard::sanitize_component(user_id, "user id")?))
+    }
+
     pub fn get_user_memory(&self, user_id: &str) -> Result<Arc<parking_lot::RwLock<MemorySystem>>> {
         // Fast path: already cached
         if let Some(memory) = self.user_memories.get(user_id) {
@@ -1278,7 +1287,7 @@ impl MultiUserMemoryManager {
             return Ok(memory);
         }
 
-        let user_path = self.base_path.join(user_id);
+        let user_path = self.user_dir(user_id)?;
         let config = MemoryConfig {
             storage_path: user_path,
             ..self.default_config.clone()
@@ -1407,7 +1416,7 @@ impl MultiUserMemoryManager {
         }
 
         // Delete per-user filesystem (memories DB, graph DB, vector index files)
-        let user_path = self.base_path.join(user_id);
+        let user_path = self.user_dir(user_id)?;
         if user_path.exists() {
             let mut attempts = 0;
             let max_attempts = 10;
@@ -1756,7 +1765,7 @@ impl MultiUserMemoryManager {
         let mut saved = 0;
         for (user_id, memory_system) in self.cached_user_memories() {
             if let Some(guard) = memory_system.try_read() {
-                let index_path = self.base_path.join(&user_id).join("vector_index");
+                let index_path = self.user_dir(&user_id)?.join("vector_index");
                 if let Err(e) = guard.save_vector_index(&index_path) {
                     tracing::warn!("  Failed to save vector index for user {}: {}", user_id, e);
                 } else {
@@ -1866,7 +1875,7 @@ impl MultiUserMemoryManager {
             return Ok(graph);
         }
 
-        let graph_path = self.base_path.join(user_id).join("graph");
+        let graph_path = self.user_dir(user_id)?.join("graph");
         // Retry with backoff for RocksDB lock contention (same pattern as get_user_memory).
         // Graph eviction drops synchronously so contention is rare, but possible on Windows
         // where file handle release can lag.
