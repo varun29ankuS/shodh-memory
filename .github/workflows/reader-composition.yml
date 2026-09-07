@@ -27,7 +27,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: reader-composition
+  group: reader-composition-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'auto' }}
   cancel-in-progress: true
 
 env:

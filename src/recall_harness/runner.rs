@@ -1286,11 +1286,55 @@ pub(crate) fn guard_ner_backend(manager: &MultiUserMemoryManager) -> Result<()> 
     Ok(())
 }
 
+/// Refuse to run a cross-encoder arm without the cross-encoder.
+///
+/// `recall()` degrades to the unreranked ranking when the model is missing,
+/// which is right for a server and catastrophic for a measurement: the arm
+/// completes, reports a delta of 0.0000, and that zero reads as "the reranker
+/// does nothing" rather than "the reranker never ran". This session has already
+/// produced one such zero (`SHODH_GRAPH_PATH_STATE` set without its
+/// prerequisite, run 33603657064) and eight archived A/B workflows provisioned
+/// GLiNER zero times.
+///
+/// So the flag that turns the lever ON also makes its absence fatal HERE, at
+/// the harness, while leaving the server's graceful degradation intact.
+pub(crate) fn guard_cross_encoder() -> Result<()> {
+    let enabled = std::env::var("SHODH_CE_RERANK")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let dir = crate::embeddings::cross_encoder::CrossEncoder::model_dir();
+    guard_cross_encoder_at(enabled, &dir)
+}
+
+/// The decision, split from the env read so it is testable without mutating
+/// process env — `set_var` is not thread-safe against concurrent readers on
+/// other test threads, and this crate already carries one global lock because
+/// of that.
+pub(crate) fn guard_cross_encoder_at(enabled: bool, dir: &std::path::Path) -> Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    match crate::embeddings::cross_encoder::CrossEncoder::load(dir) {
+        Ok(_) => {
+            eprintln!("CE_RERANK=on model={}", dir.display());
+            Ok(())
+        }
+        Err(e) => anyhow::bail!(
+            "SHODH_CE_RERANK=1 but the cross-encoder failed to load from {}: {e}. \
+             Refusing to run: recall() would silently fall back to the unreranked \
+             ranking and this arm would report a zero that looks like a verdict. \
+             Provision the model or unset SHODH_CE_RERANK.",
+            dir.display()
+        ),
+    }
+}
+
 pub fn ingest_corpus(
     manager: &MultiUserMemoryManager,
     corpus: &[CorpusItem],
 ) -> Result<HashMap<String, Uuid>> {
     guard_ner_backend(manager)?;
+    guard_cross_encoder()?;
     let mut map = HashMap::with_capacity(corpus.len());
     let ner = manager.get_neural_ner();
     let user_mem = manager.get_user_memory(EVAL_USER)?;
@@ -2233,7 +2277,13 @@ pub fn analyze_funnel(inputs: &RunInputs) -> Result<FunnelReport> {
         .filter(|k| *k >= SMOKE_K)
         .unwrap_or(SMOKE_K);
 
-    const STAGES: [&str; 5] = ["graph", "vector", "hybrid", "fusion", "final"];
+    // `graph_pool` precedes `graph`: the leg's complete scored pool BEFORE the
+    // GRAPH_CANDIDATE_CAP/graph_leg_k truncations (recorded inside
+    // spreading_activation_retrieve_with_stats). graph_pool.present% vs
+    // graph.present% splits pool-membership loss from the exit-gate ordering
+    // cut; graph_pool.mean_rank_when_present locates where the pool ordering
+    // places gold.
+    const STAGES: [&str; 6] = ["graph_pool", "graph", "vector", "hybrid", "fusion", "final"];
 
     #[derive(Default, Clone)]
     struct Acc {
@@ -2272,12 +2322,18 @@ pub fn analyze_funnel(inputs: &RunInputs) -> Result<FunnelReport> {
         case_count += 1;
         let cat = category_name(case.category).to_string();
 
-        let query = Query {
+        let mut query = Query {
             query_text: Some(case.query.clone()),
             max_results: diag_k,
             layers: crate::memory::types::LayerMode::Full,
             ..Default::default()
         };
+        // Match the recall path's query preparation (run_one_pass annotates both
+        // the production and the deep query): without neural-NER annotation the
+        // graph leg seeds from the POS heuristic alone, so the funnel would
+        // measure a DIFFERENTLY-SEEDED leg than the recall runs it exists to
+        // explain — every stage row, not just graph ones, shifts with the seeds.
+        manager.annotate_query_ner(&mut query);
 
         crate::memory::gold_funnel::begin(gold.clone());
         let _ = system.read().recall(&query);
@@ -2439,6 +2495,63 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
             }
         }
 
+        // Which labels carry the CONNECTIVITY, not just which labels exist.
+        // A label that is a small share of nodes and a large share of
+        // incidences is a node type doing an attribute's job: everyone mentions
+        // "last weekend", so minting it wires every such memory into one star
+        // that no query would ever traverse deliberately.
+        //
+        // Degrees are read post-cap, so a saturated entity reports the cap and
+        // its discarded edges are invisible here. That censors the mean
+        // downward; the top_hubs list below is where saturation is legible.
+        let degree_of = |e: &crate::graph_memory::EntityNode| {
+            g.get_entity_relationships(&e.uuid)
+                .map(|r| r.len())
+                .unwrap_or(0)
+        };
+        let mut label_degrees: std::collections::BTreeMap<String, (usize, usize, usize)> =
+            Default::default();
+        for e in &entities {
+            let d = degree_of(e);
+            let names: Vec<String> = if e.labels.is_empty() {
+                vec!["<unlabelled>".to_string()]
+            } else {
+                e.labels.iter().map(|l| format!("{l:?}")).collect()
+            };
+            // Multi-label entities count under each of their labels, so these
+            // sums exceed the totals. Per-label shares stay meaningful; a
+            // partition would not.
+            for name in names {
+                let slot = label_degrees.entry(name).or_insert((0, 0, 0));
+                slot.0 += 1;
+                slot.1 += d;
+                slot.2 = slot.2.max(d);
+            }
+        }
+
+        // Identities of the top hubs. Ties broken by name so the list is
+        // reproducible across ingests -- without it, equal-degree entities
+        // would be ordered by whatever the entity scan happened to yield.
+        let mut ranked: Vec<(usize, &crate::graph_memory::EntityNode)> =
+            entities.iter().map(|e| (degree_of(e), e)).collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+        let top_hubs: Vec<(String, String, usize)> = ranked
+            .iter()
+            .take(25)
+            .map(|(d, e)| {
+                let labels = if e.labels.is_empty() {
+                    "<unlabelled>".to_string()
+                } else {
+                    e.labels
+                        .iter()
+                        .map(|l| format!("{l:?}"))
+                        .collect::<Vec<_>>()
+                        .join("+")
+                };
+                (e.name.clone(), labels, *d)
+            })
+            .collect();
+
         // Undirected adjacency, built once and reused for every component pass.
         let index: std::collections::HashMap<uuid::Uuid, usize> = entities
             .iter()
@@ -2525,6 +2638,8 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
             typed_edges,
             symmetric_edges,
             entity_labels,
+            label_degrees,
+            top_hubs,
             components_all,
             components_after_hub_removal,
             typed_components,
@@ -2922,6 +3037,34 @@ fn category_name(c: SmokeCategory) -> &'static str {
         SmokeCategory::Negation => "negation",
         SmokeCategory::SingleHop => "single_hop",
         SmokeCategory::OpenDomain => "open_domain",
+    }
+}
+
+#[cfg(test)]
+mod ce_guard_tests {
+    use super::guard_cross_encoder_at;
+    use std::path::Path;
+
+    #[test]
+    fn a_missing_model_fails_the_arm_instead_of_measuring_baseline() {
+        // The whole point of the guard. recall() degrades to the unreranked
+        // ranking when the model is absent, so without this the arm COMPLETES,
+        // reports 0.0000, and that zero gets written down as "the reranker does
+        // nothing" instead of "the reranker never ran".
+        let err = guard_cross_encoder_at(true, Path::new("./models/does-not-exist"))
+            .expect_err("a CE arm without a CE model must refuse to run");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("silently fall back"),
+            "the error must say WHY a zero here would be a lie, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_missing_model_is_fine_when_no_arm_asked_for_it() {
+        // Ordinary runs must not be forced to provision 23 MB they never load.
+        guard_cross_encoder_at(false, Path::new("./models/does-not-exist"))
+            .expect("guard must be inert when the lever is off");
     }
 }
 

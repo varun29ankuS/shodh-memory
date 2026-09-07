@@ -75,7 +75,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: graph-lever-confound-${{ github.ref }}
+  group: graph-lever-confound-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'auto' }}
   cancel-in-progress: true
 
 jobs:
