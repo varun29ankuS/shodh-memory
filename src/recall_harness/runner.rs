@@ -2307,7 +2307,13 @@ pub fn analyze_funnel(inputs: &RunInputs) -> Result<FunnelReport> {
         .filter(|k| *k >= SMOKE_K)
         .unwrap_or(SMOKE_K);
 
-    const STAGES: [&str; 5] = ["graph", "vector", "hybrid", "fusion", "final"];
+    // `graph_pool` precedes `graph`: the leg's complete scored pool BEFORE the
+    // GRAPH_CANDIDATE_CAP/graph_leg_k truncations (recorded inside
+    // spreading_activation_retrieve_with_stats). graph_pool.present% vs
+    // graph.present% splits pool-membership loss from the exit-gate ordering
+    // cut; graph_pool.mean_rank_when_present locates where the pool ordering
+    // places gold.
+    const STAGES: [&str; 6] = ["graph_pool", "graph", "vector", "hybrid", "fusion", "final"];
 
     #[derive(Default, Clone)]
     struct Acc {
@@ -2346,12 +2352,18 @@ pub fn analyze_funnel(inputs: &RunInputs) -> Result<FunnelReport> {
         case_count += 1;
         let cat = category_name(case.category).to_string();
 
-        let query = Query {
+        let mut query = Query {
             query_text: Some(case.query.clone()),
             max_results: diag_k,
             layers: crate::memory::types::LayerMode::Full,
             ..Default::default()
         };
+        // Match the recall path's query preparation (run_one_pass annotates both
+        // the production and the deep query): without neural-NER annotation the
+        // graph leg seeds from the POS heuristic alone, so the funnel would
+        // measure a DIFFERENTLY-SEEDED leg than the recall runs it exists to
+        // explain — every stage row, not just graph ones, shifts with the seeds.
+        manager.annotate_query_ner(&mut query);
 
         crate::memory::gold_funnel::begin(gold.clone());
         let _ = system.read().recall(&query);
@@ -2513,6 +2525,63 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
             }
         }
 
+        // Which labels carry the CONNECTIVITY, not just which labels exist.
+        // A label that is a small share of nodes and a large share of
+        // incidences is a node type doing an attribute's job: everyone mentions
+        // "last weekend", so minting it wires every such memory into one star
+        // that no query would ever traverse deliberately.
+        //
+        // Degrees are read post-cap, so a saturated entity reports the cap and
+        // its discarded edges are invisible here. That censors the mean
+        // downward; the top_hubs list below is where saturation is legible.
+        let degree_of = |e: &crate::graph_memory::EntityNode| {
+            g.get_entity_relationships(&e.uuid)
+                .map(|r| r.len())
+                .unwrap_or(0)
+        };
+        let mut label_degrees: std::collections::BTreeMap<String, (usize, usize, usize)> =
+            Default::default();
+        for e in &entities {
+            let d = degree_of(e);
+            let names: Vec<String> = if e.labels.is_empty() {
+                vec!["<unlabelled>".to_string()]
+            } else {
+                e.labels.iter().map(|l| format!("{l:?}")).collect()
+            };
+            // Multi-label entities count under each of their labels, so these
+            // sums exceed the totals. Per-label shares stay meaningful; a
+            // partition would not.
+            for name in names {
+                let slot = label_degrees.entry(name).or_insert((0, 0, 0));
+                slot.0 += 1;
+                slot.1 += d;
+                slot.2 = slot.2.max(d);
+            }
+        }
+
+        // Identities of the top hubs. Ties broken by name so the list is
+        // reproducible across ingests -- without it, equal-degree entities
+        // would be ordered by whatever the entity scan happened to yield.
+        let mut ranked: Vec<(usize, &crate::graph_memory::EntityNode)> =
+            entities.iter().map(|e| (degree_of(e), e)).collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+        let top_hubs: Vec<(String, String, usize)> = ranked
+            .iter()
+            .take(25)
+            .map(|(d, e)| {
+                let labels = if e.labels.is_empty() {
+                    "<unlabelled>".to_string()
+                } else {
+                    e.labels
+                        .iter()
+                        .map(|l| format!("{l:?}"))
+                        .collect::<Vec<_>>()
+                        .join("+")
+                };
+                (e.name.clone(), labels, *d)
+            })
+            .collect();
+
         // Undirected adjacency, built once and reused for every component pass.
         let index: std::collections::HashMap<uuid::Uuid, usize> = entities
             .iter()
@@ -2599,6 +2668,8 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
             typed_edges,
             symmetric_edges,
             entity_labels,
+            label_degrees,
+            top_hubs,
             components_all,
             components_after_hub_removal,
             typed_components,
