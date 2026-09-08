@@ -3901,7 +3901,13 @@ mod tests {
     /// `RECALL_ENV_LOCK`). Tests that exercise the traversal itself
     /// take `TraversalLimits` as a VALUE and need no lock at all — that is the
     /// point of threading it as a parameter.
-    static TRAVERSAL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Was a module-local mutex. It is the crate-wide lock now, because a
+    // private one excludes only this module's tests: these flags change what
+    // the RECALL PATH does, so a test in a sibling module measuring recall
+    // while one of these is flipped silently measures a different pipeline
+    // and reports the number as if it measured the shipped one. Third time
+    // this shape has appeared in this branch.
+    use crate::memory::RECALL_ENV_LOCK as TRAVERSAL_ENV_LOCK;
 
     /// A bare `GraphMemory` plus entity/edge constructors, for the reach tests.
     fn reach_fixture() -> (tempfile::TempDir, crate::graph_memory::GraphMemory) {
@@ -4156,7 +4162,7 @@ mod tests {
     /// statistic moves.
     #[test]
     fn traversal_flags_reach_the_live_graph_leg() {
-        let _env_guard = TRAVERSAL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_guard = TRAVERSAL_ENV_LOCK.lock();
         std::env::remove_var("SHODH_GRAPH_EDGE_DIR");
         std::env::remove_var("SHODH_GRAPH_MAX_EDGES");
 

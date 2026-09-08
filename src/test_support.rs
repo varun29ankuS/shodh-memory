@@ -159,6 +159,11 @@ const ENV_MUTATION_INVENTORY: &[(&str, usize, &str)] = &[
         "ORT_DYLIB_PATH behind a OnceLock, same reason; read-once at model load",
     ),
     (
+        "src/memory/graph_retrieval.rs",
+        17,
+        "graph-leg flag tests: SHODH_GRAPH_ACT_NORM, EDGE_DIR, MAX_EDGES,          RECALL_READONLY and friends, each set and restored. Test-only, and          under the crate-wide RECALL_ENV_LOCK -- these flags change what the          RECALL PATH scores, so a module-local lock would let one flip          mid-query in a sibling module's test",
+    ),
+    (
         "src/memory/mod.rs",
         3,
         "RecallEnvPin: one set and its two restore arms, all under          RECALL_ENV_LOCK, test-only",
