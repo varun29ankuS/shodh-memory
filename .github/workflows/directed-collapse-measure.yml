@@ -29,7 +29,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: directed-collapse-${{ github.ref }}
+  group: directed-collapse-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'auto' }}
   cancel-in-progress: true
 
 jobs:

@@ -30,7 +30,7 @@ use super::report::{
     aggregate_category, aggregate_layer, median, AblationReport, AblationRow, CategoryReport,
     Failure, FunnelReport, FunnelStageRow, GraphStructure, LayerReport, LearningCurveArm,
     LearningCurveReport, LinkingReport, LinkingRow, PerCaseRecord, ReachabilityCategory,
-    ReachabilityReport, Report, SMOKE_K,
+    ReachabilityReport, Report, StageRow, StageTimingReport, SMOKE_K,
 };
 
 /// Embedder identifier emitted in the report. Matches the model wired into
@@ -400,6 +400,15 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
         );
     }
 
+    // Per-stage breakdown for the gated mode (SHODH_STAGE_TIMING=1 only). Built
+    // from the same passes the headline aggregates use, so the `e2e_*` fields in
+    // it are the same numbers as `layers[highest].latency_*` by construction —
+    // which is what makes the reconciliation line meaningful.
+    let stage_timing_report = aggregate_stage_timing(highest_mode, &passes, cases.len(), repeats)
+        .inspect(|st| {
+            print_stage_timing(st);
+        });
+
     let report = Report {
         suite: inputs.suite.clone(),
         embedder: EMBEDDER_ID.to_string(),
@@ -410,6 +419,7 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
         case_count: cases.len(),
         repeats,
         failures,
+        stage_timing: stage_timing_report,
     };
 
     // Per-case diagnostics for every mode, from the same repeat-0 pass the
@@ -522,6 +532,237 @@ fn build_per_case_records(
         .collect()
 }
 
+/// Accessor table for the seven top-level stages, in pipeline order.
+///
+/// These PARTITION the instrumented portion of `recall()`: each nanosecond of
+/// `recall_inner` falls in exactly one of them, so their means sum to
+/// `stage_sum_mean_ms` and the shortfall against the wall clock is the
+/// `unattributed` line.
+type StageGetter = (
+    &'static str,
+    fn(&crate::stage_probe::Probe) -> std::time::Duration,
+);
+
+const TOP_STAGES: [StageGetter; 7] = [
+    ("query_analysis", |p| p.query_analysis),
+    ("embedding", |p| p.embedding),
+    ("graph_expansion", |p| p.graph_expansion),
+    ("vector_search", |p| p.vector_search),
+    ("fusion", |p| p.fusion),
+    ("scoring", |p| p.scoring),
+    ("post", |p| p.post),
+];
+
+/// Sub-stages carved out of the rows above. These OVERLAP the top-level stages
+/// and must never be summed with them.
+const SUB_STAGES: [StageGetter; 6] = [
+    ("tokenize", |p| p.tokenize),
+    ("onnx_forward", |p| p.onnx_forward),
+    ("bm25", |p| p.bm25),
+    ("fetch", |p| p.fetch),
+    ("storage_read", |p| p.storage_read),
+    ("storage_decode", |p| p.storage_decode),
+];
+
+/// Which region each sub-stage is contained in, for the stderr table.
+///
+/// `storage_read`/`storage_decode` are labelled `recall` rather than `fetch`
+/// deliberately: `MemoryStorage::get` is called from the graph traversal as well
+/// as the Layer-5 cascade, and measurement showed ~675 calls per query against
+/// ~0.1ms of Layer-5 cold fetch — i.e. nearly all of that cost is paid inside
+/// `graph_expansion`. Labelling them as subsets of `fetch` would have implied
+/// the opposite.
+const SUB_STAGE_PARENT: [(&str, &str); 6] = [
+    ("tokenize", "embedding"),
+    ("onnx_forward", "embedding"),
+    ("bm25", "fusion"),
+    ("fetch", "scoring"),
+    ("storage_read", "recall"),
+    ("storage_decode", "recall"),
+];
+
+/// Build one `StageRow` from per-case medians (already median-across-repeats).
+fn stage_row(name: &str, per_case_ms: &[f64], e2e_mean_ms: f64) -> StageRow {
+    let (p50, p95, p99) = crate::recall_harness::report::latency_percentiles(per_case_ms);
+    let mean = if per_case_ms.is_empty() {
+        0.0
+    } else {
+        per_case_ms.iter().sum::<f64>() / per_case_ms.len() as f64
+    };
+    StageRow {
+        stage: name.to_string(),
+        p50_ms: p50,
+        p95_ms: p95,
+        p99_ms: p99,
+        mean_ms: mean,
+        mean_share_pct: if e2e_mean_ms > 0.0 {
+            100.0 * mean / e2e_mean_ms
+        } else {
+            0.0
+        },
+    }
+}
+
+/// Aggregate the per-case stage probes into a `StageTimingReport`.
+///
+/// Measurement discipline is identical to the headline latency: for each case
+/// take the MEDIAN across repeats, then take percentiles across cases. Doing it
+/// the other way (percentile within a repeat, then average) would let one noisy
+/// repeat move a stage's p95, which is exactly the failure mode that made an
+/// earlier 113ms embed reading look real when it was build contention.
+///
+/// Returns `None` when no probes were collected (flag off, or the mode was never
+/// run), so an absent breakdown is never confused with an all-zero one.
+fn aggregate_stage_timing(
+    mode: LayerMode,
+    passes: &[OnePassResult],
+    case_count: usize,
+    repeats: usize,
+) -> Option<StageTimingReport> {
+    let per_mode: Vec<&ModePassResult> = passes
+        .iter()
+        .filter_map(|p| p.per_mode.get(&mode))
+        .collect();
+    if per_mode.is_empty() || per_mode.iter().any(|m| m.stage_probes.len() != case_count) {
+        return None;
+    }
+
+    // Per-case median across repeats, for the wall clock and for every stage.
+    let median_across_repeats = |f: &dyn Fn(&ModePassResult, usize) -> f64| -> Vec<f64> {
+        (0..case_count)
+            .map(|k| {
+                let samples: Vec<f64> = per_mode.iter().map(|m| f(m, k)).collect();
+                median(&samples)
+            })
+            .collect()
+    };
+
+    let e2e: Vec<f64> = median_across_repeats(&|m, k| m.latencies_ms[k]);
+    let e2e_mean = if e2e.is_empty() {
+        0.0
+    } else {
+        e2e.iter().sum::<f64>() / e2e.len() as f64
+    };
+    let (e2e_p50, e2e_p95, _) = crate::recall_harness::report::latency_percentiles(&e2e);
+
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+
+    let stages: Vec<StageRow> = TOP_STAGES
+        .iter()
+        .map(|(name, get)| {
+            let per_case = median_across_repeats(&|m, k| ms(get(&m.stage_probes[k])));
+            stage_row(name, &per_case, e2e_mean)
+        })
+        .collect();
+    let substages: Vec<StageRow> = SUB_STAGES
+        .iter()
+        .map(|(name, get)| {
+            let per_case = median_across_repeats(&|m, k| ms(get(&m.stage_probes[k])));
+            stage_row(name, &per_case, e2e_mean)
+        })
+        .collect();
+
+    let stage_sum = median_across_repeats(&|m, k| ms(m.stage_probes[k].stage_sum()));
+    let stage_sum_mean = if stage_sum.is_empty() {
+        0.0
+    } else {
+        stage_sum.iter().sum::<f64>() / stage_sum.len() as f64
+    };
+
+    let mean_count = |f: &dyn Fn(&crate::stage_probe::Probe) -> u32| -> f64 {
+        let v = median_across_repeats(&|m, k| f(&m.stage_probes[k]) as f64);
+        if v.is_empty() {
+            0.0
+        } else {
+            v.iter().sum::<f64>() / v.len() as f64
+        }
+    };
+
+    Some(StageTimingReport {
+        mode: mode.report_key().to_string(),
+        case_count,
+        repeats,
+        e2e_p50_ms: e2e_p50,
+        e2e_p95_ms: e2e_p95,
+        e2e_mean_ms: e2e_mean,
+        stage_sum_mean_ms: stage_sum_mean,
+        unattributed_mean_ms: e2e_mean - stage_sum_mean,
+        stages,
+        substages,
+        mean_forwards: mean_count(&|p| p.forwards),
+        mean_inner_recalls: mean_count(&|p| p.inner_recalls),
+        mean_storage_reads: mean_count(&|p| p.storage_reads),
+    })
+}
+
+/// Print the stage breakdown to stderr, greppable as `STAGE_TIMING`.
+///
+/// The JSON report is the machine artifact; this is the one a human reads in a
+/// CI log without piping through `jq`.
+fn print_stage_timing(st: &StageTimingReport) {
+    eprintln!(
+        "STAGE_TIMING mode={} cases={} repeats={} e2e_p50={:.2}ms e2e_p95={:.2}ms e2e_mean={:.2}ms",
+        st.mode, st.case_count, st.repeats, st.e2e_p50_ms, st.e2e_p95_ms, st.e2e_mean_ms
+    );
+    eprintln!(
+        "STAGE_TIMING {:<18} {:>9} {:>9} {:>9} {:>9} {:>8}",
+        "stage", "p50_ms", "p95_ms", "p99_ms", "mean_ms", "share%"
+    );
+    let row = |prefix: &str, r: &StageRow| {
+        eprintln!(
+            "STAGE_TIMING {:<18} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>7.1}%",
+            format!("{prefix}{}", r.stage),
+            r.p50_ms,
+            r.p95_ms,
+            r.p99_ms,
+            r.mean_ms,
+            r.mean_share_pct
+        );
+    };
+    for r in &st.stages {
+        row("", r);
+    }
+    eprintln!(
+        "STAGE_TIMING {:<18} {:>9} {:>9} {:>9} {:>9.2} {:>7.1}%",
+        "= stage sum",
+        "",
+        "",
+        "",
+        st.stage_sum_mean_ms,
+        if st.e2e_mean_ms > 0.0 {
+            100.0 * st.stage_sum_mean_ms / st.e2e_mean_ms
+        } else {
+            0.0
+        }
+    );
+    eprintln!(
+        "STAGE_TIMING {:<18} {:>9} {:>9} {:>9} {:>9.2} {:>7.1}%",
+        "+ unattributed",
+        "",
+        "",
+        "",
+        st.unattributed_mean_ms,
+        if st.e2e_mean_ms > 0.0 {
+            100.0 * st.unattributed_mean_ms / st.e2e_mean_ms
+        } else {
+            0.0
+        }
+    );
+    eprintln!("STAGE_TIMING -- sub-stages (subsets of the rows above; do NOT sum) --");
+    for r in &st.substages {
+        let parent = SUB_STAGE_PARENT
+            .iter()
+            .find(|(n, _)| *n == r.stage)
+            .map(|(_, p)| *p)
+            .unwrap_or("?");
+        row(&format!("{parent}/"), r);
+    }
+    eprintln!(
+        "STAGE_TIMING counts: onnx_forwards/query={:.2} inner_recalls/query={:.2} cold_rocksdb_reads/query={:.2}",
+        st.mean_forwards, st.mean_inner_recalls, st.mean_storage_reads
+    );
+}
+
 /// Per-case results for one `LayerMode` within a single ingest+query pass.
 struct ModePassResult {
     per_case: Vec<Metrics>,
@@ -535,6 +776,9 @@ struct ModePassResult {
     /// diagnostic is off this is a copy of `ranks`. Diagnostic side channel
     /// only — never folded into gated aggregates or the determinism check.
     deep_ranks: Vec<CaseRankList>,
+    /// Per-case stage breakdown, aligned with `latencies_ms` by index. Empty
+    /// unless `SHODH_STAGE_TIMING=1`. Diagnostic only — never gated on.
+    stage_probes: Vec<crate::stage_probe::Probe>,
 }
 
 /// Output of one ingest pass plus N mode-keyed query passes over the
@@ -667,6 +911,12 @@ fn run_one_pass(
         .map(std::path::PathBuf::from);
     let mut feature_lines: Vec<String> = Vec::new();
 
+    // Per-stage latency attribution (default off). When off, the case loop below
+    // calls `recall()` exactly as before and nothing downstream of this flag runs.
+    let stage_timing = std::env::var("SHODH_STAGE_TIMING")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     // Candidate-pool export (`SHODH_POOL_EXPORT=<jsonl path>`, Full mode only).
     //
     // Writes, per case: the query, the gold ids, and the RECALL_DIAG_K-deep
@@ -689,6 +939,7 @@ fn run_one_pass(
     for mode in layer_modes {
         let mut per_case = Vec::with_capacity(cases.len());
         let mut latencies_ms = Vec::with_capacity(cases.len());
+        let mut stage_probes: Vec<crate::stage_probe::Probe> = Vec::new();
         let mut by_category_cases: HashMap<SmokeCategory, Vec<Metrics>> = HashMap::new();
         let mut ranks: Vec<CaseRankList> = Vec::with_capacity(cases.len());
         let mut deep_ranks: Vec<CaseRankList> = Vec::with_capacity(cases.len());
@@ -716,10 +967,27 @@ fn run_one_pass(
                 );
             }
 
+            // SHODH_STAGE_TIMING=1 swaps in `recall_with_timing`, which runs the
+            // SAME production `recall()` with the thread-local stage probe armed
+            // and hands back what it accumulated. The wall clock stays exactly
+            // where it was — around the recall call and nothing else — so the
+            // instrumented and uninstrumented end-to-end numbers are directly
+            // comparable. That comparison is the perturbation check; run the
+            // suite both ways and require agreement.
             let started = Instant::now();
-            let result = system.read().recall(&query);
+            let (result, probe) = if stage_timing {
+                match system.read().recall_with_timing(&query) {
+                    Ok((memories, probe)) => (Ok(memories), probe),
+                    Err(e) => (Err(e), crate::stage_probe::Probe::default()),
+                }
+            } else {
+                (system.read().recall(&query), Default::default())
+            };
             let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
             latencies_ms.push(elapsed_ms);
+            if stage_timing {
+                stage_probes.push(probe);
+            }
 
             let memories = match result {
                 Ok(m) => m,
@@ -879,6 +1147,7 @@ fn run_one_pass(
                 latencies_ms,
                 ranks,
                 deep_ranks,
+                stage_probes,
             },
         );
     }
@@ -2134,7 +2403,13 @@ pub fn analyze_funnel(inputs: &RunInputs) -> Result<FunnelReport> {
         .filter(|k| *k >= SMOKE_K)
         .unwrap_or(SMOKE_K);
 
-    const STAGES: [&str; 5] = ["graph", "vector", "hybrid", "fusion", "final"];
+    // `graph_pool` precedes `graph`: the leg's complete scored pool BEFORE the
+    // GRAPH_CANDIDATE_CAP/graph_leg_k truncations (recorded inside
+    // spreading_activation_retrieve_with_stats). graph_pool.present% vs
+    // graph.present% splits pool-membership loss from the exit-gate ordering
+    // cut; graph_pool.mean_rank_when_present locates where the pool ordering
+    // places gold.
+    const STAGES: [&str; 6] = ["graph_pool", "graph", "vector", "hybrid", "fusion", "final"];
 
     #[derive(Default, Clone)]
     struct Acc {
@@ -2173,13 +2448,19 @@ pub fn analyze_funnel(inputs: &RunInputs) -> Result<FunnelReport> {
         case_count += 1;
         let cat = category_name(case.category).to_string();
 
-        let query = Query {
+        let mut query = Query {
             query_text: Some(case.query.clone()),
             max_results: diag_k,
             layers: crate::memory::types::LayerMode::Full,
             read_only: _harness_env.recall_read_only(),
             ..Default::default()
         };
+        // Match the recall path's query preparation (run_one_pass annotates both
+        // the production and the deep query): without neural-NER annotation the
+        // graph leg seeds from the POS heuristic alone, so the funnel would
+        // measure a DIFFERENTLY-SEEDED leg than the recall runs it exists to
+        // explain — every stage row, not just graph ones, shifts with the seeds.
+        manager.annotate_query_ner(&mut query);
 
         crate::memory::gold_funnel::begin(gold.clone());
         let _ = system.read().recall(&query);
@@ -2341,6 +2622,63 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
             }
         }
 
+        // Which labels carry the CONNECTIVITY, not just which labels exist.
+        // A label that is a small share of nodes and a large share of
+        // incidences is a node type doing an attribute's job: everyone mentions
+        // "last weekend", so minting it wires every such memory into one star
+        // that no query would ever traverse deliberately.
+        //
+        // Degrees are read post-cap, so a saturated entity reports the cap and
+        // its discarded edges are invisible here. That censors the mean
+        // downward; the top_hubs list below is where saturation is legible.
+        let degree_of = |e: &crate::graph_memory::EntityNode| {
+            g.get_entity_relationships(&e.uuid)
+                .map(|r| r.len())
+                .unwrap_or(0)
+        };
+        let mut label_degrees: std::collections::BTreeMap<String, (usize, usize, usize)> =
+            Default::default();
+        for e in &entities {
+            let d = degree_of(e);
+            let names: Vec<String> = if e.labels.is_empty() {
+                vec!["<unlabelled>".to_string()]
+            } else {
+                e.labels.iter().map(|l| format!("{l:?}")).collect()
+            };
+            // Multi-label entities count under each of their labels, so these
+            // sums exceed the totals. Per-label shares stay meaningful; a
+            // partition would not.
+            for name in names {
+                let slot = label_degrees.entry(name).or_insert((0, 0, 0));
+                slot.0 += 1;
+                slot.1 += d;
+                slot.2 = slot.2.max(d);
+            }
+        }
+
+        // Identities of the top hubs. Ties broken by name so the list is
+        // reproducible across ingests -- without it, equal-degree entities
+        // would be ordered by whatever the entity scan happened to yield.
+        let mut ranked: Vec<(usize, &crate::graph_memory::EntityNode)> =
+            entities.iter().map(|e| (degree_of(e), e)).collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+        let top_hubs: Vec<(String, String, usize)> = ranked
+            .iter()
+            .take(25)
+            .map(|(d, e)| {
+                let labels = if e.labels.is_empty() {
+                    "<unlabelled>".to_string()
+                } else {
+                    e.labels
+                        .iter()
+                        .map(|l| format!("{l:?}"))
+                        .collect::<Vec<_>>()
+                        .join("+")
+                };
+                (e.name.clone(), labels, *d)
+            })
+            .collect();
+
         // Undirected adjacency, built once and reused for every component pass.
         let index: std::collections::HashMap<uuid::Uuid, usize> = entities
             .iter()
@@ -2427,6 +2765,8 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
             typed_edges,
             symmetric_edges,
             entity_labels,
+            label_degrees,
+            top_hubs,
             components_all,
             components_after_hub_removal,
             typed_components,

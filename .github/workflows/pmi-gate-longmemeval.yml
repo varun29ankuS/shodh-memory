@@ -32,7 +32,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: pmi-gate-lme-${{ github.ref }}
+  group: pmi-gate-lme-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'auto' }}
   cancel-in-progress: true
 
 jobs:
