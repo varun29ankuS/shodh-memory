@@ -44,15 +44,34 @@ jobs:
     # so cost is linear in questions and ingest-dominated at roughly 7-12 min
     # each. A single job could not finish even the default 50 questions inside
     # timeout-minutes: 300 - every unsharded run was cancelled at ~25/50 having
-    # produced no report at all. Ten disjoint (offset, limit) windows cover the
-    # suite exactly once and each finishes well inside the cap.
+    # produced no report at all.
+    #
+    # THE SHARD COUNT IS AN ARITHMETIC CONSTRAINT, NOT A PREFERENCE:
+    #
+    #     ceil(questions / shards) * 12 min  <  timeout-minutes
+    #
+    # Ten shards was tuned for the 50-question default (5 each, ~60 min). It
+    # does NOT scale: a full 479-question run puts 48 questions in a shard,
+    # which is 576 min against a 300 cap, and every shard is killed before it
+    # writes a report. That is exactly what happened -- "10 of 10 shards
+    # produced no report" -- and it is guaranteed by the arithmetic rather
+    # than flaky.
+    #
+    # 24 shards holds the full suite at 20 questions each (~240 min worst
+    # case) and still covers the 50-question default at 3 each. Shards whose
+    # window starts past the end of the manifest exit immediately, so one
+    # matrix serves both sizes.
+    #
+    # Cost is honest either way: the full suite is ~80 runner-hours however it
+    # is divided, because the work is per-question ingest.
     name: LongMemEval-S (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+                12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
     steps:
       - uses: actions/checkout@v7
 
@@ -172,10 +191,22 @@ jobs:
         run: |
           for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
           TOTAL=$(wc -l < tests/recall/longmemeval/manifest.jsonl)
-          SHARDS=10
+          SHARDS=24
           PER=$(( (TOTAL + SHARDS - 1) / SHARDS ))
           OFFSET=$(( ${{ matrix.shard }} * PER ))
           echo "shard ${{ matrix.shard }}/$SHARDS: offset=$OFFSET limit=$PER of $TOTAL"
+          # A window past the end of the manifest has nothing to do. Exit 0 so
+          # the matrix stays green at small --limit values; the aggregate step
+          # counts the reports that exist rather than assuming all 24.
+          if [ "$OFFSET" -ge "$TOTAL" ]; then
+            echo "offset $OFFSET >= $TOTAL — nothing in this window, skipping"
+            # Leave a MARKER rather than nothing. A shard that was killed and a
+            # shard that had no work both produce no report otherwise, and
+            # "N of M shards produced no report" is the line that revealed the
+            # full-suite run was dying. Keep it able to mean that.
+            printf '{"skipped_empty_window": true}' > "shard-${{ matrix.shard }}.json"
+            exit 0
+          fi
           ./target/release/recall-eval \
             --longmemeval tests/recall/longmemeval \
             --layer ${{ github.event.inputs.layer || 'full' }} \
@@ -244,7 +275,15 @@ jobs:
           print('> does our memory surface the gold evidence turns?')
           print()
 
-          expected = 10
+          # A shard with no work writes {"skipped_empty_window": true}; drop those
+          # from the denominator so a small --limit does not read as a failure,
+          # while a shard that DIED still shows up as missing.
+          skipped = [f for f, r in reports if r.get('skipped_empty_window')]
+          reports = [(f, r) for f, r in reports if not r.get('skipped_empty_window')]
+          expected = 24 - len(skipped)
+          if skipped:
+              print(f'> {len(skipped)} shard(s) had no questions in their window (small --limit).')
+              print()
           if len(reports) < expected:
               missing = expected - len(reports)
               print(f'> **WARNING: {missing} of {expected} shards produced no report.**')
