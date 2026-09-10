@@ -197,9 +197,29 @@ impl BM25Index {
             .get_field("entities")
             .context("BM25 schema missing 'entities' field")?;
 
-        // 15MB writer heap — sufficient for edge workloads
+        // 15MB writer heap — sufficient for edge workloads.
+        //
+        // ONE INDEXING THREAD, and the count is the point rather than the heap.
+        // `Index::writer` picks a thread count from the available CPUs and
+        // distributes documents across them, so the SEGMENT LAYOUT of an index
+        // depends on how the work happened to be divided. BM25 scores are
+        // computed from per-segment corpus statistics, which means two ingests
+        // of the same corpus on the same machine can score the same document
+        // differently — not in the last bits, but by whole percent.
+        //
+        // That is the shape of the L1 determinism failure: divergent scores of
+        // 0.8% to 68%, never at ULP scale, present with BM25 in the pipeline and
+        // ABSENT when the vector leg runs alone. Every other candidate was ruled
+        // out first — the scoring clock, ONNX and rayon threads, recall-path
+        // writes, the knowledge graph's structure AND its weights, and the ANN
+        // index — each by measurement rather than by argument.
+        //
+        // A single indexing thread makes segment layout a function of the
+        // corpus alone. It costs ingest throughput on multi-core machines,
+        // which is the right trade for a memory whose product claim is that the
+        // same question over the same data returns the same answer.
         let writer = index
-            .writer(15_000_000)
+            .writer_with_num_threads(1, 15_000_000)
             .context("Failed to create index writer")?;
 
         let reader = index
