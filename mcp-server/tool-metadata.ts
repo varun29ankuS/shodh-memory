@@ -144,6 +144,9 @@ const TOOL_BEHAVIOUR: Record<string, BehaviourSpec> = {
   list_todos: { title: "List / Search Todos", readOnly: true },
   // Overwrites existing field values rather than only appending => destructive
   // in the spec's "not purely additive" sense; same args converge on one state.
+  // Still idempotent with status="done": settlement fires only on the
+  // transition into a settled state, so a repeat call spawns no second
+  // recurrence occurrence (src/handlers/todos.rs, `settling`).
   update_todo: { title: "Update Todo", readOnly: false, destructive: true, idempotent: true },
   // NOT idempotent: `TodoStore::complete_todo` re-completes unconditionally,
   // and each call spawns another recurrence occurrence plus another completion

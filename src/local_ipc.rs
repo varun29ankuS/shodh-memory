@@ -1890,38 +1890,17 @@ mod platform {
 mod tests {
     use super::*;
     use axum::routing::get;
-    use std::ffi::OsString;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    // Restores the shared auth key after each test; leaving it unset made later
-    // parallel handler tests fail with 503 in CI.
-    struct ScopedEnvVar {
-        name: &'static str,
-        original: Option<OsString>,
-    }
-
-    impl ScopedEnvVar {
-        fn set(name: &'static str, value: &str) -> Self {
-            let original = std::env::var_os(name);
-            std::env::set_var(name, value);
-            Self { name, original }
-        }
-    }
-
-    impl Drop for ScopedEnvVar {
-        fn drop(&mut self) {
-            match &self.original {
-                Some(value) => std::env::set_var(self.name, value),
-                None => std::env::remove_var(self.name),
-            }
-        }
-    }
 
     #[tokio::test]
     async fn health_round_trip_uses_versioned_envelope() {
-        let _guard = crate::auth::ENV_LOCK.lock().unwrap();
+        // `test_support::ScopedEnv` is the crate-wide version of the guard
+        // this module used to define locally: it restores the shared auth key
+        // after the test, because leaving it unset made later parallel handler
+        // tests fail with 503 in CI.
+        let mut guard = crate::test_support::ScopedEnv::acquire();
         let api_key = crate::handlers::test_helpers::TEST_API_KEY;
-        let _api_keys = ScopedEnvVar::set("SHODH_API_KEYS", api_key);
+        guard.set("SHODH_API_KEYS", api_key);
         let endpoint = test_endpoint("health");
         let listener = LocalIpcServer::bind(endpoint.path()).await.unwrap();
         let shutdown = CancellationToken::new();
@@ -1973,9 +1952,13 @@ mod tests {
         // Drives process_frame (with auth satisfied) rather than asserting the const
         // arrays contain their own literals — the previous test would still pass if
         // the policy gates were deleted entirely.
-        let _guard = crate::auth::ENV_LOCK.lock().unwrap();
+        // `test_support::ScopedEnv` is the crate-wide version of the guard
+        // this module used to define locally: it restores the shared auth key
+        // after the test, because leaving it unset made later parallel handler
+        // tests fail with 503 in CI.
+        let mut guard = crate::test_support::ScopedEnv::acquire();
         let api_key = crate::handlers::test_helpers::TEST_API_KEY;
-        let _api_keys = ScopedEnvVar::set("SHODH_API_KEYS", api_key);
+        guard.set("SHODH_API_KEYS", api_key);
 
         for path in STREAMING_PATHS {
             let response =
@@ -2004,9 +1987,13 @@ mod tests {
         // Regression: both original auth tests sent auth="" and so only exercised the
         // empty-key short-circuit — stubbing validate_api_key to Ok(()) left the
         // suite green while IPC accepted any key. This drives the real validator.
-        let _guard = crate::auth::ENV_LOCK.lock().unwrap();
+        // `test_support::ScopedEnv` is the crate-wide version of the guard
+        // this module used to define locally: it restores the shared auth key
+        // after the test, because leaving it unset made later parallel handler
+        // tests fail with 503 in CI.
+        let mut guard = crate::test_support::ScopedEnv::acquire();
         let api_key = crate::handlers::test_helpers::TEST_API_KEY;
-        let _api_keys = ScopedEnvVar::set("SHODH_API_KEYS", api_key);
+        guard.set("SHODH_API_KEYS", api_key);
 
         let router = Router::new().route(
             "/api/ping",
@@ -2028,9 +2015,13 @@ mod tests {
 
     #[tokio::test]
     async fn request_proof_hides_the_key_and_binds_the_body() {
-        let _guard = crate::auth::ENV_LOCK.lock().unwrap();
+        // `test_support::ScopedEnv` is the crate-wide version of the guard
+        // this module used to define locally: it restores the shared auth key
+        // after the test, because leaving it unset made later parallel handler
+        // tests fail with 503 in CI.
+        let mut guard = crate::test_support::ScopedEnv::acquire();
         let api_key = crate::handlers::test_helpers::TEST_API_KEY;
-        let _api_keys = ScopedEnvVar::set("SHODH_API_KEYS", api_key);
+        guard.set("SHODH_API_KEYS", api_key);
 
         let frame = encode_request(api_key, "POST", "/api/remember");
         assert!(

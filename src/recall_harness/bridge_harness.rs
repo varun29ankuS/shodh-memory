@@ -75,7 +75,7 @@ use crate::memory::{ForgetCriteria, Query};
 use crate::recall_harness::fixtures::CorpusItem;
 use crate::recall_harness::report::{BridgeDamageRow, BridgeReport};
 use crate::recall_harness::runner::{
-    build_manager, ingest_corpus, RunInputs, EVAL_USER, HARNESS_CLOCK_ANCHOR,
+    build_manager, ingest_corpus, pin_harness_threads, RunInputs, EVAL_USER,
 };
 
 /// Default number of independent two-cluster worlds.
@@ -434,28 +434,6 @@ pub fn generate_bridge_fixtures(
     }
 }
 
-/// Set the harness's deterministic env floor (single-threaded reductions, frozen
-/// scoring clock, read-only recall) only where the caller has not already pinned
-/// it. Mirrors `runner::pin_harness_threads`, which is private to that module.
-fn pin_env() {
-    // SAFETY: env mutation is process-wide; the harness is the sole caller and the
-    // production server never invokes it. Single-threaded at harness entry.
-    unsafe {
-        for (k, v) in [
-            ("SHODH_ONNX_THREADS", "1"),
-            ("RAYON_NUM_THREADS", "1"),
-            ("SHODH_RECALL_READONLY", "1"),
-        ] {
-            if std::env::var_os(k).is_none() {
-                std::env::set_var(k, v);
-            }
-        }
-        if std::env::var_os("SHODH_EVAL_NOW").is_none() {
-            std::env::set_var("SHODH_EVAL_NOW", HARNESS_CLOCK_ANCHOR);
-        }
-    }
-}
-
 /// Bridge-crossing recall at each cutoff in `cutoffs`, over `cases`.
 ///
 /// Every case is queried ONCE at `max_results = max(cutoffs)`; the gold's rank in
@@ -472,6 +450,7 @@ fn measure_present_curve(
     cases: &[BridgeCase],
     id_map: &std::collections::HashMap<String, Uuid>,
     cutoffs: &[usize],
+    read_only: bool,
 ) -> Vec<f64> {
     if cases.is_empty() || cutoffs.is_empty() {
         return vec![0.0; cutoffs.len()];
@@ -489,6 +468,7 @@ fn measure_present_curve(
             ner_entities: Some(case.anchor_names.clone()),
             max_results: query_k,
             layers: LayerMode::Full,
+            read_only,
             ..Default::default()
         };
         let memories = system.read().recall(&query).unwrap_or_default();
@@ -513,8 +493,9 @@ fn measure_bridge_recall(
     cases: &[BridgeCase],
     id_map: &std::collections::HashMap<String, Uuid>,
     k: usize,
+    read_only: bool,
 ) -> f64 {
-    measure_present_curve(system, cases, id_map, &[k])[0]
+    measure_present_curve(system, cases, id_map, &[k], read_only)[0]
 }
 
 /// Delete the memories named by `corpus_ids` from the live system (all tiers +
@@ -592,6 +573,7 @@ fn run_damage_curve(
     fractions: &[f64],
     targeted: bool,
     total_nodes: usize,
+    read_only: bool,
 ) -> Result<Vec<(usize, f64)>> {
     let sub = if targeted {
         "bridge_damage_targeted"
@@ -611,7 +593,7 @@ fn run_damage_curve(
             delete_nodes(&system, &id_map, batch)?;
             deleted_so_far = target_count;
         }
-        let recall = measure_bridge_recall(&system, &fx.cases, &id_map, BRIDGE_K);
+        let recall = measure_bridge_recall(&system, &fx.cases, &id_map, BRIDGE_K, read_only);
         out.push((deleted_so_far, recall));
     }
     Ok(out)
@@ -625,7 +607,7 @@ pub fn analyze_bridge_recall(
     cluster_size: usize,
     bridges_per_unit: usize,
 ) -> Result<BridgeReport> {
-    pin_env();
+    let _harness_env = pin_harness_threads();
     let fx = generate_bridge_fixtures(units, cluster_size, bridges_per_unit);
     let total_nodes = fx.corpus.len();
 
@@ -639,18 +621,20 @@ pub fn analyze_bridge_recall(
     let (val_manager, val_id_map) = ingest_fresh(inputs, &fx, "bridge_validity")?;
     let val_system = val_manager.get_user_memory(EVAL_USER)?;
     let cutoffs = [BRIDGE_K, 50, 100, total_nodes];
-    let present_curve = measure_present_curve(&val_system, &fx.cases, &val_id_map, &cutoffs);
+    let read_only = _harness_env.recall_read_only();
+    let present_curve =
+        measure_present_curve(&val_system, &fx.cases, &val_id_map, &cutoffs, read_only);
     let present = present_curve[0];
     let present_50 = present_curve[1];
     let present_100 = present_curve[2];
     let present_full = present_curve[3];
     delete_nodes(&val_system, &val_id_map, &fx.bridge_ids)?;
-    let deleted = measure_bridge_recall(&val_system, &fx.cases, &val_id_map, BRIDGE_K);
+    let deleted = measure_bridge_recall(&val_system, &fx.cases, &val_id_map, BRIDGE_K, read_only);
     drop(val_manager);
 
     // --- Damage curves: random vs targeted, escalating node budgets -------
-    let random = run_damage_curve(inputs, &fx, DAMAGE_FRACTIONS, false, total_nodes)?;
-    let targeted = run_damage_curve(inputs, &fx, DAMAGE_FRACTIONS, true, total_nodes)?;
+    let random = run_damage_curve(inputs, &fx, DAMAGE_FRACTIONS, false, total_nodes, read_only)?;
+    let targeted = run_damage_curve(inputs, &fx, DAMAGE_FRACTIONS, true, total_nodes, read_only)?;
 
     let damage: Vec<BridgeDamageRow> = DAMAGE_FRACTIONS
         .iter()
@@ -956,7 +940,7 @@ mod tests {
     fn ingested_graph_contains_bridge_entities() {
         let dir = unique_storage_dir("topology");
         let inputs = test_inputs(dir.clone());
-        pin_env();
+        let _harness_env = pin_harness_threads();
         let units = 4;
         let fx = generate_bridge_fixtures(units, 4, 1);
         let (manager, _id_map) = ingest_fresh(&inputs, &fx, "topology").expect("ingest");

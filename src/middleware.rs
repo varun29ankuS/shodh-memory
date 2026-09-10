@@ -338,10 +338,14 @@ fn is_id(segment: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::test_support::ScopedEnv;
 
-    /// Process-global lock for tests that manipulate environment variables.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // This module used to declare its own `static ENV_LOCK`. Two module-local
+    // mutexes do not exclude each other: these tests flip `SHODH_ENV` while
+    // `auth`'s tests read `is_production_mode()` under a DIFFERENT lock, so the
+    // lock bought nothing across that boundary. They now share
+    // `test_support::ENV_LOCK` with every other test that touches the
+    // server/auth env family, and restore what they changed.
 
     #[test]
     fn test_normalize_path() {
@@ -391,7 +395,7 @@ mod tests {
 
     #[tokio::test]
     async fn security_headers_present_in_dev_mode() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let mut guard = ScopedEnv::acquire();
         use axum::body::Body;
         use axum::http::{Request as HttpRequest, StatusCode};
         use axum::middleware::from_fn;
@@ -399,7 +403,7 @@ mod tests {
         use axum::Router;
         use tower::ServiceExt;
 
-        std::env::remove_var("SHODH_ENV");
+        guard.remove("SHODH_ENV");
 
         let app = Router::new()
             .route("/test", get(|| async { "ok" }))
@@ -431,7 +435,7 @@ mod tests {
 
     #[tokio::test]
     async fn security_headers_hsts_in_production() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let mut guard = ScopedEnv::acquire();
         use axum::body::Body;
         use axum::http::Request as HttpRequest;
         use axum::middleware::from_fn;
@@ -439,7 +443,7 @@ mod tests {
         use axum::Router;
         use tower::ServiceExt;
 
-        std::env::set_var("SHODH_ENV", "production");
+        guard.set("SHODH_ENV", "production");
 
         let app = Router::new()
             .route("/test", get(|| async { "ok" }))
@@ -463,12 +467,12 @@ mod tests {
             .unwrap();
         assert!(hsts.contains("max-age="));
 
-        std::env::remove_var("SHODH_ENV");
+        guard.remove("SHODH_ENV");
     }
 
     #[tokio::test]
     async fn security_headers_keep_handler_declared_csp() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let mut guard = ScopedEnv::acquire();
         use axum::body::Body;
         use axum::http::Request as HttpRequest;
         use axum::middleware::from_fn;
@@ -476,7 +480,7 @@ mod tests {
         use axum::Router;
         use tower::ServiceExt;
 
-        std::env::remove_var("SHODH_ENV");
+        guard.remove("SHODH_ENV");
 
         let app = Router::new()
             .route(

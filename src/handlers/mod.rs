@@ -12,9 +12,13 @@ pub mod types;
 pub mod health;
 pub mod utils;
 
+// Audit trail (read API over the `audit` column family)
+pub mod audit;
+
 // Memory core operations
 pub mod anomalies;
 pub mod crud;
+pub mod history;
 pub mod recall;
 pub mod remember;
 
@@ -41,6 +45,10 @@ pub mod webhooks;
 
 // External integrations
 pub mod integrations;
+pub mod integrity;
+
+// Ingestion source registry (connectors)
+pub mod sources;
 
 // Session and user management
 pub mod sessions;

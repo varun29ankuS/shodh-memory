@@ -445,7 +445,14 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
             )?;
         } else if key.len() == 16 {
             // Memory record (16-byte UUID key) — uses SHO envelope
-            if let Some((version, _payload)) = serialization::unwrap_sho(&value) {
+            // A corrupt envelope is NOT "already postcard" and is NOT a
+            // pre-envelope record: it falls through to the decode below, which
+            // now refuses it outright instead of laundering it through the
+            // legacy chain, and it is reported as a warning rather than
+            // rewritten in place.
+            if let serialization::ShoEnvelope::Valid { version, .. } =
+                serialization::read_sho_envelope(&value)
+            {
                 if version == serialization::SHO_VERSION_POSTCARD {
                     // Already postcard
                     counts.memories_skipped += 1;
@@ -453,8 +460,16 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
                 }
             }
 
-            // Try to deserialize with the full legacy fallback chain
-            match crate::memory::storage::deserialize_memory_for_migration(&value) {
+            // The full legacy fallback chain, CHECKED against the key.
+            //
+            // This branch rewrites what it decodes. The chain's last shapes
+            // derive the record's id from the VALUE, so a pseudo-decode
+            // produces a `Memory` whose id is not the key it was found under —
+            // and rewriting it here would encode that fabrication in the
+            // current format, with a valid CRC, over the only copy of the
+            // original bytes. A record that cannot be trusted is left exactly
+            // as it is, and reported, so the scrub can still see it.
+            match crate::memory::storage::deserialize_memory_for_migration_checked(&key, &value) {
                 Ok(memory) => {
                     if !dry_run {
                         let new_value = serialization::encode_sho(&memory)?;
@@ -660,8 +675,24 @@ fn migrate_shared_db(shared_dir: &Path, dry_run: bool) -> Result<(usize, usize)>
     opts.create_if_missing(false);
     opts.create_missing_column_families(true);
 
-    // The shared DB has many CFs but only "audit" contains bincode data.
-    // Others (todos, projects, prospective, feedback, files) use JSON.
+    // Only "audit" contains bincode data; the others (todos, projects,
+    // prospective, feedback, files, sources) use JSON or postcard and are
+    // migrated elsewhere or not at all. They are listed anyway, and that is the
+    // whole point of this array:
+    //
+    // A read-write `DB::open_cf_descriptors` FAILS on a database that contains
+    // a column family absent from this list. `create_missing_column_families`
+    // does not help — it covers "listed but absent", not "present but
+    // unlisted". So every CF the server can create must appear here or `shodh
+    // migrate` cannot open the shared DB at all, the audit migration never
+    // runs, and the command exits 1 (see `main.rs`). That has now happened
+    // twice: once for `CF_OPLOG` (audit `2026-07-30-traceability-slice1-audit.md`,
+    // Finding A, amendment 3) and once for the ingestion source registry, whose
+    // two CFs `MultiUserMemoryManager::new` creates on the first server start.
+    //
+    // The registry's names are referenced as constants rather than spelled as
+    // literals so renaming one cannot silently reintroduce the same break. The
+    // rest remain literals only because their defining constants are private.
     let shared_cfs = [
         "default",
         "audit",
@@ -673,6 +704,8 @@ fn migrate_shared_db(shared_dir: &Path, dry_run: bool) -> Result<(usize, usize)>
         "files",
         "file_index",
         "feedback",
+        crate::memory::sources::CF_SOURCES,
+        crate::memory::sources::CF_SOURCE_CURSOR,
     ];
     let cfs: Vec<ColumnFamilyDescriptor> = shared_cfs
         .iter()
@@ -781,4 +814,113 @@ where
 
     *migrated += 1;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handlers::types::AuditEvent;
+    use crate::memory::sources::SourceStore;
+
+    /// The column families the shared DB had BEFORE the ingestion source
+    /// registry existed — i.e. what is on disk for every install that has not
+    /// yet started this build.
+    const PRE_REGISTRY_SHARED_CFS: &[&str] = &[
+        "default",
+        "audit",
+        "todos",
+        "projects",
+        "todo_index",
+        "prospective",
+        "prospective_index",
+        "files",
+        "file_index",
+        "feedback",
+    ];
+
+    /// Create a shared DB at `dir` carrying exactly `cf_names`, with one
+    /// already-postcard audit record so a successful open can be told apart
+    /// from an open that read nothing.
+    fn shared_db_with(dir: &Path, cf_names: &[&str]) {
+        let mut opts = RocksOptions::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+
+        let cfs: Vec<ColumnFamilyDescriptor> = cf_names
+            .iter()
+            .map(|n| ColumnFamilyDescriptor::new(*n, RocksOptions::default()))
+            .collect();
+        let db = DB::open_cf_descriptors(&opts, dir, cfs).expect("create shared db");
+
+        let event = AuditEvent {
+            timestamp: chrono::Utc::now(),
+            event_type: "remember".to_string(),
+            memory_id: "m1".to_string(),
+            details: "a record the migration must read".to_string(),
+        };
+        let cf = db.cf_handle("audit").expect("audit cf");
+        db.put_cf(
+            cf,
+            b"audit:1",
+            serialization::encode(&event).expect("encode"),
+        )
+        .expect("write audit record");
+    }
+
+    /// A shared DB written by a server that HAS the source registry must still
+    /// be openable by `shodh migrate`.
+    ///
+    /// This is the regression. RocksDB's read-write open refuses a database
+    /// containing a column family the caller did not list —
+    /// `create_missing_column_families` covers the opposite case only. The two
+    /// registry CFs are created by `MultiUserMemoryManager::new` on the first
+    /// server start, so with them missing from `shared_cfs` the open fails,
+    /// `migrate_all` records the error, and `shodh migrate` exits 1 without
+    /// ever migrating an audit event.
+    ///
+    /// Fail-first: drop the two `crate::memory::sources::*` entries from
+    /// `shared_cfs` and this returns `Err("Column families not opened")`.
+    #[test]
+    fn migrate_shared_db_opens_a_db_that_has_the_source_registry_cfs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("shared");
+
+        // Take the CF names from the registry itself, not from a literal, so
+        // this test keeps testing the real set if a name ever changes.
+        let registry: Vec<String> = SourceStore::cf_descriptors()
+            .iter()
+            .map(|d| d.name().to_string())
+            .collect();
+        assert_eq!(
+            registry.len(),
+            2,
+            "the registry declares two column families"
+        );
+
+        let mut names: Vec<&str> = PRE_REGISTRY_SHARED_CFS.to_vec();
+        names.extend(registry.iter().map(|s| s.as_str()));
+        shared_db_with(&dir, &names);
+
+        let (migrated, skipped) =
+            migrate_shared_db(&dir, true).expect("a shared DB with the registry CFs must open");
+        assert_eq!(
+            (migrated, skipped),
+            (0, 1),
+            "the audit record must be read and recognised as already-postcard"
+        );
+    }
+
+    /// And a shared DB written BEFORE the registry existed must still open, so
+    /// the fix did not trade one direction of compatibility for the other.
+    /// Here `create_missing_column_families` is what carries it.
+    #[test]
+    fn migrate_shared_db_opens_a_db_created_before_the_source_registry_existed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("shared");
+        shared_db_with(&dir, PRE_REGISTRY_SHARED_CFS);
+
+        let (migrated, skipped) = migrate_shared_db(&dir, true)
+            .expect("a pre-registry shared DB must still open and read");
+        assert_eq!((migrated, skipped), (0, 1));
+    }
 }

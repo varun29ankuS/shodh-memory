@@ -725,9 +725,11 @@ impl ShodhBackupEngine {
             if key.len() != 16 || key.starts_with(STATS_PREFIX) {
                 continue;
             }
-            // The public entry to the same decode chain `get_stats` uses; its
-            // name is historical, the behaviour is the general one.
-            match crate::memory::storage::deserialize_memory_for_migration(&value) {
+            // Checked against the key, so the count matches what a reader
+            // would actually get back. `get_opt` refuses a record whose
+            // decoded id disagrees with its key; counting one here would make
+            // the backup's metadata claim a memory that no read can return.
+            match crate::memory::storage::deserialize_memory_for_migration_checked(&key, &value) {
                 Ok(memory) if !memory.is_forgotten() => count += 1,
                 _ => continue,
             }

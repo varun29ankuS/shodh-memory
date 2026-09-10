@@ -206,27 +206,14 @@ pub fn relationship_to_edge(edge: &crate::graph_memory::RelationshipEdge) -> Exp
     }
 }
 
-/// Synthesize `entity_ref` edges from a [`Memory`]'s entity references.
+/// Synthesize `entity_ref` edges from an entity UUID list.
 ///
-/// Each [`EntityRef`] becomes a directed edge from the memory node to the
-/// referenced entity node, with the `relation` field preserved as an attribute.
-pub fn entity_refs_to_edges(
-    source_id: &uuid::Uuid,
-    refs: &[crate::memory::EntityRef],
-) -> Vec<ExportEdge> {
-    refs.iter()
-        .map(|r| ExportEdge {
-            id: format!("{}-{}", source_id, r.entity_id),
-            source: source_id.to_string(),
-            target: r.entity_id.to_string(),
-            edge_type: "entity_ref".to_owned(),
-            label: None,
-            attributes: serde_json::json!({ "relation": r.relation }),
-        })
-        .collect()
-}
-
-/// Synthesize `entity_ref` edges from an [`EpisodicNode`]'s entity UUID list.
+/// Used for both episodes and memories: the graph pass gives a memory's
+/// episode the memory's own UUID, so one function keyed on that UUID covers
+/// both. The `Memory`-shaped variant that read `Memory::entity_refs` and
+/// preserved its per-ref `relation` string was removed with its last caller —
+/// that field is empty on every stored memory, so the relation it preserved was
+/// never observable, and the function survived only through its own unit test.
 ///
 /// Each entity UUID becomes a directed edge from the episode node to the entity
 /// node, with a static `"referenced"` relation attribute.
@@ -546,12 +533,25 @@ pub async fn export_graph(
         if let Ok(mem_sys) = state.get_user_memory(&user_id) {
             let mem_guard = mem_sys.read();
             if let Ok(memories) = mem_guard.get_all_memories() {
+                // Memory→entity edges are only synthesized here when the
+                // episode branch above did not already emit them.
+                //
+                // Both branches key the edge `{memory_id}-{entity_id}`, because
+                // the graph pass gives a memory's episode the memory's own
+                // UUID — so running both would emit duplicate edge ids for the
+                // same pair. This was invisible before only because
+                // `memory.entity_refs` is empty on every stored memory, which
+                // made the call below a guaranteed no-op rather than a
+                // duplicate.
+                let synthesize_entity_edges = inc_entities && !inc_episodes;
+
                 for memory in &memories {
                     if memory.importance() < params.min_importance {
                         continue;
                     }
-                    if inc_entities {
-                        edges.extend(entity_refs_to_edges(&memory.id.0, &memory.entity_refs));
+                    if synthesize_entity_edges {
+                        let refs = mem_guard.memory_entity_ids(memory);
+                        edges.extend(episode_refs_to_edges(&memory.id.0, &refs));
                     }
                     nodes.push(memory_to_node(memory, params.include_embeddings));
                 }
@@ -612,7 +612,6 @@ mod tests {
         EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode, LtpStatus, RelationType,
         RelationshipEdge,
     };
-    use crate::memory::EntityRef;
     use chrono::Utc;
     use std::collections::{HashMap, VecDeque};
     use uuid::Uuid;
@@ -770,34 +769,26 @@ mod tests {
         assert!((confidence - 0.9_f64).abs() < 1e-5);
     }
 
+    /// A memory's entity edges are keyed by the memory's own UUID, because the
+    /// graph pass gives its episode that UUID. This is what makes emitting them
+    /// from both the episode branch and the memory branch a duplicate rather
+    /// than two different edge sets.
     #[test]
-    fn test_entity_ref_edges() {
-        let source_id = Uuid::new_v4();
+    fn test_entity_ref_edges_are_keyed_by_the_owning_uuid() {
+        let owner_id = Uuid::new_v4();
         let entity_a = Uuid::new_v4();
         let entity_b = Uuid::new_v4();
-        let refs = vec![
-            EntityRef {
-                entity_id: entity_a,
-                name: "Alice".to_owned(),
-                relation: "subject".to_owned(),
-            },
-            EntityRef {
-                entity_id: entity_b,
-                name: "Rust".to_owned(),
-                relation: "mentioned".to_owned(),
-            },
-        ];
 
-        let edges = entity_refs_to_edges(&source_id, &refs);
+        let edges = episode_refs_to_edges(&owner_id, &[entity_a, entity_b]);
 
         assert_eq!(edges.len(), 2);
-        for (edge, r) in edges.iter().zip(refs.iter()) {
-            assert_eq!(edge.id, format!("{}-{}", source_id, r.entity_id));
-            assert_eq!(edge.source, source_id.to_string());
-            assert_eq!(edge.target, r.entity_id.to_string());
+        for (edge, entity_id) in edges.iter().zip([entity_a, entity_b].iter()) {
+            assert_eq!(edge.id, format!("{owner_id}-{entity_id}"));
+            assert_eq!(edge.source, owner_id.to_string());
+            assert_eq!(edge.target, entity_id.to_string());
             assert_eq!(edge.edge_type, "entity_ref");
             assert!(edge.label.is_none());
-            assert_eq!(edge.attributes["relation"], r.relation.as_str());
+            assert_eq!(edge.attributes["relation"], "referenced");
         }
     }
 

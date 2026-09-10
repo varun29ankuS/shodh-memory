@@ -963,9 +963,23 @@ impl RetrievalEngine {
         Ok(memory_ids)
     }
 
-    /// Get memory from storage by ID
+    /// Get memory from storage by ID, where a missing memory is an error.
+    ///
+    /// Use this only where the record IS the answer. Scanning callers — the
+    /// ones that would react to a failure by discarding their pointer to the
+    /// memory — must use [`Self::get_from_storage_opt`].
     pub fn get_from_storage(&self, id: &MemoryId) -> Result<Memory> {
         self.storage.get(id)
+    }
+
+    /// Get memory from storage by ID, telling absence apart from a failed read.
+    ///
+    /// `Ok(None)` means RocksDB positively reported no value at the key — the
+    /// only outcome that justifies removing this memory's index entry (see
+    /// [`MemoryStorage::get_opt`]). `Err` means the read was inconclusive: the
+    /// record may still be there, so nothing pointing at it may be deleted.
+    pub fn get_from_storage_opt(&self, id: &MemoryId) -> Result<Option<Memory>> {
+        self.storage.get_opt(id)
     }
 
     /// Search for similar memories by embedding directly (SHO-106)

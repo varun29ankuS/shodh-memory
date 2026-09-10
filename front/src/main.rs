@@ -151,27 +151,121 @@ async fn seat_proxy(
     forward(req, &backend.seat_base).await
 }
 
+/// Headers this proxy must NEVER copy from an upstream response.
+///
+/// The proxy is a *denylist*, not an allowlist. It used to forward exactly
+/// `content-type` and `cache-control`, which silently dropped every other
+/// header both upstreams set — including the four the backend's
+/// `security_headers` middleware stamps on EVERY response
+/// (`x-content-type-options`, `x-frame-options`, `content-security-policy`,
+/// and `strict-transport-security` in production). The dev proxy forwards
+/// everything, so the shipped binary was the only place the dashboard ran
+/// without its security headers. An allowlist re-creates that failure mode
+/// every time either service starts setting a new header; a denylist fails the
+/// other way, which is the safe way for a header the proxy has not heard of.
+///
+/// Two groups are denied:
+///
+/// 1. **Hop-by-hop headers** (RFC 9110 §7.6.1). They describe the single
+///    connection they arrived on, not the message, and a proxy must not pass
+///    them to the next hop.
+/// 2. **`content-length`.** The body is re-framed here —
+///    [`Body::from_stream`] hands hyper a stream and hyper derives the
+///    framing. An upstream `content-length` copied onto a re-framed body is at
+///    best redundant and at worst a contradiction.
+///
+/// `content-encoding` is deliberately NOT denied: it is an end-to-end header
+/// and this proxy does not decode bodies (`front`'s reqwest is built with
+/// `default-features = false` and no `gzip`/`brotli`/`deflate`/`zstd`
+/// feature), so a coded body must keep its label. Nothing in the product emits
+/// it today — the backend has no compression layer and this proxy does not
+/// forward the browser's `accept-encoding`, so compression is never
+/// negotiated.
+const HOP_BY_HOP: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "content-length",
+];
+
+/// Headers withheld on purpose even though they are end-to-end.
+///
+/// `set-cookie` is the only header either upstream could send that would leave
+/// persistent state on the dashboard's origin, and the browser talks to this
+/// proxy on one origin for the UI, the backend (`/api/*`) and the seat
+/// (`/seat/*`) alike — so an upstream cookie would be scoped to the page
+/// itself. Neither service sets one: the backend authenticates with
+/// `X-API-Key` and the seat with a bearer token, both injected here and never
+/// exposed to the browser, and neither has a session concept. Withholding a
+/// header nobody sends costs nothing and keeps one upstream from writing
+/// durable state into the other's origin.
+///
+/// If a real browser-facing auth flow is ever introduced, this is the line
+/// that has to be revisited — not the denylist above.
+const WITHHELD: &[&str] = &["set-cookie"];
+
+/// Decide whether a response header from an upstream may be forwarded.
+///
+/// Split out from [`forward`] so it can be tested without a live upstream.
+/// `connection_tokens` are the header names listed in the upstream's own
+/// `Connection:` header, which RFC 9110 §7.6.1 makes hop-by-hop for that
+/// message even though they are not hop-by-hop in general.
+fn may_forward(name: &str, connection_tokens: &[String]) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if HOP_BY_HOP.contains(&lower.as_str()) || WITHHELD.contains(&lower.as_str()) {
+        return false;
+    }
+    !connection_tokens.contains(&lower)
+}
+
+/// The header names an upstream declared hop-by-hop via its `Connection:`
+/// header, lowercased. `Connection: close` and `Connection: keep-alive` name
+/// no other header, but they are harmless here — both are already denied.
+fn connection_tokens(headers: &reqwest::header::HeaderMap) -> Vec<String> {
+    headers
+        .get_all("connection")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(|t| t.trim().to_ascii_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
 /// Send a proxied request and stream the response back unbuffered.
 async fn forward(req: reqwest::RequestBuilder, upstream: &str) -> Response {
     match req.send().await {
         Ok(resp) => {
             let status = StatusCode::from_u16(resp.status().as_u16())
                 .unwrap_or(StatusCode::BAD_GATEWAY);
-            let content_type = resp
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("application/octet-stream")
-                .to_string();
-            let mut builder = Response::builder()
-                .status(status)
-                .header("content-type", content_type);
-            // Keep SSE responses unbuffered end-to-end.
-            if let Some(cc) = resp.headers().get("cache-control") {
-                if let Ok(cc) = cc.to_str() {
-                    builder = builder.header("cache-control", cc.to_string());
+            let mut builder = Response::builder().status(status);
+
+            let tokens = connection_tokens(resp.headers());
+            let mut saw_content_type = false;
+            for (name, value) in resp.headers() {
+                if !may_forward(name.as_str(), &tokens) {
+                    continue;
                 }
+                if name.as_str().eq_ignore_ascii_case("content-type") {
+                    saw_content_type = true;
+                }
+                // `append`, not `insert`: repeated headers are meaningful
+                // (`vary`, `set-cookie` were it forwarded) and collapsing them
+                // would lose all but the last.
+                builder = builder.header(name.as_str(), value);
             }
+            // Same fallback the two-header version had: a body with no declared
+            // type is opaque bytes, not guessable ones — the dashboard must not
+            // be handed something a browser will sniff.
+            if !saw_content_type {
+                builder = builder.header("content-type", "application/octet-stream");
+            }
+
             builder
                 .body(Body::from_stream(resp.bytes_stream()))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
@@ -181,5 +275,129 @@ async fn forward(req: reqwest::RequestBuilder, upstream: &str) -> Response {
             format!("shodh-front proxy error → {upstream}: {e}"),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{connection_tokens, may_forward};
+    use reqwest::header::HeaderMap;
+
+    fn no_tokens() -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The regression this file exists to prevent: the proxy forwarded exactly
+    /// `content-type` and `cache-control`, so every security header the
+    /// backend's `security_headers` middleware stamps was dropped before it
+    /// reached the browser. Captured live from the running backend
+    /// (`GET /api/list/{user}` → 200) on 2026-08-16:
+    ///
+    /// ```text
+    /// content-type: application/json
+    /// vary: origin, access-control-request-method, access-control-request-headers
+    /// access-control-allow-origin: *
+    /// x-content-type-options: nosniff
+    /// x-frame-options: DENY
+    /// content-security-policy: default-src 'none'
+    /// cache-control: no-store
+    /// content-length: 387
+    /// ```
+    ///
+    /// Only the first and the `cache-control` line survived the proxy.
+    #[test]
+    fn security_headers_reach_the_browser() {
+        for name in [
+            "x-content-type-options",
+            "x-frame-options",
+            "content-security-policy",
+            "strict-transport-security",
+        ] {
+            assert!(
+                may_forward(name, &no_tokens()),
+                "{name} is set on every backend response and must not be dropped by the proxy"
+            );
+        }
+    }
+
+    /// Headers whose loss is silent but load-bearing: `allow` is the whole
+    /// content of a 405, `retry-after` is how a client learns to back off from
+    /// a 429, and `x-accel-buffering: no` (set by the seat on both its SSE
+    /// streams) is what stops a downstream proxy buffering a live stream.
+    #[test]
+    fn conditional_headers_reach_the_browser() {
+        for name in [
+            "allow",
+            "retry-after",
+            "x-ratelimit-after",
+            "x-accel-buffering",
+            "vary",
+            "access-control-allow-origin",
+            "content-type",
+            "cache-control",
+            "content-encoding",
+        ] {
+            assert!(
+                may_forward(name, &no_tokens()),
+                "{name} must be forwarded"
+            );
+        }
+    }
+
+    /// The body is re-framed by hyper via `Body::from_stream`, so upstream
+    /// framing must not be copied onto it, and hop-by-hop headers describe a
+    /// connection this response is leaving.
+    #[test]
+    fn framing_and_hop_by_hop_are_dropped() {
+        for name in [
+            "content-length",
+            "transfer-encoding",
+            "connection",
+            "keep-alive",
+            "upgrade",
+            "te",
+            "trailer",
+            "proxy-authenticate",
+            "proxy-authorization",
+        ] {
+            assert!(
+                !may_forward(name, &no_tokens()),
+                "{name} must NOT be forwarded"
+            );
+        }
+    }
+
+    /// Withheld on purpose — see `WITHHELD`.
+    #[test]
+    fn set_cookie_is_withheld() {
+        assert!(!may_forward("set-cookie", &no_tokens()));
+    }
+
+    /// Header names are case-insensitive; the denylist compares lowercased.
+    #[test]
+    fn denylist_is_case_insensitive() {
+        assert!(!may_forward("Content-Length", &no_tokens()));
+        assert!(!may_forward("Transfer-Encoding", &no_tokens()));
+        assert!(may_forward("X-Frame-Options", &no_tokens()));
+    }
+
+    /// A header the upstream itself declared hop-by-hop via `Connection:` is
+    /// hop-by-hop for that message only.
+    #[test]
+    fn connection_listed_headers_are_dropped() {
+        let mut headers = HeaderMap::new();
+        headers.insert("connection", "keep-alive, X-Upstream-Only".parse().unwrap());
+        let tokens = connection_tokens(&headers);
+
+        assert!(!may_forward("x-upstream-only", &tokens));
+        // ...and only for that message.
+        assert!(may_forward("x-upstream-only", &no_tokens()));
+        // Unrelated headers are unaffected.
+        assert!(may_forward("x-frame-options", &tokens));
+    }
+
+    #[test]
+    fn connection_tokens_absent_is_empty() {
+        assert!(connection_tokens(&HeaderMap::new()).is_empty());
     }
 }

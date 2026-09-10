@@ -157,6 +157,25 @@ async fn async_main() -> Result<()> {
         );
     }
 
+    // Start the read-only integrity scrub scheduler.
+    //
+    // Gated on the interval alone, unlike backups (which need
+    // `backup_enabled` too). A scrub writes nothing and consumes no disk; the
+    // only reason to turn it off is cost, and the interval already expresses
+    // that. A second flag would just be one more place for it to be off
+    // without anyone meaning it.
+    if server_config.integrity_scrub_interval_secs > 0 {
+        start_integrity_scrub_scheduler(
+            Arc::clone(&manager),
+            server_config.integrity_scrub_interval_secs,
+        );
+    } else {
+        tracing::warn!(
+            "Integrity scrub scheduler: DISABLED (SHODH_INTEGRITY_SCRUB_INTERVAL=0). \
+             Stored-record integrity is unchecked until POST /api/integrity/scrub is called."
+        );
+    }
+
     // Start telemetry heartbeat if opted in
     if server_config.telemetry_enabled {
         crate::telemetry::start_telemetry_loop(
@@ -608,6 +627,157 @@ fn start_backup_scheduler(manager: AppState, interval_secs: u64, max_backups: us
         "Automatic backup scheduler started (interval: {}h, keep: {} backups)",
         interval_secs / 3600,
         max_backups
+    );
+}
+
+/// Scheduled read-only integrity scrub over every profile on disk.
+///
+/// # Why this exists as a scheduler at all
+///
+/// `POST /api/integrity/scrub` answers "how would you know" only when somebody
+/// asks. The two format breakages this module was built for went unnoticed for
+/// over a month each, and both would have been caught by the first pass after
+/// they landed. A check nobody runs is a check that does not exist.
+///
+/// # Off the request path
+///
+/// The sweep runs on the blocking pool, reads with `fill_cache(false)`, and
+/// takes no lock the serving path needs — both RocksDB handles are cloned out
+/// and both guards dropped before the scan starts (see
+/// [`MultiUserMemoryManager::scrub_user_and_record`]). It does open cold
+/// profiles, which puts them in the user LRU; that cost is accepted so that a
+/// store nobody is currently reading is still checked.
+///
+/// # A run that dies must not leave a lie behind
+///
+/// Each user's result is filed as that user finishes, so a partial run is
+/// partially fresh. If the blocking task panics, every entry the run *should*
+/// have refreshed is overwritten with `Indeterminate` and the panic as its
+/// stop reason. The alternative — leaving a month-old `healthy` standing as
+/// the answer to "is the store intact" — is the same class of lie as a sampled
+/// sweep reporting zero defects.
+fn start_integrity_scrub_scheduler(manager: AppState, interval_secs: u64) {
+    let budget = crate::integrity::ScrubBudget {
+        max_records: None,
+        max_duration: Some(std::time::Duration::from_millis(
+            crate::integrity::SCHEDULED_MAX_DURATION_MS,
+        )),
+    };
+
+    tokio::spawn(async move {
+        // Offset BEFORE the interval is created, which is the whole point.
+        // `tokio::time::interval` anchors its ticks to the moment it is
+        // constructed, so sleeping after construction only delays entry into
+        // the loop — the ticks stay on the original phase and this scheduler
+        // would still land on top of the maintenance one. Both default to
+        // 3600s, both run on the blocking pool, and both are anchored to
+        // startup, so without this they collide on every tick for the life of
+        // the process.
+        //
+        // This also serves as the startup skip: a scrub during boot would
+        // contend with index loading and embedder warm-up for the same disk.
+        tokio::time::sleep(std::time::Duration::from_secs(
+            (interval_secs / 2).clamp(1, 900),
+        ))
+        .await;
+
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        // A sweep is bounded but not instant, and on a pathological store it
+        // could outlast its own interval. The default `Burst` behaviour would
+        // then fire every missed tick back to back, so a slow store would be
+        // scrubbed continuously — the one way this can stop being off the
+        // request path. `Skip` drops missed ticks and resumes on phase: at most
+        // one scrub is ever in flight.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // The first tick of an interval completes immediately.
+        interval.tick().await;
+
+        loop {
+            interval.tick().await;
+
+            let run_started_at = chrono::Utc::now();
+            let manager_clone = Arc::clone(&manager);
+            let budget = budget.clone();
+            match tokio::task::spawn_blocking(move || {
+                manager_clone.run_integrity_scrub_all_users(budget)
+            })
+            .await
+            {
+                Ok((scrubbed, s)) => {
+                    // Graded, not thresholded on `is_healthy`. Aging sets
+                    // is_healthy=false too, and on the current corpus every
+                    // profile is Aging — an alarm that fires hourly on all of
+                    // them teaches its reader to ignore it, which is a worse
+                    // outcome than not alarming at all.
+                    if s.unhealthy > 0 {
+                        // The line that answers "how would you know". Where it
+                        // actually goes is documented on this function.
+                        tracing::error!(
+                            profiles_scrubbed = scrubbed,
+                            unhealthy = s.unhealthy,
+                            implausible_records = s.implausible_records,
+                            checksum_mismatch_records = s.checksum_mismatch_records,
+                            "integrity scrub: {} of {scrubbed} profiles are serving records that \
+                             decode into impossible values or fail their checksum — GET \
+                             /api/integrity/scrub?findings=true for the per-record evidence",
+                            s.unhealthy
+                        );
+                    } else if s.indeterminate > 0 {
+                        tracing::warn!(
+                            profiles_scrubbed = scrubbed,
+                            indeterminate = s.indeterminate,
+                            "integrity scrub: {} of {scrubbed} profiles could not be checked; no \
+                             health claim is being made for them",
+                            s.indeterminate
+                        );
+                    } else if s.degraded > 0 {
+                        tracing::warn!(
+                            profiles_scrubbed = scrubbed,
+                            degraded = s.degraded,
+                            undecodable_records = s.undecodable_records,
+                            "integrity scrub: unreadable records exist below the alarm rate — \
+                             they fail loudly rather than lying, but they are not readable"
+                        );
+                    } else if s.aging > 0 {
+                        info!(
+                            "Scheduled integrity scrub: {scrubbed} profiles, {} aging \
+                             (readable only via a legacy wire generation)",
+                            s.aging
+                        );
+                    } else {
+                        info!("Scheduled integrity scrub: {scrubbed} profiles, all clean");
+                    }
+                }
+                Err(e) => {
+                    // The blocking task died. Users it already reached have
+                    // results newer than `run_started_at` and keep them;
+                    // everything older is invalidated, because the run that was
+                    // supposed to refresh it did not.
+                    let reason = format!(
+                        "the scheduled integrity scrub that started at {run_started_at} died \
+                         before reaching this profile: {e}"
+                    );
+                    let invalidated = manager
+                        .scrub_ledger()
+                        .fail_runs_started_before(run_started_at, &reason);
+                    tracing::error!(
+                        error = %e,
+                        invalidated,
+                        "integrity scrub scheduler task panicked — {invalidated} stale results \
+                         invalidated; no profile is reporting health it did not earn"
+                    );
+                    crate::metrics::publish_integrity_scrub_metrics(
+                        &manager.scrub_ledger().summary(),
+                    );
+                }
+            }
+        }
+    });
+
+    info!(
+        "Integrity scrub scheduler started (interval: {}s, per-run budget: {}ms, read-only)",
+        interval_secs,
+        crate::integrity::SCHEDULED_MAX_DURATION_MS
     );
 }
 

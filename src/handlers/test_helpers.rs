@@ -37,10 +37,25 @@ impl TestHarness {
     ///
     /// Sets `SHODH_API_KEYS` so the auth middleware accepts [`TEST_API_KEY`].
     pub fn new() -> Self {
-        // Ensure the test API key is set exactly once (safe for parallel tests).
+        // Set the test API key exactly once, for the whole process, and never
+        // take it back: every handler test needs the auth middleware to accept
+        // TEST_API_KEY, and the middleware reads `SHODH_API_KEYS` fresh on every
+        // request, so a scoped guard would unset the key while sibling handler
+        // tests were still issuing requests.
+        //
+        // The write is serialised on the crate-wide env lock so this is not a
+        // racing WRITER against the `auth` and `middleware` tests, which now
+        // restore `SHODH_API_KEYS` instead of deleting it.
+        //
+        // What remains open, and cannot be closed here: those tests legitimately
+        // set the variable to other values (or clear it) while handler tests on
+        // other threads are mid-request and READING it. A mutex cannot exclude a
+        // reader that takes nothing. Closing it means the accepted key set
+        // becoming part of `ServerConfig`/router state instead of an env var —
+        // a change to `auth::auth_middleware`, not to test code.
         static ENV_INIT: Once = Once::new();
-        ENV_INIT.call_once(|| unsafe {
-            std::env::set_var("SHODH_API_KEYS", TEST_API_KEY);
+        ENV_INIT.call_once(|| {
+            crate::test_support::ScopedEnv::set_for_process("SHODH_API_KEYS", TEST_API_KEY);
         });
 
         let temp_dir = TempDir::new().expect("failed to create temp dir");

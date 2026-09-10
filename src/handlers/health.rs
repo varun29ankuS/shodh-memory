@@ -31,6 +31,33 @@ pub struct HealthResponse {
     pub pending_retries: usize,
     pub system_memory: SystemMemoryDiagnostics,
     pub rocksdb_memory: crate::system_memory::RocksDbMemoryDiagnostics,
+    /// What the last integrity scrub concluded about stored records.
+    ///
+    /// Reported as its own field and NOT folded into `status`, on purpose.
+    /// `status` answers "is this process serving" — a liveness question a
+    /// scheduler uses to decide whether to restart or drain. An aging store is
+    /// not a reason to take the service out of rotation, and an unhealthy one
+    /// is not fixed by restarting it either. Merging the two would make an
+    /// orchestrator react to a data problem with a process remedy.
+    pub integrity: IntegrityHealth,
+}
+
+/// Storage-integrity summary carried on the health response.
+///
+/// `worst_verdict: None` means nothing has been scrubbed yet. It is not
+/// `healthy`, and a consumer that treats a missing verdict as a passing one has
+/// reintroduced the exact assumption this whole module exists to remove.
+#[derive(serde::Serialize)]
+pub struct IntegrityHealth {
+    pub scheduler_enabled: bool,
+    pub scheduler_interval_secs: u64,
+    pub worst_verdict: Option<crate::integrity::Verdict>,
+    pub profiles_with_a_result: u64,
+    pub profiles_never_scrubbed: usize,
+    pub implausible_records: u64,
+    pub checksum_mismatch_records: u64,
+    pub undecodable_records: u64,
+    pub oldest_result_age_secs: u64,
 }
 
 /// Main health check endpoint
@@ -47,6 +74,26 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let rocksdb_memory = state.rocksdb_memory_diagnostics();
     metrics::update_rocksdb_memory_metrics(&rocksdb_memory);
 
+    let summary = state.scrub_ledger().summary();
+    let scrub_interval = state.server_config().integrity_scrub_interval_secs;
+    // Counted, not inferred: `summary` only knows about profiles that have a
+    // result, so a store nobody has scrubbed is invisible to it. The difference
+    // between the two lists is the honest answer to "how much of the data does
+    // this verdict cover".
+    let profiles_never_scrubbed = {
+        let scrubbed: std::collections::BTreeSet<String> = state
+            .scrub_ledger()
+            .all()
+            .into_iter()
+            .map(|e| e.report.user_id)
+            .collect();
+        state
+            .profiles_on_disk()
+            .into_iter()
+            .filter(|u| !scrubbed.contains(u))
+            .count()
+    };
+
     Json(HealthResponse {
         status: "healthy".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -58,6 +105,17 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         pending_retries,
         system_memory,
         rocksdb_memory,
+        integrity: IntegrityHealth {
+            scheduler_enabled: scrub_interval > 0,
+            scheduler_interval_secs: scrub_interval,
+            worst_verdict: state.scrub_ledger().worst_verdict(),
+            profiles_with_a_result: summary.users_with_a_result,
+            profiles_never_scrubbed,
+            implausible_records: summary.implausible_records,
+            checksum_mismatch_records: summary.checksum_mismatch_records,
+            undecodable_records: summary.undecodable_records,
+            oldest_result_age_secs: summary.oldest_result_age_secs,
+        },
     })
 }
 

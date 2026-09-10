@@ -1643,8 +1643,7 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
             },
             recurrence: {
               type: "string",
-              enum: ["daily", "weekly", "monthly"],
-              description: "Recurrence pattern for repeating tasks",
+              description: "Recurrence pattern for repeating tasks: 'daily', 'weekly' (Mon-Fri), 'weekly:mon,wed,fri' (or weekly:1,3,5 with 0=Sunday), 'monthly' (day 1), 'monthly:15', or 'every 3 days' (1-3650)",
             },
             parent_id: {
               type: "string",
@@ -1763,6 +1762,10 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
             parent_id: {
               type: "string",
               description: "Parent todo ID or short prefix to make this a subtask. Pass empty string to remove parent.",
+            },
+            recurrence: {
+              type: "string",
+              description: "Replace the recurrence pattern: 'daily', 'weekly' (Mon-Fri), 'weekly:mon,wed,fri', 'monthly' (day 1), 'monthly:15', or 'every 3 days'. Pass an empty string to stop the task recurring.",
             },
             blocked_by: {
               type: "array",
@@ -4506,6 +4509,7 @@ const handleCallTool = async (request: CallToolRequest) => {
           notes,
           tags,
           parent_id,
+          recurrence,
           blocked_by,
           related_memory_ids,
         } = args as {
@@ -4520,6 +4524,7 @@ const handleCallTool = async (request: CallToolRequest) => {
           notes?: string;
           tags?: string[];
           parent_id?: string;
+          recurrence?: string;
           blocked_by?: string[];
           related_memory_ids?: string[];
         };
@@ -4542,6 +4547,7 @@ const handleCallTool = async (request: CallToolRequest) => {
           notes,
           tags,
           parent_id,
+          recurrence,
           blocked_by,
           related_memory_ids,
         });

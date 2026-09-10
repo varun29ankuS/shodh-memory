@@ -1479,6 +1479,18 @@ fn decode_entity_node(data: &[u8]) -> Result<(EntityNode, bool)> {
     }
 }
 
+/// [`decode_entity_node`] exposed to the read-only integrity scrub.
+///
+/// The scrub must classify graph nodes through the *same* decoder that serves
+/// reads — a second copy would drift, and then the scrub would be measuring a
+/// decoder nobody uses. Returns `(node, needs_migration)`.
+pub(crate) fn decode_entity_node_for_scrub(data: &[u8]) -> Result<(EntityNode, bool)> {
+    decode_entity_node(data)
+}
+
+/// Name of the column family holding entity nodes, for the read-only scrub.
+pub(crate) const ENTITIES_CF_NAME: &str = CF_ENTITIES;
+
 fn default_last_activated() -> DateTime<Utc> {
     Utc::now()
 }
@@ -2881,6 +2893,19 @@ impl GraphMemory {
     /// Get a reference to the underlying RocksDB instance (for backup/checkpoint).
     pub fn get_db(&self) -> &DB {
         &self.db
+    }
+
+    /// An owned handle to the graph database, so a long read-only pass can run
+    /// without holding the `RwLock` that guards this `GraphMemory`.
+    ///
+    /// [`Self::get_db`] returns a borrow, which keeps the guard alive for the
+    /// duration of the pass. Graph writers take `.write()` on that lock, and
+    /// parking_lot prefers writers, so one multi-second scrub holding a read
+    /// guard would stall every subsequent reader behind the blocked writer.
+    /// RocksDB handles are internally synchronised; the lock is not what makes
+    /// this database safe to read. Used by [`crate::integrity`].
+    pub(crate) fn db_arc(&self) -> Arc<DB> {
+        Arc::clone(&self.db)
     }
 
     // Column family accessors — cheap HashMap lookups on DB internals
@@ -6681,7 +6706,7 @@ impl GraphMemory {
     /// flood (measured ~80% of graph edges, bypassing the ingest gates, unbounded
     /// with query volume — the OOM driver). Mirrors schema-gated consolidation:
     /// usage strengthens existing structure, it does not wire every co-activation.
-    fn record_memory_coactivation_impl(
+    pub(crate) fn record_memory_coactivation_impl(
         &self,
         memory_ids: &[Uuid],
         strengthen_only: bool,
@@ -14975,8 +15000,12 @@ mod tests {
 
     #[test]
     fn test_provenance_cap_enforced() {
-        // Pin the cap low and deterministically so the test is hermetic.
-        std::env::set_var("SHODH_PROVENANCE_MAX_SOURCES", "3");
+        // Pin the cap low and deterministically so the test is hermetic. The
+        // guard restores the previous value: `provenance_max_sources()` reads
+        // the variable on every attestation, so leaving it at 3 silently capped
+        // every later test in the process.
+        let mut env = crate::test_support::ScopedEnv::acquire();
+        env.set("SHODH_PROVENANCE_MAX_SOURCES", "3");
 
         let temp_dir = tempfile::tempdir().unwrap();
         let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
@@ -15008,8 +15037,6 @@ mod tests {
                 .any(|p| p.source_episode_id == last_episode),
             "the just-added episode must never be dropped by the cap"
         );
-
-        std::env::remove_var("SHODH_PROVENANCE_MAX_SOURCES");
     }
 
     #[test]
@@ -15175,14 +15202,10 @@ mod tests {
         use crate::recall_harness::bridge_harness::generate_bridge_fixtures;
         use crate::recall_harness::runner::{build_manager, ingest_corpus, EVAL_USER};
 
-        // Deterministic single-threaded NER so the ingested topology is reproducible.
-        unsafe {
-            for (k, v) in [("SHODH_ONNX_THREADS", "1"), ("RAYON_NUM_THREADS", "1")] {
-                if std::env::var_os(k).is_none() {
-                    std::env::set_var(k, v);
-                }
-            }
-        }
+        // Deterministic single-threaded NER so the ingested topology is
+        // reproducible. The shared harness pin does exactly this and puts it
+        // back afterwards; a local copy did not.
+        let _harness_env = crate::recall_harness::runner::pin_harness_threads();
 
         let units: usize = std::env::var("SHODH_TOPO_MEASURE_UNITS")
             .ok()
@@ -15436,6 +15459,218 @@ mod tests {
         assert!(
             graph.get_relationship(&bridge_uuid).unwrap().is_none(),
             "with the feature off the bridge is pruned like any other edge"
+        );
+    }
+
+    // =========================================================================
+    // Orphan-sweep guard: an entity that loses every edge has not stopped
+    // existing.
+    //
+    // Both sweeps ("delete any entity left with zero relationships") run behind
+    // `is_typer_committed`. The rule was safe only by accident while keyphrases
+    // were admitted as entities: every real entity co-occurred with a crowd of
+    // tag nodes, so it always kept an edge and never reached the orphan branch.
+    // Once admission got stricter the graph went sparse and the first
+    // maintenance cycle after a `defence-live` rebuild took it from 1,061
+    // entities to 774, carrying off the Indian Navy, Pinaka, Mazagon Dock and
+    // the Indian Ocean.
+    //
+    // These two tests exist because the guard shipped unproven: it type-checked
+    // and the suite stayed green, but nothing had ever observed it PREVENT a
+    // deletion. An attempt to see it live via `/api/consolidate` on a freshly
+    // rebuilt profile watched the entity count hold — but the count held
+    // because `flush_pending_maintenance` returns before the sweep when nothing
+    // is queued for pruning, so the branch never executed. A count that does
+    // not move because the code never ran is not evidence, so each test below
+    // asserts the sweep DID run (an edge was actually pruned) and that the
+    // untyped entity was actually collected, before claiming the typed one was
+    // spared. Without the second half the guard could be disabling the sweep
+    // rather than narrowing it.
+    // =========================================================================
+
+    /// An entity the schema-driven typer committed a span for: `fine_type` is
+    /// set only by `crate::entity_type`'s schema, never by a keyword rule and
+    /// never by a caller. That is the discriminator the sweeps key on.
+    fn sweep_entity(name: &str, fine_type: Option<&str>, origin: DateTime<Utc>) -> EntityNode {
+        EntityNode {
+            uuid: Uuid::new_v4(),
+            name: name.to_string(),
+            labels: vec![EntityLabel::Organization],
+            created_at: origin,
+            last_seen_at: origin,
+            mention_count: 1,
+            summary: String::new(),
+            attributes: std::collections::HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: true,
+            selectivity: None,
+            fine_type: fine_type.map(str::to_string),
+            kb_id: None,
+        }
+    }
+
+    /// One typed entity, one untyped entity, and the single edge between them.
+    /// Pruning that edge orphans BOTH endpoints in the same sweep, so the two
+    /// outcomes are decided by the guard alone and by nothing else about the
+    /// fixture.
+    fn sweep_pair_fixture(
+        origin: DateTime<Utc>,
+        edge: impl FnOnce(Uuid, Uuid) -> RelationshipEdge,
+    ) -> (GraphMemory, tempfile::TempDir, Uuid, Uuid) {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(dir.path(), None).unwrap();
+
+        // `fine_type` present: the typer committed a span for this name.
+        let typed = graph
+            .add_entity(sweep_entity(
+                "Indian Navy",
+                Some("military_organization"),
+                origin,
+            ))
+            .unwrap();
+        // `fine_type` absent: an acronym / caller-declared tag / event lemma —
+        // still collectable, which is what keeps the sweep a sweep.
+        let untyped = graph.add_entity(sweep_entity("ins", None, origin)).unwrap();
+
+        graph.add_relationship(edge(typed, untyped)).unwrap();
+
+        // Read the raw CF, not `get_entity_relationships`: that read applies the
+        // strength filter and would itself queue the edge for pruning, which is
+        // the very thing each test drives deliberately.
+        assert_eq!(
+            graph.get_all_relationships().unwrap().len(),
+            1,
+            "fixture precondition: exactly one edge joins the pair"
+        );
+
+        (graph, dir, typed, untyped)
+    }
+
+    /// Sweep 1 of 2 — the full-scan decay sweep in `apply_decay_at`.
+    #[test]
+    fn decay_orphan_sweep_spares_typed_entity_and_still_collects_untyped() {
+        let origin = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let (graph, _dir, typed, untyped) =
+            sweep_pair_fixture(origin, |a, b| l2_edge(a, b, origin));
+
+        // 60 days clears the L2 min-prune age (30d) and floors the strength.
+        let result = graph.apply_decay_at(origin + Duration::days(60)).unwrap();
+
+        // The sweep RAN. Without this the survival assertion below is vacuous:
+        // an entity trivially survives a branch that never executed.
+        assert_eq!(
+            result.pruned_count, 1,
+            "the only edge must have been pruned — otherwise no entity ever \
+             became an orphan candidate and this test proves nothing"
+        );
+        assert!(
+            graph.get_entity_relationships(&typed).unwrap().is_empty(),
+            "the typed entity must actually be edgeless, i.e. it really did \
+             reach the orphan branch"
+        );
+
+        // The sweep still collects. The guard must NARROW the sweep, not switch
+        // it off — an untyped edgeless node is exactly what it is for.
+        assert!(
+            result.orphaned_entity_ids.contains(&untyped.to_string()),
+            "an untyped edgeless entity must still be reported as orphaned; \
+             got {:?}",
+            result.orphaned_entity_ids
+        );
+        assert!(
+            graph.get_entity(&untyped).unwrap().is_none(),
+            "an untyped edgeless entity must still be deleted"
+        );
+
+        // The guard. Losing every edge is not evidence the entity stopped
+        // existing: the edge is a claim about a RELATIONSHIP and decays on its
+        // own schedule; the entity is a claim that the corpus names a thing.
+        assert!(
+            !result.orphaned_entity_ids.contains(&typed.to_string()),
+            "a typer-committed entity must not be reported as orphaned; \
+             got {:?}",
+            result.orphaned_entity_ids
+        );
+        let survivor = graph
+            .get_entity(&typed)
+            .unwrap()
+            .expect("a typer-committed entity must survive losing every edge");
+        assert_eq!(survivor.name, "Indian Navy");
+        assert_eq!(
+            survivor.fine_type.as_deref(),
+            Some("military_organization"),
+            "the surviving node must keep the extraction that spared it"
+        );
+    }
+
+    /// Sweep 2 of 2 — the lazy queue-drain sweep in `flush_pending_maintenance`.
+    ///
+    /// This is the sweep production actually runs every maintenance cycle, and
+    /// the one whose queue only fills from opportunistic edge pruning during
+    /// reads. Driving it requires a read that finds a prunable edge first,
+    /// which is precisely why a `/api/consolidate` call against a freshly
+    /// rebuilt graph exercised nothing.
+    #[test]
+    fn lazy_orphan_sweep_spares_typed_entity_and_still_collects_untyped() {
+        let origin = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        // Strength far below L1_PRUNE_THRESHOLD (0.1) with `last_activated` at
+        // read time, so `effective_strength()` returns the raw strength and the
+        // queueing decision is independent of the wall clock.
+        let (graph, _dir, typed, untyped) = sweep_pair_fixture(origin, |a, b| RelationshipEdge {
+            strength: 0.001,
+            tier: EdgeTier::L1Working,
+            last_activated: Utc::now(),
+            ..l2_edge(a, b, origin)
+        });
+
+        // Populate the queues the way production does: a read that walks the
+        // entity's edges and finds one below its tier's prune threshold.
+        let visible = graph
+            .get_entity_relationships_limited(&typed, None)
+            .unwrap();
+        assert!(
+            visible.is_empty(),
+            "an edge below its prune threshold is filtered from the read result \
+             and queued — this is the only thing that fills the orphan queue"
+        );
+
+        let result = graph.flush_pending_maintenance().unwrap();
+
+        // The sweep RAN.
+        assert_eq!(
+            result.pruned_count, 1,
+            "the queued edge must have been deleted — an empty prune queue \
+             returns before the orphan branch, so the sweep would never execute"
+        );
+
+        // The sweep still collects.
+        assert!(
+            result.orphaned_entity_ids.contains(&untyped.to_string()),
+            "an untyped edgeless entity must still be reported as orphaned; \
+             got {:?}",
+            result.orphaned_entity_ids
+        );
+        assert!(
+            graph.get_entity(&untyped).unwrap().is_none(),
+            "an untyped edgeless entity must still be deleted"
+        );
+
+        // The guard.
+        assert!(
+            !result.orphaned_entity_ids.contains(&typed.to_string()),
+            "a typer-committed entity must not be reported as orphaned; \
+             got {:?}",
+            result.orphaned_entity_ids
+        );
+        let survivor = graph
+            .get_entity(&typed)
+            .unwrap()
+            .expect("a typer-committed entity must survive losing every edge");
+        assert_eq!(
+            survivor.fine_type.as_deref(),
+            Some("military_organization"),
+            "the surviving node must keep the extraction that spared it"
         );
     }
 }

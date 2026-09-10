@@ -12,11 +12,18 @@ import { GeoMap } from "./GeoMap";
  * Geo — everywhere this profile's memory happened, with the current recall
  * result highlighted on top of it.
  *
- * The map is populated the moment the destination opens: every located memory
- * in the corpus is drawn as a quiet context point, because "where do I have
- * memory?" is a question with an answer before any search is typed. Running a
- * search does not swap the map out — it turns the matching points up and the
- * rest down, so a result is always seen against the corpus it came from.
+ * The map is populated the moment the destination opens: the located memories
+ * in the corpus page are drawn as quiet context points, because "where do I
+ * have memory?" is a question with an answer before any search is typed.
+ * Running a search does not swap the map out — it turns the matching points up
+ * and the rest down, so a result is always seen against the corpus it came
+ * from.
+ *
+ * The context layer is the newest `CORPUS_LIMIT` memories, not the whole
+ * corpus — `useCorpus` fetches one page (see lib/api/corpus.ts). On a profile
+ * larger than that page the map shows where recent memory happened, which is
+ * not the same as everywhere memory has ever happened. Recall results are
+ * plotted on top regardless of age, so a search still reaches the rest.
  *
  * Both data sources are shared cache entries (useCorpus, useRecall): this view
  * issues no retrieval of its own.
@@ -30,7 +37,8 @@ export function GeoView({ reach }: { reach: Reachability }) {
   const results = useMemo(() => (hasQuery ? (data?.memories ?? []) : []), [hasQuery, data]);
 
   // The plotted set: recall results first (they carry scores and therefore
-  // size), then every located corpus memory that is not already a result.
+  // size), then the located memories from the corpus page that are not already
+  // a result.
   const { plotted, dimmed } = useMemo(() => {
     const resultIds = new Set(results.map((m) => m.id));
     const context = (corpus.data?.memories ?? [])
@@ -73,7 +81,7 @@ export function GeoView({ reach }: { reach: Reachability }) {
   }
 
   if (corpus.isFetching && !corpus.data) {
-    return <EmptyState size="page" title="Loading corpus" body="Placing every located memory." />;
+    return <EmptyState size="page" title="Loading corpus" body="Placing located memories." />;
   }
 
   if (located.length === 0) {

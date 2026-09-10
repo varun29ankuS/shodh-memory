@@ -202,9 +202,15 @@ function ResultPane({ reach }: { reach: Reachability }) {
   const { data, error, isFetching, profile, query } = useRecall(reach);
   const corpus = useCorpus(reach);
 
-  // The pre-query listing: newest first. The corpus endpoint already returns
-  // newest-first, but sorting here keeps the promise in the heading true even
-  // if that ordering ever changes server-side.
+  // The pre-query listing: newest first.
+  //
+  // `/api/list/{user_id}` sorts by `created_at` descending before it paginates,
+  // so the page this receives is genuinely the newest slice of the corpus. It
+  // did not always: the endpoint returned tier-then-storage order, and this
+  // local sort could only reorder whatever arbitrary page had arrived — on a
+  // large profile the newest memories were not in it to be sorted. The sort
+  // stays as a cheap guard on the heading's promise, but the guarantee comes
+  // from the server.
   const recent = useMemo(
     () =>
       [...(corpus.data?.memories ?? [])]

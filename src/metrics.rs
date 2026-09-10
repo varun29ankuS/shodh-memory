@@ -308,6 +308,103 @@ pub static MEMORY_HEAP_BYTES_TOTAL: LazyLock<IntGauge> = LazyLock::new(|| {
     .expect("MEMORY_HEAP_BYTES_TOTAL metric must be valid at compile time")
 });
 
+// ---------------------------------------------------------------------------
+// Integrity scrub
+// ---------------------------------------------------------------------------
+//
+// Aggregates, never per-user labels. A `user_id` label would make cardinality
+// grow with the profile list, and the thing an operator alerts on is "is any
+// store lying", not which one — the answer to which is one GET away.
+//
+// Be clear about what these buy today: `/api/metrics` is mounted and these
+// values are correct in it, but nothing in this deployment scrapes it. They
+// exist so that pointing an off-the-shelf collector at the process is a
+// configuration change rather than a code change.
+
+/// Profiles whose last scrub said the store is serving fabrications or failed
+/// its checksum. Alert on `> 0`.
+pub static INTEGRITY_USERS_UNHEALTHY: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        "shodh_integrity_users_unhealthy",
+        "Profiles whose last integrity scrub returned the unhealthy verdict",
+    )
+    .expect("INTEGRITY_USERS_UNHEALTHY metric must be valid at compile time")
+});
+
+/// Profiles whose last scrub could not certify health — it was cut short, the
+/// iterator errored, or the store could not be opened. NOT healthy, and
+/// deliberately its own series so it cannot be read as one.
+pub static INTEGRITY_USERS_INDETERMINATE: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        "shodh_integrity_users_indeterminate",
+        "Profiles whose last integrity scrub could not certify health",
+    )
+    .expect("INTEGRITY_USERS_INDETERMINATE metric must be valid at compile time")
+});
+
+/// Records that decoded into values the writer could not have produced,
+/// summed over every profile's last scrub. The class the scrub exists for.
+pub static INTEGRITY_IMPLAUSIBLE_RECORDS: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        "shodh_integrity_implausible_records",
+        "Stored records that decoded into values the writer could not have produced",
+    )
+    .expect("INTEGRITY_IMPLAUSIBLE_RECORDS metric must be valid at compile time")
+});
+
+/// Records whose SHO envelope is present and damaged, summed over profiles.
+pub static INTEGRITY_CHECKSUM_MISMATCH_RECORDS: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        "shodh_integrity_checksum_mismatch_records",
+        "Stored records whose SHO envelope failed its checksum or was truncated",
+    )
+    .expect("INTEGRITY_CHECKSUM_MISMATCH_RECORDS metric must be valid at compile time")
+});
+
+/// Records no decode generation could read, summed over profiles.
+pub static INTEGRITY_UNDECODABLE_RECORDS: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        "shodh_integrity_undecodable_records",
+        "Stored records no decode generation could read",
+    )
+    .expect("INTEGRITY_UNDECODABLE_RECORDS metric must be valid at compile time")
+});
+
+/// Age of the oldest result on file.
+///
+/// The metric that catches a scheduler that has stopped running. Without it a
+/// dashboard of all-zero defect gauges is indistinguishable between "nothing is
+/// wrong" and "nothing has looked since the process started".
+pub static INTEGRITY_OLDEST_RESULT_AGE_SECONDS: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        "shodh_integrity_oldest_result_age_seconds",
+        "Age of the oldest integrity-scrub result currently on file",
+    )
+    .expect("INTEGRITY_OLDEST_RESULT_AGE_SECONDS metric must be valid at compile time")
+});
+
+/// Profiles with a store on disk and no scrub result at all.
+///
+/// Absence rendered as a number, so an unscrubbed profile cannot hide inside an
+/// all-healthy summary.
+pub static INTEGRITY_USERS_NEVER_SCRUBBED: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        "shodh_integrity_users_never_scrubbed",
+        "Profiles with a store on disk that have never been scrubbed",
+    )
+    .expect("INTEGRITY_USERS_NEVER_SCRUBBED metric must be valid at compile time")
+});
+
+/// Publish a ledger summary to the gauges above.
+pub fn publish_integrity_scrub_metrics(summary: &crate::integrity::LedgerSummary) {
+    INTEGRITY_USERS_UNHEALTHY.set(summary.unhealthy as i64);
+    INTEGRITY_USERS_INDETERMINATE.set(summary.indeterminate as i64);
+    INTEGRITY_IMPLAUSIBLE_RECORDS.set(summary.implausible_records as i64);
+    INTEGRITY_CHECKSUM_MISMATCH_RECORDS.set(summary.checksum_mismatch_records as i64);
+    INTEGRITY_UNDECODABLE_RECORDS.set(summary.undecodable_records as i64);
+    INTEGRITY_OLDEST_RESULT_AGE_SECONDS.set(summary.oldest_result_age_secs as i64);
+}
+
 /// Shared RocksDB block cache usage (single pool across all DB instances).
 pub static ROCKSDB_BLOCK_CACHE_USAGE_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
     IntGauge::new(
@@ -759,6 +856,33 @@ fn do_register_metrics() -> Result<(), MetricsError> {
     register!(ACTIVE_USERS, "ACTIVE_USERS");
     register!(MEMORIES_BY_TIER, "MEMORIES_BY_TIER");
     register!(MEMORY_HEAP_BYTES_TOTAL, "MEMORY_HEAP_BYTES_TOTAL");
+
+    // Integrity scrub gauges
+    register!(INTEGRITY_USERS_UNHEALTHY, "INTEGRITY_USERS_UNHEALTHY");
+    register!(
+        INTEGRITY_USERS_INDETERMINATE,
+        "INTEGRITY_USERS_INDETERMINATE"
+    );
+    register!(
+        INTEGRITY_IMPLAUSIBLE_RECORDS,
+        "INTEGRITY_IMPLAUSIBLE_RECORDS"
+    );
+    register!(
+        INTEGRITY_CHECKSUM_MISMATCH_RECORDS,
+        "INTEGRITY_CHECKSUM_MISMATCH_RECORDS"
+    );
+    register!(
+        INTEGRITY_UNDECODABLE_RECORDS,
+        "INTEGRITY_UNDECODABLE_RECORDS"
+    );
+    register!(
+        INTEGRITY_OLDEST_RESULT_AGE_SECONDS,
+        "INTEGRITY_OLDEST_RESULT_AGE_SECONDS"
+    );
+    register!(
+        INTEGRITY_USERS_NEVER_SCRUBBED,
+        "INTEGRITY_USERS_NEVER_SCRUBBED"
+    );
     register!(PROCESS_RSS_BYTES, "PROCESS_RSS_BYTES");
     register!(PROCESS_PEAK_RSS_BYTES, "PROCESS_PEAK_RSS_BYTES");
     register!(PROCESS_VIRTUAL_BYTES, "PROCESS_VIRTUAL_BYTES");

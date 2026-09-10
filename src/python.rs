@@ -496,6 +496,9 @@ impl PyMemorySystem {
             // NER records, which the direct Python API never produces (see
             // `ner_entities` above). No NER records means no toponyms to resolve.
             toponyms: vec![],
+            // In-process binding: the embedding Python app called us directly,
+            // with no HTTP hop and no axum handler in between.
+            origin: crate::memory::types::MemoryOrigin::PythonApi,
         };
 
         let memory_id = self
@@ -827,6 +830,12 @@ impl PyMemorySystem {
             retrieval_mode,
             offset: 0,
             layers: crate::memory::types::LayerMode::Full,
+            // The in-process binding is an ordinary product client, so it takes
+            // the product default: a read reinforces what it returns. The
+            // process-wide SHODH_RECALL_READONLY pin still overrides this — the
+            // gate ORs the two — which is what an eval embedding these bindings
+            // relies on.
+            read_only: false,
         };
 
         let memories = self
@@ -1847,6 +1856,9 @@ impl PyMemorySystem {
                 experience_type: ExperienceType::Conversation,
                 content: context.clone(),
                 tags: vec!["proactive-context".to_string()],
+                // Same shape as the HTTP auto-ingest: the caller asked for
+                // context, not for a write.
+                origin: crate::memory::types::MemoryOrigin::AutoIngest,
                 ..Default::default()
             };
             match self.inner.remember(experience, None) {
@@ -1904,6 +1916,9 @@ impl PyMemorySystem {
             retrieval_mode: RetrievalMode::Hybrid,
             offset: 0,
             layers: crate::memory::types::LayerMode::Full,
+            // See `recall()` above: product default, overridable only by the
+            // process-wide pin.
+            read_only: false,
         };
 
         let memories = self
