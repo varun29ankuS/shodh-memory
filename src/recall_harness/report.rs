@@ -305,13 +305,61 @@ pub struct AblationRow {
     /// case. Two arms with the same fingerprint returned byte-identical results.
     #[serde(default)]
     pub retrieval_fingerprint: u64,
-    /// True when this arm's fingerprint equals the baseline arm's, i.e. the
-    /// config provably changed nothing and its metrics are attributable to
+    /// True when this arm's fingerprint equals its REFERENCE arm's, i.e. the
+    /// flags it adds provably changed nothing and its delta is attributable to
     /// nothing. The `+spread-fix` arms were vacuous this way for months: the flag
     /// they set could not reach the live code path, so the rows silently
     /// duplicated baseline while reading as evidence.
     #[serde(default)]
-    pub vacuous_vs_baseline: bool,
+    pub vacuous_vs_reference: bool,
+    /// The arm this one is measured against; `None` only for the baseline. Every
+    /// other arm is its reference plus the flags it adds, so its delta belongs
+    /// to exactly those flags. Cross-encoder arms reference the cross-encoder
+    /// baseline rather than the shipped one, so "what does BM25 add once the
+    /// reranker is in" is not confounded with "what does the reranker add".
+    #[serde(default)]
+    pub reference: Option<String>,
+    /// Paired difference in recall@10 against `reference`, with a 95% bootstrap
+    /// interval over cases.
+    #[serde(default, rename = "delta_recall@10")]
+    pub delta_recall_at_10: Option<DeltaCi>,
+    /// Paired difference in p@1 against `reference`, with a 95% bootstrap
+    /// interval over cases.
+    #[serde(default, rename = "delta_p@1")]
+    pub delta_p_at_1: Option<DeltaCi>,
+    /// Every case's metrics under this arm, in suite order, so any two arms can
+    /// be re-compared offline with the pairing intact.
+    #[serde(default)]
+    pub per_case: Vec<AblationCaseRow>,
+}
+
+/// A paired difference between two arms: the mean over cases and its 95%
+/// percentile-bootstrap interval.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct DeltaCi {
+    pub mean: f64,
+    pub lo: f64,
+    pub hi: f64,
+}
+
+impl DeltaCi {
+    /// Whether the interval rules out "no effect". A delta whose interval
+    /// contains zero is not distinguishable from noise at this sample size,
+    /// however large its mean.
+    pub fn excludes_zero(&self) -> bool {
+        self.lo > 0.0 || self.hi < 0.0
+    }
+}
+
+/// One case's metrics under one ablation arm. Field names match the recall
+/// run's per-case output, so both files can be read by the same code.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AblationCaseRow {
+    pub case_id: String,
+    pub category: String,
+    pub recall_at_k: f64,
+    pub p_at_1: f64,
+    pub ndcg_at_k: f64,
 }
 
 /// Unified ablation report: one ingest, N query-time configs, one comparison

@@ -212,9 +212,113 @@ pub fn ndcg_at_k(retrieved: &[Uuid], relevance: &HashMap<Uuid, f32>, k: usize) -
     }
 }
 
+/// Mean paired difference `treatment - control` and its 95% percentile-bootstrap
+/// interval, as `(mean, lo, hi)`.
+///
+/// The two slices are one metric per CASE under two arms, in the same case
+/// order. Resampling cases with their difference intact is what makes this
+/// paired: the variance between easy and hard questions cancels, and only the
+/// variance of the arm's effect is left. An unpaired comparison of the two means
+/// would be dominated by case difficulty and report every small lever as noise.
+///
+/// Seeded, so a report regenerated from the same per-case data carries the same
+/// interval. Returns `None` when there is nothing to pair: empty input, unequal
+/// lengths, or zero resamples.
+pub fn paired_bootstrap_ci(
+    control: &[f64],
+    treatment: &[f64],
+    resamples: usize,
+    seed: u64,
+) -> Option<(f64, f64, f64)> {
+    use rand::{Rng, SeedableRng};
+
+    let n = control.len();
+    if n == 0 || n != treatment.len() || resamples == 0 {
+        return None;
+    }
+    let diffs: Vec<f64> = treatment.iter().zip(control).map(|(t, c)| t - c).collect();
+    let mean = diffs.iter().sum::<f64>() / n as f64;
+
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    let mut means: Vec<f64> = (0..resamples)
+        .map(|_| {
+            let mut sum = 0.0;
+            for _ in 0..n {
+                sum += diffs[rng.gen_range(0..n)];
+            }
+            sum / n as f64
+        })
+        .collect();
+    means.sort_by(|a, b| a.total_cmp(b));
+
+    let quantile = |q: f64| {
+        let idx = (q * (resamples - 1) as f64).round() as usize;
+        means[idx.min(resamples - 1)]
+    };
+    Some((mean, quantile(0.025), quantile(0.975)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paired_bootstrap_of_identical_arms_is_exactly_zero() {
+        let control = [0.0, 0.5, 1.0, 1.0, 0.0, 0.25];
+        let (mean, lo, hi) = paired_bootstrap_ci(&control, &control, 500, 7).unwrap();
+        assert_eq!((mean, lo, hi), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn paired_bootstrap_recovers_a_constant_shift_with_no_width() {
+        // Every case moves by the same amount, so every resample has the same
+        // mean. A nonzero width here would mean the resampling is not paired.
+        let control = [0.0, 0.2, 0.4, 0.6, 0.8];
+        let treatment: Vec<f64> = control.iter().map(|c| c + 0.25).collect();
+        let (mean, lo, hi) = paired_bootstrap_ci(&control, &treatment, 500, 7).unwrap();
+        approx(mean, 0.25);
+        approx(lo, 0.25);
+        approx(hi, 0.25);
+    }
+
+    #[test]
+    fn paired_bootstrap_separates_a_real_effect_from_a_null_one() {
+        // Half the cases gain a full point, half are unchanged: mean +0.5, and
+        // with 200 cases the interval cannot reach zero.
+        let control = vec![0.0; 200];
+        let gain: Vec<f64> = (0..200).map(|i| (i % 2) as f64).collect();
+        let (mean, lo, hi) = paired_bootstrap_ci(&control, &gain, 2000, 11).unwrap();
+        approx(mean, 0.5);
+        assert!(lo > 0.0 && lo <= mean && mean <= hi, "({lo}, {mean}, {hi})");
+
+        // Equal numbers of wins and losses: mean 0, and the interval must
+        // straddle it rather than report a direction.
+        let mixed: Vec<f64> = (0..200)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+        let (mean, lo, hi) = paired_bootstrap_ci(&control, &mixed, 2000, 11).unwrap();
+        approx(mean, 0.0);
+        assert!(
+            lo < 0.0 && hi > 0.0,
+            "a null effect must straddle zero: ({lo}, {hi})"
+        );
+    }
+
+    #[test]
+    fn paired_bootstrap_is_deterministic_for_a_seed() {
+        let control: Vec<f64> = (0..50).map(|i| (i % 3) as f64 / 2.0).collect();
+        let treatment: Vec<f64> = (0..50).map(|i| (i % 5) as f64 / 4.0).collect();
+        let a = paired_bootstrap_ci(&control, &treatment, 1000, 42).unwrap();
+        let b = paired_bootstrap_ci(&control, &treatment, 1000, 42).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn paired_bootstrap_refuses_what_it_cannot_pair() {
+        assert!(paired_bootstrap_ci(&[], &[], 100, 1).is_none());
+        assert!(paired_bootstrap_ci(&[1.0, 0.0], &[1.0], 100, 1).is_none());
+        assert!(paired_bootstrap_ci(&[1.0], &[1.0], 0, 1).is_none());
+    }
 
     /// Five fixed UUIDs so test assertions are stable and readable.
     fn ids() -> [Uuid; 5] {
