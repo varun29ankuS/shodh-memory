@@ -1954,6 +1954,24 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
     let id_map = ingest_corpus(&manager, &corpus)?;
     let system = manager.get_user_memory(EVAL_USER)?;
 
+    // One case through the live recall path, under whatever env is set now.
+    let recall_ids = |case: &SmokeCase| -> Vec<Uuid> {
+        let query = Query {
+            query_text: Some(case.query.clone()),
+            max_results: SMOKE_K,
+            layers: LayerMode::Full,
+            read_only: _harness_env.recall_read_only(),
+            ..Default::default()
+        };
+        system
+            .read()
+            .recall(&query)
+            .unwrap_or_default()
+            .iter()
+            .map(|m| m.id.0)
+            .collect()
+    };
+
     let mut rows: Vec<AblationRow> = Vec::with_capacity(configs.len());
     for config in &configs {
         let (name, env) = (config.name, &config.env);
@@ -1973,23 +1991,8 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
         // matches its reference here provably changed nothing.
         let mut fp = std::collections::hash_map::DefaultHasher::new();
         for case in &cases {
-            let query = Query {
-                query_text: Some(case.query.clone()),
-                max_results: SMOKE_K,
-                layers: LayerMode::Full,
-                read_only: _harness_env.recall_read_only(),
-                ..Default::default()
-            };
-            let memories = system.read().recall(&query).unwrap_or_default();
-            let retrieved: Vec<Uuid> = memories.iter().map(|m| m.id.0).collect();
-            {
-                use std::hash::Hash;
-                for id in &retrieved {
-                    id.hash(&mut fp);
-                }
-                // Separator so [a],[b] and [a,b] cannot collide.
-                0xFFu8.hash(&mut fp);
-            }
+            let retrieved = recall_ids(case);
+            hash_retrieved(&mut fp, &retrieved);
             let relevance = build_relevance_map(case, &id_map);
             let m = Metrics::compute(&retrieved, &relevance, SMOKE_K);
             by_cat.entry(case.category).or_default().push(m.recall_at_k);
@@ -2037,6 +2040,37 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
         });
     }
 
+    // Trailing baseline replicate: the baseline's queries again, with no arm env
+    // set, after every arm has run. Arms share one process and set then remove
+    // their flags, so a flag read once into a cache would stay stuck for every
+    // later arm -- and those arms would still DIFFER from their reference, so the
+    // vacuity check cannot see it. Only re-measuring the reference point at the
+    // end can. It is also the cleanest query-time determinism check the harness
+    // takes: one ingest, one process, identical queries minutes apart.
+    let replicate_fp = {
+        let mut fp = std::collections::hash_map::DefaultHasher::new();
+        for case in &cases {
+            hash_retrieved(&mut fp, &recall_ids(case));
+        }
+        std::hash::Hasher::finish(&fp)
+    };
+    let baseline_replicate_identical = rows
+        .iter()
+        .find(|r| r.reference.is_none())
+        .map(|r| r.retrieval_fingerprint == replicate_fp);
+    match baseline_replicate_identical {
+        Some(true) => eprintln!("  baseline replicate: identical to the first baseline pass"),
+        Some(false) => {
+            tracing::warn!("ABLATION BASELINE REPLICATE DIFFERS from the first baseline pass");
+            eprintln!(
+                "  !! baseline replicate DIFFERS from the first pass: an arm left state \
+                 behind, or query-time retrieval is not deterministic on a fixed ingest. \
+                 Every delta in this matrix carries that difference as noise."
+            );
+        }
+        None => {}
+    }
+
     // Deltas and the vacuity check, each against the arm's own reference.
     resolve_against_references(&mut rows)?;
 
@@ -2045,7 +2079,18 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
         git_sha: inputs.git_sha.clone(),
         case_count: cases.len(),
         rows,
+        baseline_replicate_identical,
     })
+}
+
+/// Fold one case's ranked ids into an order-sensitive run fingerprint.
+fn hash_retrieved(fp: &mut std::collections::hash_map::DefaultHasher, ids: &[Uuid]) {
+    use std::hash::Hash;
+    for id in ids {
+        id.hash(fp);
+    }
+    // Separator so [a],[b] and [a,b] cannot collide.
+    0xFFu8.hash(fp);
 }
 
 /// The arm every shipped-operating-point arm is measured against.
@@ -2442,6 +2487,21 @@ mod ablation_config_tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn the_fingerprint_keeps_case_boundaries_and_rank_order() {
+        let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let finish = |cases: &[Vec<Uuid>]| {
+            let mut fp = std::collections::hash_map::DefaultHasher::new();
+            for ids in cases {
+                hash_retrieved(&mut fp, ids);
+            }
+            std::hash::Hasher::finish(&fp)
+        };
+        assert_ne!(finish(&[vec![a], vec![b]]), finish(&[vec![a, b]]));
+        assert_ne!(finish(&[vec![a, b]]), finish(&[vec![b, a]]));
+        assert_eq!(finish(&[vec![a, b]]), finish(&[vec![a, b]]));
     }
 
     #[test]

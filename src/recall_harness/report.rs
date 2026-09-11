@@ -370,6 +370,13 @@ pub struct AblationReport {
     pub git_sha: String,
     pub case_count: usize,
     pub rows: Vec<AblationRow>,
+    /// Whether the baseline, re-run with no arm env after every arm, retrieved
+    /// byte-identical results to its first pass. `false` means an arm left
+    /// state behind or query-time retrieval is not deterministic on a fixed
+    /// ingest; either way it is noise under every delta. `None` when the matrix
+    /// had no baseline to replicate.
+    #[serde(default)]
+    pub baseline_replicate_identical: Option<bool>,
 }
 
 /// One layer's row in the E3 multi-hop ladder: recall@10 split by 2-hop

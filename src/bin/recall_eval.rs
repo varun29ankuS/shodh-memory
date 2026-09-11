@@ -1055,6 +1055,19 @@ fn summarise_ablation(report: &AblationReport) {
             r.mrr
         );
     }
+    match report.baseline_replicate_identical {
+        Some(true) => println!(
+            "\nBaseline replicate (re-run after every arm, same ingest): **identical** to \
+             the first pass. No arm left state behind, and query-time retrieval is \
+             deterministic on this ingest."
+        ),
+        Some(false) => println!(
+            "\nBaseline replicate (re-run after every arm, same ingest): **DIFFERS** from \
+             the first pass. Either an arm left state behind or query-time retrieval is not \
+             deterministic on a fixed ingest; read every delta above with that noise in mind."
+        ),
+        None => {}
+    }
     // Per-category recall, transposed (category × config), surfaces a config that
     // trades one capability for another.
     let cats: std::collections::BTreeSet<String> = report
