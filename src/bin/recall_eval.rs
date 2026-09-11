@@ -21,7 +21,7 @@ use clap::{Parser, ValueEnum};
 use shodh_memory::memory::types::LayerMode;
 use shodh_memory::recall_harness::multihop::analyze_multihop;
 use shodh_memory::recall_harness::report::{
-    compare_to_baseline, AblationReport, BridgeReport, DecayReport, LearningCurveReport,
+    compare_to_baseline, AblationReport, BridgeReport, DecayReport, DeltaCi, LearningCurveReport,
     MultiHopReport, ReachabilityReport, Report, SelectiveForgettingReport,
 };
 use shodh_memory::recall_harness::runner::{
@@ -1015,14 +1015,11 @@ fn write_ablation(path: &std::path::Path, report: &AblationReport) -> Result<()>
     Ok(())
 }
 
-/// Print the ablation matrix as a markdown table (Δ recall@10 vs the row named
-/// `baseline`), so it can be pasted straight into the study doc.
+/// Print the ablation matrix as a markdown table, so it can be pasted straight
+/// into the study doc. Each delta is paired against the arm's own reference, with
+/// a 95% bootstrap interval over cases; `*` marks an interval that excludes zero,
+/// and a delta without one is not distinguishable from no effect at this size.
 fn summarise_ablation(report: &AblationReport) {
-    let base = report
-        .rows
-        .iter()
-        .find(|r| r.name.starts_with("baseline"))
-        .map(|r| r.recall_at_10);
     eprintln!(
         "recall-eval: ablation (suite={} cases={} sha={})",
         report.suite, report.case_count, report.git_sha
@@ -1031,17 +1028,45 @@ fn summarise_ablation(report: &AblationReport) {
         "## Ablation matrix ({} suite, {} cases)\n",
         report.suite, report.case_count
     );
-    println!("| config | recall@10 | Δ vs base | ndcg@10 | mrr | p@1 |");
-    println!("| --- | --- | --- | --- | --- | --- |");
+    println!(
+        "Δ is paired against the reference arm, [lo, hi] is a 95% bootstrap interval \
+         over cases, `*` = the interval excludes 0. VACUOUS = byte-identical retrieval \
+         to the reference, so the arm's flags never reached their code path.\n"
+    );
+    println!(
+        "| config | reference | recall@10 | Δ recall@10 [95% CI] | p@1 | Δ p@1 [95% CI] | ndcg@10 | mrr |"
+    );
+    println!("| --- | --- | --- | --- | --- | --- | --- | --- |");
     for r in &report.rows {
-        let delta = match base {
-            Some(b) => format!("{:+.4}", r.recall_at_10 - b),
-            None => String::new(),
+        let name = if r.vacuous_vs_reference {
+            format!("{} (VACUOUS)", r.name)
+        } else {
+            r.name.clone()
         };
         println!(
-            "| {} | {:.4} | {} | {:.4} | {:.4} | {:.4} |",
-            r.name, r.recall_at_10, delta, r.ndcg_at_10, r.mrr, r.p_at_1
+            "| {} | {} | {:.4} | {} | {:.4} | {} | {:.4} | {:.4} |",
+            name,
+            r.reference.as_deref().unwrap_or("—"),
+            r.recall_at_10,
+            format_delta(r.delta_recall_at_10),
+            r.p_at_1,
+            format_delta(r.delta_p_at_1),
+            r.ndcg_at_10,
+            r.mrr
         );
+    }
+    match report.baseline_replicate_identical {
+        Some(true) => println!(
+            "\nBaseline replicate (re-run after every arm, same ingest): **identical** to \
+             the first pass. No arm left state behind, and query-time retrieval is \
+             deterministic on this ingest."
+        ),
+        Some(false) => println!(
+            "\nBaseline replicate (re-run after every arm, same ingest): **DIFFERS** from \
+             the first pass. Either an arm left state behind or query-time retrieval is not \
+             deterministic on a fixed ingest; read every delta above with that noise in mind."
+        ),
+        None => {}
     }
     // Per-category recall, transposed (category × config), surfaces a config that
     // trades one capability for another.
@@ -1068,6 +1093,20 @@ fn summarise_ablation(report: &AblationReport) {
                 .collect();
             println!("| {} | {} |", cat, cells.join(" | "));
         }
+    }
+}
+
+/// `+0.0123 [+0.0040, +0.0210] *` for a paired delta, empty for the baseline.
+fn format_delta(delta: Option<DeltaCi>) -> String {
+    match delta {
+        Some(d) => format!(
+            "{:+.4} [{:+.4}, {:+.4}]{}",
+            d.mean,
+            d.lo,
+            d.hi,
+            if d.excludes_zero() { " *" } else { "" }
+        ),
+        None => String::new(),
     }
 }
 

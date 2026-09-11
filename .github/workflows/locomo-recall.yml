@@ -167,7 +167,8 @@ jobs:
           echo "SHODH_GLINER_MODEL_PATH=$GL" >> "$GITHUB_ENV"
 
       # Only fetched when an arm actually asks for the reranker, so ordinary
-      # runs do not pay 23 MB for a model they will not load.
+      # runs do not pay 23 MB for a model they will not load. The ablation
+      # matrix always carries cross-encoder arms, so `mode: ablation` asks too.
       #
       # WITHOUT THIS A CE ARM MEASURES NOTHING. recall() falls back to the
       # unreranked ranking when the model is absent -- correct for a server,
@@ -176,7 +177,7 @@ jobs:
       # reranker never ran". guard_cross_encoder() now hard-fails the harness on
       # that state; this step is what stops it being reached.
       - name: Cache cross-encoder assets
-        if: contains(github.event.inputs.extra_env, 'SHODH_CE_RERANK=1')
+        if: contains(github.event.inputs.extra_env, 'SHODH_CE_RERANK=1') || github.event.inputs.mode == 'ablation'
         id: ce-cache
         uses: actions/cache@v6
         with:
@@ -184,7 +185,7 @@ jobs:
           key: ce-ms-marco-minilm-l6-233902d2-v1
 
       - name: Fetch cross-encoder assets
-        if: contains(github.event.inputs.extra_env, 'SHODH_CE_RERANK=1') && steps.ce-cache.outputs.cache-hit != 'true'
+        if: (contains(github.event.inputs.extra_env, 'SHODH_CE_RERANK=1') || github.event.inputs.mode == 'ablation') && steps.ce-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           CE="${{ github.workspace }}/models/cross-encoder-ms-marco-minilm-l6"
@@ -201,7 +202,7 @@ jobs:
           ls -la "$CE"
 
       - name: Verify cross-encoder assets (hard gate)
-        if: contains(github.event.inputs.extra_env, 'SHODH_CE_RERANK=1')
+        if: contains(github.event.inputs.extra_env, 'SHODH_CE_RERANK=1') || github.event.inputs.mode == 'ablation'
         run: |
           CE="${{ github.workspace }}/models/cross-encoder-ms-marco-minilm-l6"
           # sha256 pinned at provisioning time. A silently different export would
@@ -473,6 +474,8 @@ jobs:
             locomo-recall.json
             locomo-per-case.json
             locomo-recall.log
+            ablation.json
+            ablation.log
             locomo-reachability.json
             locomo-reachability.log
             pool.jsonl
