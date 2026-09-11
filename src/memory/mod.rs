@@ -8639,6 +8639,35 @@ impl MemorySystem {
         self.hybrid_search.bm25_commit_failure_count()
     }
 
+    /// Reconcile what is STORED against what is INDEXED.
+    ///
+    /// Strictly stronger than the failure counters beside this: it compares
+    /// populations instead of trusting that every loss announced itself, so it
+    /// also catches an insert that returned Ok having done nothing, a path
+    /// that never indexed at all, and a commit that vanished without an Err.
+    ///
+    /// Returns (stored, vector_indexed, lexically_indexed).
+    pub fn index_coverage(&self) -> Result<(usize, usize, usize)> {
+        Ok((
+            self.long_term_memory.get_all_ids()?.len(),
+            self.retriever.len(),
+            self.hybrid_search.bm25_doc_count(),
+        ))
+    }
+
+    /// Index inserts lost during ingest, lexical and vector.
+    ///
+    /// Nonzero means memories are stored and UNREACHABLE by that route: a
+    /// different loss from a dropped commit, where the document reached the
+    /// writer and the batch did not reach disk. Both are handled-and-continued
+    /// during ingest, which is right for a server and invalid for an eval.
+    pub fn index_failure_counts(&self) -> (u64, u64) {
+        (
+            self.retriever.index_failure_count(),
+            self.hybrid_search.bm25_index_failure_count(),
+        )
+    }
+
     /// Get vector index health information
     ///
     /// Returns metrics about the Vamana index including total vectors,

@@ -148,6 +148,21 @@ pub struct BM25Index {
     /// real-time scans) intermittently locking freshly written segment
     /// files, which made eval rankings depend on ambient machine state.
     commit_failures: std::sync::atomic::AtomicU64,
+
+    /// Document inserts that failed. A nonzero count means memories are
+    /// STORED BUT LEXICALLY UNREACHABLE — present in the primary store,
+    /// findable by no BM25 query — which is a different loss from
+    /// `commit_failures`, where the document reached the writer and the batch
+    /// did not reach disk. Both are handled-and-continued by all fifteen index
+    /// sites in `memory/mod.rs` — thirteen `index_memory` (eleven `if let
+    /// Err`, two `match`) plus two `reindex_memory`, none propagating — which
+    /// is right for availability and invisible to a measurement that needs its
+    /// corpus whole.
+    ///
+    /// Narrow on this side by nature: `add_document` buffers and errors only
+    /// once the writer is dead. `MemorySystem::index_coverage` is what catches
+    /// a loss that never errored at all.
+    index_failures: std::sync::atomic::AtomicU64,
 }
 
 impl BM25Index {
@@ -219,6 +234,7 @@ impl BM25Index {
             tags_field,
             entities_field,
             commit_failures: std::sync::atomic::AtomicU64::new(0),
+            index_failures: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -243,7 +259,13 @@ impl BM25Index {
         doc.add_text(self.tags_field, tags.join(" "));
         doc.add_text(self.entities_field, entities.join(" "));
 
-        writer.add_document(doc)?;
+        // Counted HERE rather than at the eleven call sites that log and
+        // continue, so a caller added later cannot forget to record its loss.
+        if let Err(e) = writer.add_document(doc) {
+            self.index_failures
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Err(e.into());
+        }
 
         Ok(())
     }
@@ -297,6 +319,13 @@ impl BM25Index {
     /// the searchable index is missing documents.
     pub fn commit_failure_count(&self) -> u64 {
         self.commit_failures
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Number of document inserts lost. Nonzero means memories exist in the
+    /// primary store that no lexical query can reach.
+    pub fn index_failure_count(&self) -> u64 {
+        self.index_failures
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -658,6 +687,11 @@ impl HybridSearchEngine {
     /// Commit batches lost after retries — see [`BM25Index::commit_failure_count`].
     pub fn bm25_commit_failure_count(&self) -> u64 {
         self.bm25_index.commit_failure_count()
+    }
+
+    /// BM25 document inserts lost. See [`BM25Index::index_failure_count`].
+    pub fn bm25_index_failure_count(&self) -> u64 {
+        self.bm25_index.index_failure_count()
     }
 
     /// Merge BM25 segments to remove ghost state and reclaim space.

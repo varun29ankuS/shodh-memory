@@ -838,3 +838,36 @@ fn test_stress_reinforcement_cycles() {
         results.len()
     );
 }
+
+/// Every stored memory must be present in both indexes. Measured on this path
+/// (8 remembered gives stored=8 vector=8 lexical=8), so equality is asserted
+/// rather than a bound. Verified failing: a mutant that silently skips one
+/// vector insert and returns Ok trips this, with both failure counters at 0.
+#[test]
+fn every_stored_memory_is_present_in_both_indexes() {
+    let (system, _t) = create_test_system();
+    const N: usize = 8;
+    for i in 0..N {
+        system
+            .remember(
+                create_experience(&format!("coverage probe number {i}"), vec!["probe"]),
+                None,
+            )
+            .expect("remember");
+    }
+
+    let (stored, vector_indexed, lexically_indexed) =
+        system.index_coverage().expect("index_coverage");
+
+    assert_eq!(stored, N, "storage did not receive every remembered experience");
+    assert_eq!(
+        vector_indexed, stored,
+        "vector index holds {vector_indexed} of {stored} stored memories — \
+         the shortfall is unretrievable and no error was raised for it"
+    );
+    assert_eq!(
+        lexically_indexed, stored,
+        "BM25 index holds {lexically_indexed} of {stored} stored memories — \
+         the shortfall is unretrievable and no error was raised for it"
+    );
+}
