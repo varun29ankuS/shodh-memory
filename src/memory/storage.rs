@@ -7,7 +7,9 @@ use rocksdb::{
     ColumnFamily, ColumnFamilyDescriptor, IteratorMode, Options, WriteBatch, WriteOptions, DB,
 };
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use super::oplog::{self, OpRecord, OpRecordDraft};
@@ -880,7 +882,29 @@ fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
 /// the work done to produce the thing being checked. There is no perf argument
 /// for serving a record that disagrees with its own key, and serving one is
 /// worse than serving nothing: the caller cannot tell it apart from fact.
+///
+/// # Encryption at rest
+///
+/// This is also where the record envelope comes off. An `ENC\0` record is
+/// decrypted under the DEK for its epoch, with the key bound in as AEAD
+/// associated data, BEFORE the SHO envelope is read — so a ciphertext moved to
+/// another key fails here as a decrypt error, and a tampered one never reaches
+/// a decoder. A plaintext record read while a keystore is active is reported
+/// (see [`unwrap_record`]) and flagged `needs_migration` so `get_opt` rewrites
+/// it encrypted: that is the upgrade path for a store that predates its
+/// keystore.
 fn deserialize_memory_checked(key: &[u8], data: &[u8]) -> Result<(Memory, bool)> {
+    let (plain, plaintext_under_keystore) = unwrap_record(key, data)?;
+    let (memory, needs_migration) = deserialize_plain_checked(key, &plain)?;
+    Ok((memory, needs_migration || plaintext_under_keystore))
+}
+
+/// The key check of [`deserialize_memory_checked`] on bytes that already have
+/// no envelope on them. Split out so `migrate_legacy`, which unwraps records
+/// itself in order to re-encrypt plaintext ones, can decode without tripping
+/// the plaintext-under-keystore tripwire on the very records it is fixing.
+fn deserialize_plain_checked(key: &[u8], plain: &[u8]) -> Result<(Memory, bool)> {
+    let data = plain;
     let (memory, needs_migration) = deserialize_memory(data)?;
     if memory.id.0.as_bytes() != key {
         tracing::warn!(
@@ -901,6 +925,161 @@ fn deserialize_memory_checked(key: &[u8], data: &[u8]) -> Result<(Memory, bool)>
     Ok((memory, needs_migration))
 }
 
+// ============================================================================
+// RECORD-LEVEL ENCRYPTION AT REST (opt-in, default off)
+//
+// When `MemoryStorage::new` finds a keystore (`<storage>/keystore.json`) and
+// `SHODH_MASTER_PASSPHRASE`, every primary `Memory` record is serialized and
+// then sealed in an `ENC\0` envelope (`crate::keystore`) before it reaches
+// RocksDB, and unsealed after it is read back. `encode_memory` and
+// `unwrap_record` are the ONLY two functions that may touch the envelope, and
+// every write of a memory record goes through `encode_memory` — including the
+// recall hot path's access-count bump in `persist_access_updates`. The PR this
+// was ported from serialized that one path with `encode_sho` directly, and
+// since the read path accepts plaintext, every memory ever recalled had its
+// ciphertext silently overwritten with plaintext. Same-named contract test:
+// `tests/encryption_round_trip.rs`.
+//
+// With no keystore and no passphrase nothing here runs: `encode_memory` is
+// `encode_sho`, `unwrap_record` is the identity, and the bytes on disk are the
+// bytes main writes. Scope: the primary record only. Facts, the graph, vector
+// embeddings, the secondary index CF, oplog and the sibling CFs are plaintext.
+// ============================================================================
+
+/// The process-global record crypto, installed from the keystore by
+/// [`MemoryStorage::init_storage_crypto`]. Process-global because the store is
+/// (one data directory per process, and every reader of a record — scans,
+/// migration, the integrity scrub — decodes through the same free functions).
+/// One keystore per process: a second store opened with a DIFFERENT keystore is
+/// refused rather than silently sharing the first store's keys; the SAME
+/// keystore re-opened at a newer generation (after `shodh-keyctl rotate-dek`)
+/// replaces the cryptor set, so new writes move to the new epoch.
+struct StorageCrypto {
+    record: crate::keystore::RecordCryptors,
+    /// KEK fingerprint of the keystore this came from (cross-keystore guard).
+    kek_fingerprint: String,
+    generation: u64,
+}
+
+static STORAGE_CRYPTO: parking_lot::RwLock<Option<Arc<StorageCrypto>>> =
+    parking_lot::RwLock::new(None);
+
+/// Count of plaintext records read while a keystore was active — the
+/// encryption-required tripwire's metric. Each such read is also a
+/// `tracing::warn!`, and under `SHODH_REQUIRE_ENCRYPTED_READS` an error.
+static PLAINTEXT_READS_UNDER_KEYSTORE: AtomicU64 = AtomicU64::new(0);
+
+fn crypto() -> Option<Arc<StorageCrypto>> {
+    STORAGE_CRYPTO.read().clone()
+}
+
+/// Whether a keystore is active in this process (records are being encrypted).
+pub fn encryption_active() -> bool {
+    STORAGE_CRYPTO.read().is_some()
+}
+
+/// Number of plaintext memory records read while a keystore was active, since
+/// process start. Zero is the expected steady state of an encrypted store; a
+/// rising count means plaintext is reaching disk somewhere.
+pub fn plaintext_reads_under_keystore() -> u64 {
+    PLAINTEXT_READS_UNDER_KEYSTORE.load(Ordering::SeqCst)
+}
+
+/// `SHODH_REQUIRE_ENCRYPTED_READS=1|true`: a plaintext record under an active
+/// keystore is an error instead of a warning. Read at call time so a test (or an
+/// operator) can flip it without reopening the store.
+fn require_encrypted_reads() -> bool {
+    std::env::var("SHODH_REQUIRE_ENCRYPTED_READS")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true"
+        })
+        .unwrap_or(false)
+}
+
+/// Serialize a memory record for storage, sealing it in the record envelope when
+/// a keystore is active. The memory's id — which is its RocksDB key everywhere
+/// in this module — is bound in as AEAD associated data.
+pub(crate) fn encode_memory(memory: &Memory) -> Result<Vec<u8>> {
+    let encoded = crate::serialization::encode_sho(memory)?;
+    match crypto() {
+        Some(sc) => sc
+            .record
+            .active()
+            .encrypt_record(&encoded, memory.id.0.as_bytes())
+            .context("Failed to encrypt serialized memory record"),
+        None => Ok(encoded),
+    }
+}
+
+/// Decrypt an `ENC\0` record read at `key`. Errors if no keystore is active, if
+/// the keystore holds no DEK for the record's epoch, or if the AEAD tag fails
+/// (wrong key, wrong identity, or tampered bytes). Never returns plaintext for
+/// a record it could not authenticate.
+fn decrypt_record_bytes(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
+    let sc = crypto().ok_or_else(|| {
+        anyhow!(
+            "encrypted memory record encountered, but no keystore is active in this process \
+             (SHODH_MASTER_PASSPHRASE unset?)"
+        )
+    })?;
+    let epoch = crate::keystore::record_epoch(data).unwrap_or(0);
+    let cryptor = sc.record.for_epoch(epoch).ok_or_else(|| {
+        anyhow!(
+            "record epoch {epoch} has no DEK in the keystore (active epoch {}); \
+             the keystore may have been replaced or the epoch's key pruned",
+            sc.record.active_epoch()
+        )
+    })?;
+    cryptor
+        .decrypt_record(data, key)
+        .context("Failed to decrypt memory record")
+}
+
+/// Whether this process holds the DEK for the epoch an encrypted record was
+/// written under. `false` for a plaintext record.
+fn can_decrypt(data: &[u8]) -> bool {
+    match (crypto(), crate::keystore::record_epoch(data)) {
+        (Some(sc), Some(epoch)) => sc.record.for_epoch(epoch).is_some(),
+        _ => false,
+    }
+}
+
+/// Take the encryption layer off a stored record, if there is one.
+///
+/// Returns the bytes the SHO decoder should see and whether the record was a
+/// plaintext record read under an active keystore. That second case is the
+/// tripwire: it is counted, logged at WARN, and — under
+/// `SHODH_REQUIRE_ENCRYPTED_READS` — refused, because a plaintext record in an
+/// encrypted store means either the store predates its keystore (expected once,
+/// and the lazy rewrite in `get_opt` retires it) or some write path is
+/// bypassing `encode_memory` (never expected, and the reason this exists).
+fn unwrap_record<'a>(key: &[u8], data: &'a [u8]) -> Result<(Cow<'a, [u8]>, bool)> {
+    if crate::keystore::is_encrypted_record(data) {
+        return Ok((Cow::Owned(decrypt_record_bytes(key, data)?), false));
+    }
+    if !encryption_active() {
+        return Ok((Cow::Borrowed(data), false));
+    }
+    PLAINTEXT_READS_UNDER_KEYSTORE.fetch_add(1, Ordering::SeqCst);
+    if require_encrypted_reads() {
+        return Err(anyhow!(
+            "plaintext memory record {} read while a keystore is active and \
+             SHODH_REQUIRE_ENCRYPTED_READS is set ({} bytes); refusing to serve it",
+            hex::encode(key),
+            data.len()
+        ));
+    }
+    tracing::warn!(
+        key = %hex::encode(key),
+        bytes = data.len(),
+        "plaintext memory record read while a keystore is active; it will be \
+         rewritten encrypted on this read if reached via get(), but a steady \
+         stream of these means a write path is bypassing encode_memory"
+    );
+    Ok((Cow::Borrowed(data), true))
+}
+
 /// Public wrapper around the full legacy fallback chain, used by the migration module.
 ///
 /// Tries SHO v2 (postcard), SHO v1 (bincode 2.x), then the 17-path legacy
@@ -913,8 +1092,31 @@ fn deserialize_memory_checked(key: &[u8], data: &[u8]) -> Result<(Memory, bool)>
 /// check, and it must classify a fabrication rather than have the decode
 /// refuse it. Any caller that holds the key and is going to act on the result
 /// wants [`deserialize_memory_for_migration_checked`] instead.
+///
+/// Having no key, it also cannot take an `ENC\0` envelope off: an encrypted
+/// record is an error here, never a fabrication (the marker is not a SHO
+/// header, and the legacy chain is not consulted for it). Callers that hold the
+/// key decrypt first with [`decrypt_memory_record`].
 pub fn deserialize_memory_for_migration(data: &[u8]) -> Result<Memory> {
+    if crate::keystore::is_encrypted_record(data) {
+        return Err(anyhow!(
+            "encrypted memory record ({} bytes) cannot be decoded without its key; \
+             use the checked entry point",
+            data.len()
+        ));
+    }
     deserialize_memory(data).map(|(m, _)| m)
+}
+
+/// Decrypt an `ENC\0` memory record stored at `key`, for callers outside this
+/// module that read raw values (the integrity scrub). Plaintext records are
+/// returned as-is with no tripwire: the scrub reports, it does not serve.
+pub fn decrypt_memory_record<'a>(key: &[u8], data: &'a [u8]) -> Result<Cow<'a, [u8]>> {
+    if crate::keystore::is_encrypted_record(data) {
+        Ok(Cow::Owned(decrypt_record_bytes(key, data)?))
+    } else {
+        Ok(Cow::Borrowed(data))
+    }
 }
 
 /// The same chain, verified against the key the value was stored under.
@@ -1284,6 +1486,10 @@ pub(crate) fn crc32_simple(data: &[u8]) -> u32 {
 
 /// Column family name for secondary indices (tags, types, timestamps, etc.)
 const CF_INDEX: &str = "memory_index";
+/// Sentinel (in CF_INDEX) holding the last-seen keystore generation; the
+/// rollback guard in [`MemoryStorage::check_keystore_generation`]. Written only
+/// while a keystore is active.
+const KEYSTORE_GENERATION_KEY: &[u8] = b"meta:keystore_generation";
 
 /// Column family for the append-only agent-traceability operation log
 /// (`memory::oplog::OpRecord`, spec `docs/superpowers/specs/2026-07-30-agent-traceability-design.md`).
@@ -1480,6 +1686,9 @@ impl MemoryStorage {
 
         // Migrate from old separate-DB layout if needed
         Self::migrate_from_separate_dbs(path, &db)?;
+        // Encryption at rest: unseal the keystore (if any) and install the
+        // record crypto. No keystore + no passphrase = plaintext, as before.
+        Self::init_storage_crypto(&db, &storage_path)?;
 
         let write_mode = WriteMode::default();
         tracing::info!(
@@ -1501,6 +1710,143 @@ impl MemoryStorage {
             oplog_append_lock: parking_lot::Mutex::new(()),
             record_mutation_lock: parking_lot::Mutex::new(()),
         })
+    }
+
+    /// Load — or on first run with a passphrase, create — the keystore, unseal
+    /// it, verify its integrity MAC and rollback generation, and install the
+    /// process-global record crypto.
+    ///
+    /// The four cases, and the one that must fail loud:
+    ///
+    /// | keystore.json | `SHODH_MASTER_PASSPHRASE` | result |
+    /// |---|---|---|
+    /// | absent | unset | plaintext store, nothing written (the default) |
+    /// | absent | set | keystore created, store encrypted from here on |
+    /// | present | set | unsealed; wrong passphrase is an error |
+    /// | present | unset | **error** — the store asked for encryption and it is unavailable |
+    ///
+    /// The last row is the contract `tests/encryption_unavailable_fails_loud.rs`
+    /// pins: a store with a keystore never opens in plaintext mode, because a
+    /// plaintext open would serve ciphertext as corruption and write plaintext
+    /// next to it.
+    fn init_storage_crypto(db: &DB, storage_path: &Path) -> Result<()> {
+        use crate::keystore::{KdfParams, Keystore, RecordCryptors};
+
+        let keystore_path = storage_path.join("keystore.json");
+        let passphrase = std::env::var("SHODH_MASTER_PASSPHRASE")
+            .ok()
+            .filter(|s| !s.is_empty());
+
+        let (ks, kek) = match (keystore_path.exists(), passphrase) {
+            (true, Some(pass)) => {
+                let json = std::fs::read_to_string(&keystore_path)
+                    .context("Failed to read keystore.json")?;
+                let ks = Keystore::from_json(&json)?;
+                let kek = ks
+                    .unseal_with_passphrase(&pass)
+                    .context("Failed to unseal keystore.json with SHODH_MASTER_PASSPHRASE")?;
+                tracing::info!("Encryption at rest: keystore unsealed");
+                (ks, kek)
+            }
+            (true, None) => {
+                return Err(anyhow!(
+                    "{} is present but SHODH_MASTER_PASSPHRASE is not set; refusing to open \
+                     the store (its records are encrypted and would be served as corruption, \
+                     and new records would be written in plaintext beside them)",
+                    keystore_path.display()
+                ));
+            }
+            (false, Some(pass)) => {
+                let ks = Keystore::create(&pass, KdfParams::production())?;
+                // Persisted BEFORE anything is encrypted under it: a record
+                // written under a DEK that never reached disk is unrecoverable.
+                ks.save_to_path(&keystore_path)
+                    .context("Failed to write keystore.json")?;
+                let kek = ks.unseal_with_passphrase(&pass)?;
+                tracing::info!(
+                    path = %keystore_path.display(),
+                    "Encryption at rest: created new keystore — back it up; without it \
+                     every record written from now on is unrecoverable"
+                );
+                (ks, kek)
+            }
+            (false, None) => return Ok(()), // encryption off (plaintext)
+        };
+
+        ks.verify_integrity(&kek)
+            .context("keystore integrity verification failed")?;
+        Self::check_keystore_generation(db, ks.generation)?;
+
+        let fresh = StorageCrypto {
+            record: RecordCryptors::from_keystore(&ks, &kek)?,
+            kek_fingerprint: ks.kek_fingerprint.clone(),
+            generation: ks.generation,
+        };
+
+        let mut slot = STORAGE_CRYPTO.write();
+        match slot.as_ref() {
+            Some(existing) if existing.kek_fingerprint != fresh.kek_fingerprint => {
+                return Err(anyhow!(
+                    "a different encryption keystore is already active in this process; \
+                     shodh's process-global encryption supports a single keystore per process"
+                ));
+            }
+            Some(existing) if existing.generation > fresh.generation => {
+                // The DB-side sentinel already rejected this above unless the
+                // rollback override is set; keep the newer cryptor set either way.
+                return Ok(());
+            }
+            _ => {
+                *slot = Some(Arc::new(fresh));
+            }
+        }
+        Ok(())
+    }
+
+    /// Rollback guard: refuse a keystore whose generation is older than the last
+    /// one this database saw. The sentinel lives in the index CF and is only
+    /// ever written while a keystore is active, so a plaintext store carries no
+    /// trace of this code.
+    fn check_keystore_generation(db: &DB, generation: u64) -> Result<()> {
+        let cf = db
+            .cf_handle(CF_INDEX)
+            .ok_or_else(|| anyhow!("memory_index CF missing for keystore generation sentinel"))?;
+        let stored = db
+            .get_cf(cf, KEYSTORE_GENERATION_KEY)
+            .context("read keystore generation sentinel")?
+            .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+            .map(u64::from_le_bytes)
+            .unwrap_or(0);
+        if generation < stored {
+            let allow_rollback = std::env::var("SHODH_ALLOW_KEYSTORE_ROLLBACK")
+                .map(|v| {
+                    let v = v.trim().to_ascii_lowercase();
+                    v == "true" || v == "1"
+                })
+                .unwrap_or(false);
+            if !allow_rollback {
+                return Err(anyhow!(
+                    "keystore rollback detected: file generation {generation} < last-seen {stored}. \
+                     If you intentionally restored an older keystore (e.g. keystore.json.bak), set \
+                     SHODH_ALLOW_KEYSTORE_ROLLBACK=true once to accept it and reset the sentinel."
+                ));
+            }
+            tracing::warn!(
+                file_generation = generation,
+                last_seen = stored,
+                "SHODH_ALLOW_KEYSTORE_ROLLBACK set: accepting an older keystore generation (restored \
+                 keystore?) and resetting the rollback sentinel to it. Rollback protection is \
+                 bypassed for this start — unset the variable afterward."
+            );
+            db.put_cf(cf, KEYSTORE_GENERATION_KEY, generation.to_le_bytes())
+                .context("reset keystore generation sentinel")?;
+            return Ok(());
+        }
+        if generation > stored {
+            db.put_cf(cf, KEYSTORE_GENERATION_KEY, generation.to_le_bytes())
+                .context("write keystore generation sentinel")?;
+        }
+        Ok(())
     }
 
     /// Open a RocksDB database with column families, automatically repairing if corruption is detected.
@@ -1716,9 +2062,9 @@ impl MemoryStorage {
     fn store_inner(&self, memory: &Memory) -> Result<()> {
         let key = memory.id.0.as_bytes();
 
-        // Serialize memory (postcard + SHO v2 envelope)
-        let value = crate::serialization::encode_sho(memory)
-            .context(format!("Failed to serialize memory {}", memory.id.0))?;
+        // Serialize memory (postcard + SHO v2 envelope, sealed if a keystore is active)
+        let value =
+            encode_memory(memory).context(format!("Failed to serialize memory {}", memory.id.0))?;
 
         // Use write mode based on configuration
         let mut write_opts = WriteOptions::default();
@@ -2081,11 +2427,12 @@ impl MemoryStorage {
         Ok(Some(memory))
     }
 
-    /// Re-write a memory in current format (lazy migration helper)
+    /// Re-write a memory in current format (lazy migration helper). "Current"
+    /// includes the record envelope: a plaintext record read under an active
+    /// keystore comes through here and leaves encrypted.
     fn migrate_memory_format(&self, memory: &Memory) -> Result<()> {
         let key = memory.id.0.as_bytes();
-        let value = crate::serialization::encode_sho(memory)
-            .context("Failed to serialize for migration")?;
+        let value = encode_memory(memory).context("Failed to serialize for migration")?;
 
         let mut write_opts = WriteOptions::default();
         write_opts.set_sync(false); // Async is fine for migration
@@ -2159,8 +2506,11 @@ impl MemoryStorage {
         let mut batch = WriteBatch::default();
         for (memory, importance_before) in items {
             // Main record (carries the new access_count / last_accessed /
-            // importance). Same default-CF + SHO-v2 encoding as `store_inner`.
-            let value = crate::serialization::encode_sho(memory).context(format!(
+            // importance). Same encoding as `store_inner` — through
+            // `encode_memory`, never `encode_sho` directly: this runs on every
+            // recall, and a plaintext write here would replace the ciphertext
+            // of every memory ever recalled (tests/encryption_round_trip.rs).
+            let value = encode_memory(memory).context(format!(
                 "serialize memory {} for access update",
                 memory.id.0
             ))?;
@@ -3108,7 +3458,7 @@ impl MemoryStorage {
                         .metadata
                         .insert("forgotten_at".to_string(), now.clone());
 
-                    let updated_value = crate::serialization::encode_sho(&memory)?;
+                    let updated_value = encode_memory(&memory)?;
                     batch.put(&key, updated_value);
                 }
             }
@@ -3162,7 +3512,7 @@ impl MemoryStorage {
                         .metadata
                         .insert("forgotten_at".to_string(), now.clone());
 
-                    let updated_value = crate::serialization::encode_sho(&memory)?;
+                    let updated_value = encode_memory(&memory)?;
                     batch.put(&key, updated_value);
                 }
             }
@@ -3365,13 +3715,27 @@ impl MemoryStorage {
                     key.len()
                 );
                 to_delete.push(key.to_vec());
-            } else if deserialize_memory(&value).is_err() {
+            } else if crate::keystore::is_encrypted_record(&value) && !can_decrypt(&value) {
+                // Ciphertext this process holds no key for is not corruption,
+                // it is unreadable HERE — deleting it would turn a missing
+                // passphrase or a pruned epoch into data loss.
+                tracing::warn!(
+                    key = %hex::encode(&key),
+                    "cleanup: skipping an encrypted record this process cannot decrypt \
+                     (no keystore, or no DEK for its epoch)"
+                );
+            } else if decrypt_memory_record(&key, &value)
+                .and_then(|plain| deserialize_memory(&plain))
+                .is_err()
+            {
                 // Deliberately the UNCHECKED decode. This branch deletes, and a
                 // record that decodes but disagrees with its key is exactly the
                 // evidence an operator needs to see; turning that disagreement
                 // into a delete would destroy it without anyone in the loop.
                 // Undecodable records are a different matter — they are already
                 // unreadable, so deleting them loses nothing that was readable.
+                // For an encrypted record "undecodable" includes a failed AEAD
+                // tag under a key we DO hold: authenticated corruption.
                 tracing::debug!(
                     "Marking for deletion: valid key but corrupted value ({} bytes)",
                     value.len()
@@ -3437,14 +3801,29 @@ impl MemoryStorage {
             // reports raw bincode 2.x as "current" (false) even though that data
             // still needs converting to postcard. So gate on the SHO envelope
             // version directly.
+            //
+            // With a keystore active, "current" also means encrypted: the
+            // envelope is read from the decrypted bytes, and a plaintext record
+            // — whatever its envelope version — is queued for a rewrite, which
+            // is how an existing store is bulk-encrypted after a keystore is
+            // introduced (the read path only re-encrypts what `get` touches).
+            let plain = match decrypt_memory_record(&key, &value) {
+                Ok(plain) => plain,
+                Err(_) => {
+                    failed += 1;
+                    continue;
+                }
+            };
             let is_current_postcard = matches!(
-                crate::serialization::read_sho_envelope(&value),
+                crate::serialization::read_sho_envelope(&plain),
                 crate::serialization::ShoEnvelope::Valid {
                     version: crate::serialization::SHO_VERSION_POSTCARD,
                     ..
                 }
             );
-            if is_current_postcard {
+            let is_current_envelope =
+                !encryption_active() || crate::keystore::is_encrypted_record(&value);
+            if is_current_postcard && is_current_envelope {
                 already_current += 1;
                 continue;
             }
@@ -3457,7 +3836,7 @@ impl MemoryStorage {
             // back OVER the original bytes at `key`. An unchecked pseudo-decode
             // here does not merely serve a fabrication, it persists one and
             // destroys the evidence of what the record used to be.
-            match deserialize_memory_checked(&key, &value) {
+            match deserialize_plain_checked(&key, &plain) {
                 Ok((memory, _)) => {
                     to_migrate.push((key.to_vec(), memory));
                 }
@@ -3478,7 +3857,7 @@ impl MemoryStorage {
             write_opts.set_sync(self.write_mode == WriteMode::Sync);
 
             for (key, memory) in to_migrate {
-                match crate::serialization::encode_sho(&memory) {
+                match encode_memory(&memory) {
                     Ok(serialized) => {
                         if let Err(e) = self.db.put_opt(&key, &serialized, &write_opts) {
                             tracing::warn!("Failed to migrate memory: {e}");
@@ -4090,8 +4469,8 @@ impl MemoryStorage {
 
         // 1. Serialize memory
         let memory_key = memory.id.0.as_bytes();
-        let memory_value = crate::serialization::encode_sho(memory)
-            .context(format!("Failed to serialize memory {}", memory.id.0))?;
+        let memory_value =
+            encode_memory(memory).context(format!("Failed to serialize memory {}", memory.id.0))?;
         batch.put(memory_key, &memory_value);
 
         // 2. Serialize vector mapping with modality support
