@@ -1438,7 +1438,11 @@ impl MultiUserMemoryManager {
             let db = self.shared_db.clone();
             let key_bytes = key.into_bytes();
 
-            tokio::task::spawn_blocking(move || {
+            // On `task_tracker`, not a bare `spawn_blocking`: the task holds its
+            // own handle on the shared DB, so an untracked write outlives a
+            // drain, keeps RocksDB's lock after the manager is dropped, and is
+            // not awaited by graceful shutdown.
+            self.task_tracker.spawn_blocking(move || {
                 if let Some(audit) = db.cf_handle(CF_AUDIT) {
                     if let Err(e) = db.put_cf(&audit, &key_bytes, &serialized) {
                         tracing::error!("Failed to persist audit log: {}", e);
@@ -1476,7 +1480,8 @@ impl MultiUserMemoryManager {
             let audit_max_entries = self.server_config.audit_max_entries_per_user;
             let audit_archive_dir = self.server_config.audit_archive_path.clone();
 
-            tokio::task::spawn_blocking(move || {
+            // Tracked for the same reason as the write above.
+            self.task_tracker.spawn_blocking(move || {
                 let manager = MultiUserMemoryManagerRotationHelper {
                     shared_db,
                     audit_logs,
