@@ -1048,6 +1048,13 @@ impl HybridSearchEngine {
             .into_iter()
             .filter(|(_, score)| *score >= self.config.min_bm25_score)
             .collect();
+        // The lexical leg as fusion sees it. Recorded here because nothing
+        // downstream keeps the BM25 order; without this stage a hybrid-leg
+        // divergence could not be told apart from a BM25 one.
+        crate::memory::gold_funnel::record_scored(
+            "bm25",
+            bm25_results.iter().map(|(id, score)| (id, *score)),
+        );
 
         // Calculate dynamic weights based on keyword discriminativeness
         // When YAKE identifies discriminative keywords, trust BM25 more

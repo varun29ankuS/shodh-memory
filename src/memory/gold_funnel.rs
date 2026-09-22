@@ -22,10 +22,12 @@ struct FunnelState {
     /// (stage name, best gold rank at that stage; None if no gold present).
     stages: Vec<(String, Option<usize>)>,
     /// When armed by [`begin_capture`], every recorded stage's full ordered
-    /// candidate list, in pipeline order. This is what lets a repeat
+    /// candidate list, in pipeline order, with the stage's score for each
+    /// candidate where the stage has one. This is what lets a repeat
     /// divergence be placed on the leg it first entered rather than on the
-    /// fused output it surfaced in.
-    capture: Option<Vec<(String, Vec<MemoryId>)>>,
+    /// fused output it surfaced in, and be told apart as a reordering of the
+    /// same scores or a change in the scores themselves.
+    capture: Option<Vec<(String, Vec<(MemoryId, Option<f32>)>)>>,
 }
 
 /// Arm the funnel for the next recall with this query's gold ids. Clears any prior state.
@@ -54,7 +56,7 @@ pub fn begin_capture() {
 
 /// Disarm and return the captured per-stage candidate lists, in the order the
 /// pipeline recorded them (None if no capture was armed).
-pub fn take_capture() -> Option<Vec<(String, Vec<MemoryId>)>> {
+pub fn take_capture() -> Option<Vec<(String, Vec<(MemoryId, Option<f32>)>)>> {
     FUNNEL.with(|c| c.borrow_mut().take().and_then(|s| s.capture))
 }
 
@@ -66,6 +68,17 @@ pub fn take() -> Option<Vec<(String, Option<usize>)>> {
 /// Record the best gold rank in `ids` (an ordered candidate list) for `stage`. No-op unless
 /// the funnel is armed. `ids` must be in rank order (rank 0 = best).
 pub fn record<'a>(stage: &str, ids: impl Iterator<Item = &'a MemoryId>) {
+    record_inner(stage, ids.map(|id| (id, None)));
+}
+
+/// [`record`] for a stage that scores its candidates: keeps the score beside
+/// each id when a capture is armed, so two repeats can be compared on values
+/// and not only on order. `ids` must be in rank order (rank 0 = best).
+pub fn record_scored<'a>(stage: &str, ids: impl Iterator<Item = (&'a MemoryId, f32)>) {
+    record_inner(stage, ids.map(|(id, score)| (id, Some(score))));
+}
+
+fn record_inner<'a>(stage: &str, ids: impl Iterator<Item = (&'a MemoryId, Option<f32>)>) {
     FUNNEL.with(|c| {
         let mut borrow = c.borrow_mut();
         let Some(state) = borrow.as_mut() else {
@@ -77,13 +90,14 @@ pub fn record<'a>(stage: &str, ids: impl Iterator<Item = &'a MemoryId>) {
             capture,
         } = state;
         let best: Option<usize> = if let Some(capture) = capture.as_mut() {
-            let list: Vec<MemoryId> = ids.cloned().collect();
-            let best = list.iter().position(|id| gold.contains(id));
+            let list: Vec<(MemoryId, Option<f32>)> =
+                ids.map(|(id, score)| (id.clone(), score)).collect();
+            let best = list.iter().position(|(id, _)| gold.contains(id));
             capture.push((stage.to_string(), list));
             best
         } else {
             let mut best = None;
-            for (i, id) in ids.enumerate() {
+            for (i, (id, _)) in ids.enumerate() {
                 if gold.contains(id) {
                     best = Some(i);
                     break;

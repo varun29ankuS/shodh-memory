@@ -4016,7 +4016,12 @@ impl MemorySystem {
             }
         };
 
-        crate::memory::gold_funnel::record("graph", graph_results.iter().map(|(id, _, _)| id));
+        crate::memory::gold_funnel::record_scored(
+            "graph",
+            graph_results
+                .iter()
+                .map(|(id, activation, _)| (id, *activation)),
+        );
 
         let t_graph = recall_start.elapsed();
         tracing::info!(
@@ -4132,7 +4137,10 @@ impl MemorySystem {
         } else {
             vr
         };
-        crate::memory::gold_funnel::record("vector", vector_results.iter().map(|(id, _)| id));
+        crate::memory::gold_funnel::record_scored(
+            "vector",
+            vector_results.iter().map(|(id, score)| (id, *score)),
+        );
         let t_vector = recall_start.elapsed();
         tracing::info!(
             vector_ms = format!("{:.2}", (t_vector - t_graph).as_secs_f64() * 1000.0),
@@ -4329,7 +4337,10 @@ impl MemorySystem {
                 vector_results
             };
 
-            crate::memory::gold_funnel::record("hybrid", hybrid_ids.iter().map(|(id, _)| id));
+            crate::memory::gold_funnel::record_scored(
+                "hybrid",
+                hybrid_ids.iter().map(|(id, score)| (id, *score)),
+            );
 
             // ===========================================================================
             // LAYER 4: RRF FUSION WITH DENSITY-BASED WEIGHTS (PIPE-11)
@@ -5492,7 +5503,10 @@ impl MemorySystem {
                 }
             }
 
-            crate::memory::gold_funnel::record("fusion", res.iter().map(|(id, _)| id));
+            crate::memory::gold_funnel::record_scored(
+                "fusion",
+                res.iter().map(|(id, score)| (id, *score)),
+            );
             // GEO INJECTION SURVIVAL (Layer 4.46 companion): `res` is sorted score-
             // descending and geo-injected ids sit at GEO_INJECT_FLOOR, i.e. the very
             // bottom. A plain `truncate(query.max_results)` here runs BEFORE the geo

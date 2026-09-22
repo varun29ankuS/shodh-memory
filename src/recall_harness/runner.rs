@@ -541,11 +541,20 @@ fn list_divergence(a: &[String], b: &[String]) -> String {
 ///
 /// `None` when nothing was captured in either repeat. The stages are compared
 /// in the order the pipeline recorded them, so the first difference is the
-/// leg the divergence entered through; every stage after it inherits it.
-fn leg_divergence_note(a: &[(String, Vec<String>)], b: &[(String, Vec<String>)]) -> Option<String> {
+/// leg the divergence entered through; every stage after it inherits it. A
+/// stage whose ids agree but whose scores do not is reported as such, since a
+/// reordering of equal scores and a change in the scores have different
+/// causes.
+fn leg_divergence_note(
+    a: &[(String, Vec<(String, Option<f32>)>)],
+    b: &[(String, Vec<(String, Option<f32>)>)],
+) -> Option<String> {
     if a.is_empty() || b.is_empty() {
         return None;
     }
+    let ids_of = |l: &[(String, Option<f32>)]| -> Vec<String> {
+        l.iter().map(|(id, _)| id.clone()).collect()
+    };
     for (i, (x, y)) in a.iter().zip(b).enumerate() {
         if x.0 != y.0 {
             return Some(format!(
@@ -553,13 +562,29 @@ fn leg_divergence_note(a: &[(String, Vec<String>)], b: &[(String, Vec<String>)])
                 x.0, y.0
             ));
         }
-        if x.1 != y.1 {
+        let (xi, yi) = (ids_of(x.1.as_slice()), ids_of(y.1.as_slice()));
+        if xi != yi {
             return Some(format!(
                 "first differing leg: {} ({} vs {} candidates) {}",
                 x.0,
-                x.1.len(),
-                y.1.len(),
-                list_divergence(&x.1, &y.1)
+                xi.len(),
+                yi.len(),
+                list_divergence(&xi, &yi)
+            ));
+        }
+        let scores_differ =
+            x.1.iter()
+                .zip(&y.1)
+                .position(|((_, sx), (_, sy))| sx.map(f32::to_bits) != sy.map(f32::to_bits));
+        if let Some(p) = scores_differ {
+            return Some(format!(
+                "first differing leg: {} — same {} candidates in the same order, scores differ \
+                 from position {p}: {} scored {:?} in repeat 0 and {:?} in the other",
+                x.0,
+                xi.len(),
+                x.1[p].0,
+                x.1[p].1,
+                y.1[p].1
             ));
         }
     }
@@ -898,10 +923,12 @@ struct ModePassResult {
     /// vs different scores over the same pool) and is never gated on.
     rerank_pools: Vec<CaseRankList>,
     /// For each case, the ordered candidate list every pipeline stage
-    /// recorded while the pool query ran (graph, vector, hybrid, fusion, ...),
-    /// in pipeline order, as corpus ids. Empty when reranking is off. Lets a
-    /// divergence be placed on the first leg it appears in, not the last.
-    leg_lists: Vec<Vec<(String, Vec<String>)>>,
+    /// recorded while the pool query ran (graph, vector, bm25, hybrid,
+    /// fusion, ...), in pipeline order, as corpus ids with the stage's score
+    /// where it has one. Empty when reranking is off. Lets a divergence be
+    /// placed on the first leg it appears in, not the last, and told apart as
+    /// a reordering or a change of scores.
+    leg_lists: Vec<Vec<(String, Vec<(String, Option<f32>)>)>>,
     /// Per-case stage breakdown, aligned with `latencies_ms` by index. Empty
     /// unless `SHODH_STAGE_TIMING=1`. Diagnostic only — never gated on.
     stage_probes: Vec<crate::stage_probe::Probe>,
@@ -1070,7 +1097,8 @@ fn run_one_pass(
         let mut ranks: Vec<CaseRankList> = Vec::with_capacity(cases.len());
         let mut deep_ranks: Vec<CaseRankList> = Vec::with_capacity(cases.len());
         let mut rerank_pools: Vec<CaseRankList> = Vec::with_capacity(cases.len());
-        let mut leg_lists: Vec<Vec<(String, Vec<String>)>> = Vec::with_capacity(cases.len());
+        let mut leg_lists: Vec<Vec<(String, Vec<(String, Option<f32>)>)>> =
+            Vec::with_capacity(cases.len());
 
         // TIMED PASS. One production recall per case and nothing else between
         // two of them. Every diagnostic query (the RECALL_DIAG_K-deep list,
@@ -1281,11 +1309,20 @@ fn run_one_pass(
             // next query, which therefore records nothing.
             crate::memory::gold_funnel::begin_capture();
             let pool_result = system.read().rerank_input_pool(query);
-            let legs: Vec<(String, Vec<String>)> = crate::memory::gold_funnel::take_capture()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(stage, ids)| (stage, ids.iter().map(|id| corpus_id(&id.0)).collect()))
-                .collect();
+            let legs: Vec<(String, Vec<(String, Option<f32>)>)> =
+                crate::memory::gold_funnel::take_capture()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(stage, entries)| {
+                        (
+                            stage,
+                            entries
+                                .iter()
+                                .map(|(id, score)| (corpus_id(&id.0), *score))
+                                .collect(),
+                        )
+                    })
+                    .collect();
             leg_lists.push(legs);
             let pool: Vec<String> = match pool_result {
                 Ok(Some(pool)) => pool.iter().map(|m| corpus_id(&m.id.0)).collect(),
@@ -3886,13 +3923,13 @@ mod tests {
     /// not to the fusion that merely carried it.
     #[test]
     fn leg_divergence_note_names_the_first_differing_stage() {
-        let legs = |stages: &[(&str, Vec<&str>)]| -> Vec<(String, Vec<String>)> {
+        let legs = |stages: &[(&str, Vec<&str>)]| -> Vec<(String, Vec<(String, Option<f32>)>)> {
             stages
                 .iter()
                 .map(|(name, ids)| {
                     (
                         name.to_string(),
-                        ids.iter().map(|s| s.to_string()).collect(),
+                        ids.iter().map(|s| (s.to_string(), None)).collect(),
                     )
                 })
                 .collect()
@@ -3944,6 +3981,30 @@ mod tests {
             reordered.starts_with("stage sequence differs at index 0"),
             "{reordered}"
         );
+
+        // Same ids in the same order, one score changed: named as a score
+        // change, at its position, with both values.
+        let scored = |v: &[(&str, f32)]| -> Vec<(String, Vec<(String, Option<f32>)>)> {
+            vec![(
+                "vector".to_string(),
+                v.iter().map(|(id, s)| (id.to_string(), Some(*s))).collect(),
+            )]
+        };
+        let drifted = leg_divergence_note(
+            &scored(&[("a", 0.9), ("b", 0.5)]),
+            &scored(&[("a", 0.9), ("b", 0.25)]),
+        )
+        .expect("captured");
+        assert!(
+            drifted
+                .starts_with("first differing leg: vector — same 2 candidates in the same order"),
+            "{drifted}"
+        );
+        assert!(
+            drifted.contains("position 1: b scored Some(0.5)"),
+            "{drifted}"
+        );
+        assert!(drifted.contains("Some(0.25)"), "{drifted}");
     }
 
     fn unique_storage_dir(label: &str) -> PathBuf {
