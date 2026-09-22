@@ -12,6 +12,39 @@ the `recall-eval` binary (see `src/bin/recall_eval.rs`).
   measured against this; regressions beyond the configured tolerance fail CI
   (see issue #267 / RH-5).
 
+## The PR gate baseline (`locomo-gate`)
+
+CI's L1 Smoke Suite (`.github/workflows/recall.yml`) runs the 100-case
+`locomo-gate` suite and compares against two checked-in files:
+
+- `locomo-gate-baseline.json`: aggregate metrics. The `recall-eval` binary
+  gates on these; its exit code is the pass/fail.
+- `locomo-gate-baseline.per-case.json`: the per-case records from the same run.
+  `scripts/recall_diff.py` uses them to list, in the PR comment, every case
+  whose result moved, bucketed into lost gold / gained gold / p@1 flips /
+  rank-only.
+
+On this suite the 2% tolerance is below one case for p@1 (n=100, one case =
+0.01), so for that metric the gate is a no-net-loss check. The runs are
+deterministic (five repeats must be byte-identical, and identical code gives
+identical per-case results across CI runs), so any case that moves is a real
+change, not noise. The case list is how a reviewer decides whether a change is
+worth what it moved.
+
+**Regenerate both files together, from the same run, on `main`, after a merged
+change that intentionally moved quality.** A stale baseline hides regressions:
+while main sat 3.5pp of recall@10 above the baseline, a PR could lose up to
+that much and still pass.
+
+1. `gh workflow run recall.yml --ref main` (defaults: `locomo-gate`, `full`,
+   5 repeats).
+2. `gh run download <run-id> -n recall-eval-report`.
+3. Copy `current.json` to `locomo-gate-baseline.json` and `per-case.json` to
+   `locomo-gate-baseline.per-case.json`. Check that `git_sha` names the main
+   commit you meant and that `repeats` is 5.
+4. Add a row to the regeneration history below, and in the PR list the cases
+   that moved since the previous baseline.
+
 ## Regenerating the baseline
 
 Only regenerate `baseline.json` when you have *intentionally* changed retrieval
@@ -86,11 +119,11 @@ share more than `full`.
 ### Caveats — read these before staring at the numbers
 
 1. **`+rerank` is a misnomer in this codebase.** Issue #270 specs the mode
-   as a cross-encoder rerank stage. shodh has no cross-encoder. The gate
-   wraps the **ontological re-ranker** at Layer 4.9 (multiplicative boost
-   when episode entity types match the query's expected ontology labels).
-   The label is preserved for spec fidelity; if a cross-encoder ever
-   lands, it joins this same gate.
+   as a cross-encoder rerank stage, but it wraps the **ontological
+   re-ranker** at Layer 4.9 (multiplicative boost when episode entity types
+   match the query's expected ontology labels). The cross-encoder that
+   landed in #536 is a separate stage behind `SHODH_CE_RERANK`, off by
+   default, and is not part of any `--layer` mode.
 
 2. **Modes below `full` skip Layer 5 unified scoring.** Per-layer ndcg
    numbers will look strictly *lower* than `full` for reasons that are
@@ -118,3 +151,5 @@ share more than `full`.
 | Date       | SHA       | Embedder       | Notes                          |
 | ---------- | --------- | -------------- | ------------------------------ |
 | 2026-05-03 | `6756665` | minilm-l6-v2   | Initial capture (RH-6, #268).  |
+| 2026-08-08 | `ec7abd2` | minilm-l6-v2   | `locomo-gate` aggregate baseline, 1 repeat, no per-case file. |
+| 2026-09-22 | `cef6721` | minilm-l6-v2   | `locomo-gate` + per-case, 5 repeats (workflow run 35693977402). After #509 (keyphrases stop becoming graph nodes; q62 lost, q46/q52 gained) and #560 (BM25 stemming; q62, q129, q85 gained, 18 rank-only moves, none lost). recall@10 0.5268 → 0.5618, ndcg@10 0.4111 → 0.4248, p@1 0.31 → 0.31. |

@@ -189,14 +189,24 @@ jobs:
           # so reviewers see the diff even on regression.
           exit 0
 
+      - name: Test diff renderer
+        if: always() && hashFiles('current.json') != ''
+        working-directory: scripts
+        run: python3 test_recall_diff.py
+
       - name: Render diff table
         id: render
         if: always() && hashFiles('current.json') != ''
         run: |
+          # The per-case pair lists which cases moved; without it a red gate
+          # names a metric but not the query that paid for it (#509 lost
+          # conv-42_q62 and nobody reviewing it could see that).
           python3 scripts/recall_diff.py \
             tests/recall/locomo-gate-baseline.json \
             current.json \
-            --tolerance "${TOLERANCE}" > recall-diff.md
+            --tolerance "${TOLERANCE}" \
+            --baseline-per-case tests/recall/locomo-gate-baseline.per-case.json \
+            --current-per-case per-case.json > recall-diff.md
           {
             echo 'body<<RECALL_DIFF_EOF'
             cat recall-diff.md
