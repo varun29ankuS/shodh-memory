@@ -2147,6 +2147,24 @@ impl MemorySystem {
         Ok(out.into_iter().take(k).collect())
     }
 
+    /// The candidate pool the cross-encoder would rescore for `query`: the
+    /// fused ranking fetched at the rerank depth, before any reranking. `None`
+    /// when reranking would not run for this query, so a caller cannot mistake
+    /// the unreranked path for a pool.
+    ///
+    /// Exists for determinism diagnosis. The rerank path fetches the fused
+    /// ranking at depth (30) rather than `k` (10), which also deepens the vector
+    /// candidate pool it is built from, so a repeat can agree on the top 10
+    /// without the reranker and still hand the reranker a different pool.
+    pub fn rerank_input_pool(&self, query: &Query) -> Result<Option<Vec<SharedMemory>>> {
+        if !ce_rerank_enabled() || query.query_text.is_none() || cross_encoder().is_none() {
+            return Ok(None);
+        }
+        let mut deep_query = query.clone();
+        deep_query.max_results = ce_depth().max(query.max_results.max(1));
+        self.recall_fused(&deep_query).map(Some)
+    }
+
     fn recall_fused(&self, query: &Query) -> Result<Vec<SharedMemory>> {
         // Companion-coverage re-rank (SHODH_COMPANION_RERANK, default off), gated
         // on multi-hop INTENT. The multi_hop wall is present-but-buried: gold

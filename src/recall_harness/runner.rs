@@ -332,18 +332,41 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
                     .per_mode
                     .get(mode)
                     .expect("every repeat must have every mode");
+                let mut hidden_pool_divergence: Vec<String> = Vec::new();
                 for (k, ref_rank) in ref_pass.ranks.iter().enumerate() {
                     let cur_rank = &cur_pass.ranks[k];
                     debug_assert_eq!(ref_rank.case_id, cur_rank.case_id);
+                    let pool_note =
+                        pool_divergence_note(&ref_pass.rerank_pools[k], &cur_pass.rerank_pools[k]);
                     if ref_rank.retrieved != cur_rank.retrieved {
+                        let located = pool_note
+                            .as_deref()
+                            .map(|n| format!(" — {n}"))
+                            .unwrap_or_default();
                         failures.push(Failure {
                             kind: "infrastructure".to_string(),
                             detail: format!(
                                 "non-determinism [mode={}]: case {} rank list diverged between repeat 0 and repeat {i} \
-                                 — repeat 0 = {:?}, repeat {i} = {:?}",
+                                 — repeat 0 = {:?}, repeat {i} = {:?}{located}",
                                 mode.report_key(), ref_rank.case_id, ref_rank.retrieved, cur_rank.retrieved
                             ),
                         });
+                    } else if let Some(note) = pool_note.filter(|n| !n.starts_with(POOL_IDENTICAL))
+                    {
+                        hidden_pool_divergence.push(format!("{}: {note}", ref_rank.case_id));
+                    }
+                }
+                // Not a gate failure, since the output agreed. But a pool that
+                // differs between two ingests of one corpus is non-determinism
+                // the top-k comparison cannot see, so the log records it.
+                if !hidden_pool_divergence.is_empty() {
+                    eprintln!(
+                        "rerank pool diverged with identical top-k [mode={}] repeat 0 vs {i}: {} case(s)",
+                        mode.report_key(),
+                        hidden_pool_divergence.len()
+                    );
+                    for line in &hidden_pool_divergence {
+                        eprintln!("  {line}");
                     }
                 }
             }
@@ -457,6 +480,45 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
         ranks,
         per_case_by_layer,
     })
+}
+
+/// Prefix of [`pool_divergence_note`]'s verdict when two pools agree.
+const POOL_IDENTICAL: &str = "rerank pool identical";
+
+/// Say where two repeats' rerank pools part ways, or that they did not.
+///
+/// `None` when reranking was off in either repeat (empty pools). Otherwise
+/// either "identical", which puts a rank divergence on the reranker's scores,
+/// or the first position the pools differ at and which candidates each had
+/// that the other did not, which puts it on the pipeline that built the pool.
+fn pool_divergence_note(a: &CaseRankList, b: &CaseRankList) -> Option<String> {
+    if a.retrieved.is_empty() || b.retrieved.is_empty() {
+        return None;
+    }
+    if a.retrieved == b.retrieved {
+        return Some(format!(
+            "{POOL_IDENTICAL} ({} candidates), so the divergence is in the reranker's scores",
+            a.retrieved.len()
+        ));
+    }
+    let first = a
+        .retrieved
+        .iter()
+        .zip(&b.retrieved)
+        .position(|(x, y)| x != y)
+        .unwrap_or_else(|| a.retrieved.len().min(b.retrieved.len()));
+    let set_a: HashSet<&String> = a.retrieved.iter().collect();
+    let set_b: HashSet<&String> = b.retrieved.iter().collect();
+    let mut only_a: Vec<&String> = set_a.difference(&set_b).copied().collect();
+    let mut only_b: Vec<&String> = set_b.difference(&set_a).copied().collect();
+    only_a.sort();
+    only_b.sort();
+    Some(format!(
+        "rerank pool diverged at position {first} (repeat 0 has {:?}, the other {:?}); \
+         only in repeat 0: {only_a:?}, only in the other: {only_b:?}",
+        a.retrieved.get(first),
+        b.retrieved.get(first),
+    ))
 }
 
 /// Build per-case diagnostics from one mode's aligned outputs.
@@ -776,6 +838,12 @@ struct ModePassResult {
     /// diagnostic is off this is a copy of `ranks`. Diagnostic side channel
     /// only — never folded into gated aggregates or the determinism check.
     deep_ranks: Vec<CaseRankList>,
+    /// The candidate pool the cross-encoder rescored for each case, aligned
+    /// with `ranks`; empty lists when reranking is off. Fetched by a separate
+    /// read-only query after the timed one, so it perturbs neither latency nor
+    /// state. Diagnostic only: it locates a repeat divergence (a different pool
+    /// vs different scores over the same pool) and is never gated on.
+    rerank_pools: Vec<CaseRankList>,
     /// Per-case stage breakdown, aligned with `latencies_ms` by index. Empty
     /// unless `SHODH_STAGE_TIMING=1`. Diagnostic only — never gated on.
     stage_probes: Vec<crate::stage_probe::Probe>,
@@ -943,6 +1011,7 @@ fn run_one_pass(
         let mut by_category_cases: HashMap<SmokeCategory, Vec<Metrics>> = HashMap::new();
         let mut ranks: Vec<CaseRankList> = Vec::with_capacity(cases.len());
         let mut deep_ranks: Vec<CaseRankList> = Vec::with_capacity(cases.len());
+        let mut rerank_pools: Vec<CaseRankList> = Vec::with_capacity(cases.len());
 
         for case in cases {
             let mut query = Query {
@@ -1118,6 +1187,34 @@ fn run_one_pass(
                 retrieved: deep_retrieved,
             });
 
+            let pool: Vec<String> = match system.read().rerank_input_pool(&query) {
+                Ok(Some(pool)) => pool
+                    .iter()
+                    .map(|m| {
+                        uuid_to_corpus_id
+                            .get(&m.id.0)
+                            .cloned()
+                            .unwrap_or_else(|| format!("<unknown:{}>", m.id.0))
+                    })
+                    .collect(),
+                Ok(None) => Vec::new(),
+                Err(e) => {
+                    failures.push(Failure {
+                        kind: "case".to_string(),
+                        detail: format!(
+                            "rerank pool diagnostic failed for {} [mode={}]: {e:#}",
+                            case.id,
+                            mode.report_key()
+                        ),
+                    });
+                    Vec::new()
+                }
+            };
+            rerank_pools.push(CaseRankList {
+                case_id: case.id.clone(),
+                retrieved: pool,
+            });
+
             // Only emit the "missing relevance map" failure once across modes
             // — the relevance map is a function of fixtures + ingest, not
             // the mode, so duplicating it would clutter the failure list.
@@ -1147,6 +1244,7 @@ fn run_one_pass(
                 latencies_ms,
                 ranks,
                 deep_ranks,
+                rerank_pools,
                 stage_probes,
             },
         );
@@ -3674,6 +3772,41 @@ mod ce_guard_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pool(ids: &[&str]) -> CaseRankList {
+        CaseRankList {
+            case_id: "conv-42_q17".to_string(),
+            retrieved: ids.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// The note has to place a divergence: on the scores when the pools agree,
+    /// on the pool otherwise, and nowhere when reranking was off.
+    #[test]
+    fn pool_divergence_note_locates_the_divergence() {
+        assert_eq!(pool_divergence_note(&pool(&[]), &pool(&["a"])), None);
+
+        let same = pool_divergence_note(&pool(&["a", "b", "c"]), &pool(&["a", "b", "c"]))
+            .expect("reranking was on");
+        assert!(same.starts_with(POOL_IDENTICAL), "{same}");
+        assert!(same.contains("reranker's scores"), "{same}");
+
+        let reordered = pool_divergence_note(&pool(&["a", "b", "c"]), &pool(&["a", "c", "b"]))
+            .expect("reranking was on");
+        assert!(reordered.contains("position 1"), "{reordered}");
+        assert!(
+            reordered.contains("only in repeat 0: [], only in the other: []"),
+            "same members in another order: {reordered}"
+        );
+
+        let swapped = pool_divergence_note(&pool(&["a", "b", "x"]), &pool(&["a", "b", "y"]))
+            .expect("reranking was on");
+        assert!(swapped.contains("position 2"), "{swapped}");
+        assert!(
+            swapped.contains(r#"only in repeat 0: ["x"], only in the other: ["y"]"#),
+            "{swapped}"
+        );
+    }
 
     fn unique_storage_dir(label: &str) -> PathBuf {
         let id = Uuid::new_v4().simple().to_string();
