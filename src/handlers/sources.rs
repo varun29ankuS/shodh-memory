@@ -1369,6 +1369,9 @@ mod tests {
                 .begin_run(&run, &lease)
                 .expect("begin run");
             assert!(state.source_store.is_running(USER, &def.id).expect("lease"));
+            // Registration queued an audit write holding the shared DB; without
+            // the drain the reopen below races it for RocksDB's lock.
+            drain(&state).await;
             drop(state);
             def
         };
@@ -1399,6 +1402,50 @@ mod tests {
                 .is_some_and(|e| e.contains("process exited")),
             "the abort must say why"
         );
+    }
+
+    /// Audit events persist on the blocking pool, each with its own handle on
+    /// the shared DB. A drain that does not account for them leaves the DB open
+    /// after the manager is dropped, and the next open of the same path fails
+    /// on RocksDB's lock: shutdown-then-restart in production, and the lease
+    /// test above whenever the pool is slower than the reopen.
+    ///
+    /// The pool is pinned to one thread and that thread is held, so the audit
+    /// writes are certainly still queued when the drain returns, rather than
+    /// usually finished. Both spawn sites in `log_event` are covered: the burst
+    /// crosses `audit_rotation_check_interval`, which queues the rotation task.
+    #[test]
+    fn a_drained_manager_releases_the_shared_db_despite_queued_audit_writes() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let home = TempDir::new().expect("temp home");
+            let state = build_manager(home.path());
+            let shared_db = Arc::downgrade(&state.shared_db);
+
+            // Occupy the only blocking thread. Released by time rather than by
+            // a signal: a drain that waits for the queued writes must also wait
+            // for this, and it cannot be told to stop waiting.
+            tokio::task::spawn_blocking(|| {
+                std::thread::sleep(std::time::Duration::from_millis(300))
+            });
+            let events = state.server_config.audit_rotation_check_interval + 1;
+            for i in 0..events {
+                state.log_event(USER, "PROBE", &format!("probe-{i}"), "queued audit write");
+            }
+
+            drain(&state).await;
+            drop(state);
+
+            assert!(
+                shared_db.upgrade().is_none(),
+                "a queued audit task still holds the shared DB after drain and drop, so \
+                 reopening this path fails on RocksDB's lock"
+            );
+        });
     }
 
     /// One run at a time. The lock is held by the run, not by the request, so a
