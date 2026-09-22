@@ -37,7 +37,10 @@ while main sat 3.5pp of recall@10 above the baseline, a PR could lose up to
 that much and still pass.
 
 1. `gh workflow run recall.yml --ref main` (defaults: `locomo-gate`, `full`,
-   5 repeats).
+   5 repeats, `ce_rerank=1`). The gate measures the pipeline the server
+   ships, which reranks with the cross-encoder by default, so the baseline is
+   recorded with it on. `-f ce_rerank=0` measures the library default for
+   comparison and must not be committed as the baseline.
 2. `gh run download <run-id> -n recall-eval-report`.
 3. Copy `current.json` to `locomo-gate-baseline.json` and `per-case.json` to
    `locomo-gate-baseline.per-case.json`. Check that `git_sha` names the main

@@ -50,6 +50,14 @@ on:
         default: 'locomo-gate'
         type: choice
         options: ['locomo-gate', 'locomo']
+      ce_rerank:
+        description: >-
+          Cross-encoder reranking. `1` is what the server ships and what the
+          baseline is recorded under; `0` measures the library default.
+        required: false
+        default: '1'
+        type: choice
+        options: ['1', '0']
 
 permissions:
   contents: read
@@ -69,6 +77,10 @@ env:
   # PR runs are always the gated 100-case suite; only a manual dispatch can
   # reach the 1,531-case held-out set.
   SUITE: ${{ github.event.inputs.suite || 'locomo-gate' }}
+  # The gate measures the pipeline the server ships, and the server reranks
+  # with the cross-encoder by default (#562). A dispatch can set 0 to measure
+  # the library default for comparison; PR runs always gate the shipped one.
+  CE_RERANK: ${{ github.event.inputs.ce_rerank || '1' }}
 
 jobs:
   smoke:
@@ -138,6 +150,39 @@ jobs:
           curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o models/minilm-l6/tokenizer.json "$BASE/tokenizer.json"
           ls -la models/minilm-l6
 
+      # The cross-encoder the server reranks with, at the revision it was
+      # measured at and with the checksums src/embeddings/downloader.rs pins.
+      # Supplied here rather than downloaded by the binary so an HF hiccup
+      # cannot turn the gate red as `infrastructure`; if it is absent anyway,
+      # guard_cross_encoder() refuses to measure rather than report the
+      # unreranked pipeline under a reranked label.
+      - name: Cache cross-encoder assets
+        if: env.CE_RERANK == '1'
+        id: ce-cache
+        uses: actions/cache@v6
+        with:
+          path: models/cross-encoder-ms-marco-minilm-l6
+          key: ce-ms-marco-minilm-l6-233902d2-int8-v1
+
+      - name: Fetch cross-encoder assets
+        if: env.CE_RERANK == '1' && steps.ce-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          CE=models/cross-encoder-ms-marco-minilm-l6
+          mkdir -p "$CE"
+          BASE="https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2/resolve/233902d25c440f23af6f7d6e94d2946bac0bee0a"
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o "$CE/model_quint8_avx2.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o "$CE/tokenizer.json" "$BASE/tokenizer.json"
+          ls -la "$CE"
+
+      - name: Verify cross-encoder assets (hard gate)
+        if: env.CE_RERANK == '1'
+        run: |
+          CE=models/cross-encoder-ms-marco-minilm-l6
+          echo "c80a8b34256ea453093d612e3ac48d3d965a0c0a48c7906709af8b8e28461bf9  $CE/model_quint8_avx2.onnx" > /tmp/ce.sha
+          echo "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66  $CE/tokenizer.json" >> /tmp/ce.sha
+          sha256sum -c /tmp/ce.sha || { echo "::error::cross-encoder assets do not match the pinned sha256"; exit 1; }
+
       - name: Verify model assets (hard gate — refuse to run on missing/degraded assets)
         run: |
           SHODH_MODEL_PATH="${{ github.workspace }}/models/minilm-l6"
@@ -168,6 +213,8 @@ jobs:
         env:
           SHODH_MODEL_PATH: ${{ github.workspace }}/models/minilm-l6
           SHODH_GLINER_MODEL_PATH: ${{ github.workspace }}/models/gliner-bi-edge
+          SHODH_CE_RERANK: ${{ env.CE_RERANK }}
+          SHODH_CE_MODEL_PATH: ${{ github.workspace }}/models/cross-encoder-ms-marco-minilm-l6
         run: |
           set +e
           # RH-12 (#272): --repeats 5 → per-case latency is the median
