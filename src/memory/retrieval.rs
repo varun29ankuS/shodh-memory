@@ -983,10 +983,18 @@ impl RetrievalEngine {
         }
 
         // Convert to vec and sort by similarity descending (highest first).
-        // Tie-break by MemoryId for deterministic rank order across runs/CPUs.
-        // (created_at is unavailable here — we only have ids + scores.)
+        // This order is then TRUNCATED, so it decides membership, not just
+        // rank. Equal similarities are ordered by content, a key the corpus
+        // determines; the MemoryId is a per-ingest uuid and only separates
+        // byte-identical texts. Content is fetched only inside a tied run.
         let mut memory_ids: Vec<(MemoryId, f32)> = best_scores.into_iter().collect();
         memory_ids.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        crate::memory::order_ties_by_content(
+            &mut memory_ids,
+            |a, b| a.1.to_bits() == b.1.to_bits(),
+            |x| x.0.clone(),
+            |id| self.storage.get(id).ok().map(|m| m.experience.content),
+        );
         memory_ids.truncate(limit);
 
         Ok(memory_ids)

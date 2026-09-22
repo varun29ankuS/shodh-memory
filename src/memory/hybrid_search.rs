@@ -755,7 +755,15 @@ impl RRFusion {
     ///
     /// Each input is a Vec of (MemoryId, score) sorted by score descending.
     /// Returns fused (MemoryId, rrf_score) sorted by rrf_score descending.
-    pub fn fuse(&self, ranked_lists: Vec<Vec<(MemoryId, f32)>>) -> Vec<(MemoryId, f32)> {
+    ///
+    /// `get_content` resolves a memory's text and is consulted only inside a
+    /// run of equal RRF scores; see the tie-break note below for why the
+    /// order of such a run has to come from the corpus.
+    pub fn fuse(
+        &self,
+        ranked_lists: Vec<Vec<(MemoryId, f32)>>,
+        get_content: impl Fn(&MemoryId) -> Option<String>,
+    ) -> Vec<(MemoryId, f32)> {
         let mut scores: HashMap<MemoryId, f32> = HashMap::new();
         let mut original_scores: HashMap<MemoryId, Vec<Option<f32>>> = HashMap::new();
 
@@ -779,17 +787,27 @@ impl RRFusion {
             }
         }
 
-        // Sort by RRF score descending, with a deterministic MemoryId tie-break.
-        // RRF scores collide constantly by construction (any two docs at the
-        // same rank in their respective lists contribute identical amounts), and
-        // `scores` is a HashMap whose iteration order is randomized per process.
-        // Without the tie-break, equal-scored candidates are ordered arbitrarily
-        // and differently across runs, which propagates into the downstream
-        // rank-based fusion (mod.rs Layer 4) and can flip candidates in/out of
-        // the truncated top-k between identical queries. Every other sort in the
-        // pipeline already tie-breaks on MemoryId; this was the lone exception.
+        // Sort by RRF score descending. RRF scores collide by construction:
+        // any two candidates at the same rank in their respective lists
+        // contribute identical amounts, so equal scores are routine, and
+        // `scores` is a HashMap whose iteration order is random per process.
+        //
+        // Equal scores used to be ordered by MemoryId. That is total and
+        // repeatable within one store, but a MemoryId is a v4 uuid drawn at
+        // ingest, so two ingests of the same corpus put the same tied pair in
+        // either order (the L1 gate saw the hybrid leg with identical members
+        // in a different order from position 43, conv-42_q17). Content is a
+        // pure function of the corpus, so a run of equal scores is ordered by
+        // it; the id then only separates byte-identical texts, where either
+        // order is equivalent. The lookup runs only inside runs of two or more.
         let mut results: Vec<_> = scores.into_iter().collect();
         results.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        crate::memory::order_ties_by_content(
+            &mut results,
+            |a, b| a.1.to_bits() == b.1.to_bits(),
+            |x| x.0.clone(),
+            &get_content,
+        );
 
         results
     }
@@ -1007,7 +1025,7 @@ impl HybridSearchEngine {
         &self,
         query: &str,
         vector_results: Vec<(MemoryId, f32)>,
-        _get_content: F,
+        get_content: F,
         term_weights: Option<&HashMap<String, f32>>,
         phrase_boosts: Option<&[(String, f32)]>,
         keyword_discriminativeness: Option<f32>,
@@ -1074,7 +1092,10 @@ impl HybridSearchEngine {
         // 2. RRF Fusion with dynamic weights
         let rrf = RRFusion::new(self.config.rrf_k, vec![bm25_weight, vector_weight]);
 
-        let fused = rrf.fuse(vec![bm25_results.clone(), vector_results.clone()]);
+        let fused = rrf.fuse(
+            vec![bm25_results.clone(), vector_results.clone()],
+            &get_content,
+        );
 
         // Build lookup maps for component scores
         let bm25_map: HashMap<MemoryId, (f32, usize)> = bm25_results
@@ -1290,7 +1311,7 @@ mod tests {
         // List 2: id2 > id1 > id3
         let list2 = vec![(id2.clone(), 0.95), (id1.clone(), 0.6), (id3.clone(), 0.4)];
 
-        let fused = rrf.fuse(vec![list1, list2]);
+        let fused = rrf.fuse(vec![list1, list2], |_| None);
 
         // id1 and id2 have symmetric ranks (1,2) and (2,1), so they should have equal RRF scores
         // The ordering between them is implementation-defined, but both should be above id3
@@ -1331,7 +1352,7 @@ mod tests {
         let list1 = vec![(id1.clone(), 0.9)];
         let list2 = vec![(id2.clone(), 0.8)];
 
-        let fused = rrf.fuse(vec![list1, list2]);
+        let fused = rrf.fuse(vec![list1, list2], |_| None);
 
         assert_eq!(fused.len(), 2);
         // Both should have same RRF score (rank 1 in their respective list)
@@ -1351,7 +1372,11 @@ mod tests {
         assert!(lo < hi, "fixture ordering precondition");
 
         // Two disjoint single-item lists → identical RRF score (rank 0 in each).
-        let fused = rrf.fuse(vec![vec![(hi.clone(), 0.9)], vec![(lo.clone(), 0.1)]]);
+        // No content resolvable: the id fallback decides.
+        let fused = rrf.fuse(
+            vec![vec![(hi.clone(), 0.9)], vec![(lo.clone(), 0.1)]],
+            |_| None,
+        );
 
         assert_eq!(fused.len(), 2);
         assert!(
@@ -1363,6 +1388,59 @@ mod tests {
             "tie must resolve to the lower MemoryId first"
         );
         assert_eq!(fused[1].0, hi);
+    }
+
+    /// Two ingests of one corpus draw different ids for the same texts. A
+    /// tie in RRF has to come out in the same CONTENT order both times, or
+    /// the fusion downstream ranks the same corpus differently per ingest.
+    #[test]
+    fn rrf_ties_come_out_in_the_same_content_order_whatever_the_ids() {
+        let rrf = RRFusion::new(60.0, vec![0.5, 0.5]);
+        // Ranks are identical across the two "ingests"; only the ids differ,
+        // and they are chosen so the id order is REVERSED between them.
+        let ingests = [
+            (
+                MemoryId(uuid::Uuid::from_bytes([0x00; 16])),
+                MemoryId(uuid::Uuid::from_bytes([0xff; 16])),
+            ),
+            (
+                MemoryId(uuid::Uuid::from_bytes([0xff; 16])),
+                MemoryId(uuid::Uuid::from_bytes([0x00; 16])),
+            ),
+        ];
+        let orders: Vec<Vec<&str>> = ingests
+            .iter()
+            .map(|(zebra, apple)| {
+                let content = |id: &MemoryId| -> Option<String> {
+                    if id == zebra {
+                        Some("zebra".to_string())
+                    } else if id == apple {
+                        Some("apple".to_string())
+                    } else {
+                        None
+                    }
+                };
+                // Disjoint single-item lists: an exact RRF tie.
+                let fused = rrf.fuse(
+                    vec![vec![(zebra.clone(), 0.9)], vec![(apple.clone(), 0.1)]],
+                    content,
+                );
+                assert!(
+                    (fused[0].1 - fused[1].1).abs() < f32::EPSILON,
+                    "scores must tie for this to exercise the tie-break"
+                );
+                fused
+                    .iter()
+                    .map(|(id, _)| if id == zebra { "zebra" } else { "apple" })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(orders[0], orders[1], "the id draw decided the order");
+        assert_eq!(
+            orders[0],
+            vec!["apple", "zebra"],
+            "ties are ordered by content"
+        );
     }
 
     #[test]
@@ -1493,11 +1571,12 @@ mod tests {
         let vector_list = vec![(id2.clone(), 0.95), (id1.clone(), 0.6)];
 
         // With BM25 weighted higher, id1 should win
-        let fused_bm25 = rrf_bm25_heavy.fuse(vec![bm25_list.clone(), vector_list.clone()]);
+        let fused_bm25 =
+            rrf_bm25_heavy.fuse(vec![bm25_list.clone(), vector_list.clone()], |_| None);
         assert_eq!(fused_bm25[0].0, id1, "BM25-heavy should favor BM25 winner");
 
         // With vector weighted higher, id2 should win
-        let fused_vector = rrf_vector_heavy.fuse(vec![bm25_list, vector_list]);
+        let fused_vector = rrf_vector_heavy.fuse(vec![bm25_list, vector_list], |_| None);
         assert_eq!(
             fused_vector[0].0, id2,
             "Vector-heavy should favor vector winner"
@@ -1521,8 +1600,8 @@ mod tests {
         let list1 = vec![(id1.clone(), 0.9), (id2.clone(), 0.7), (id3.clone(), 0.5)];
         let list2 = vec![(id3.clone(), 0.9), (id2.clone(), 0.7), (id1.clone(), 0.5)];
 
-        let fused_low_k = rrf_low_k.fuse(vec![list1.clone(), list2.clone()]);
-        let fused_high_k = rrf_high_k.fuse(vec![list1, list2]);
+        let fused_low_k = rrf_low_k.fuse(vec![list1.clone(), list2.clone()], |_| None);
+        let fused_high_k = rrf_high_k.fuse(vec![list1, list2], |_| None);
 
         // With low k, rank differences matter more
         // With high k, id2 (consistent #2) should do relatively better

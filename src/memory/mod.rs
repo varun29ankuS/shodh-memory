@@ -629,7 +629,7 @@ fn tokenize_words(text: &str) -> HashSet<&str> {
 /// `items` must already be sorted, with `tied` reporting whether two elements
 /// compared equal under that sort. Content is fetched ONLY inside runs of two
 /// or more, so a tie-free list costs one linear scan and no lookups.
-fn order_ties_by_content<T>(
+pub(crate) fn order_ties_by_content<T>(
     items: &mut [T],
     tied: impl Fn(&T, &T) -> bool,
     id_of: impl Fn(&T) -> MemoryId,
@@ -2164,6 +2164,28 @@ impl MemorySystem {
         let mut deep_query = query.clone();
         deep_query.max_results = ce_depth().max(query.max_results.max(1));
         self.recall_fused(&deep_query).map(Some)
+    }
+
+    /// A memory's text from whichever tier holds it, for ordering ties by a
+    /// key the corpus determines. Same lookup order as the recall path's
+    /// `get_content`.
+    fn content_of(&self, id: &MemoryId) -> Option<String> {
+        self.working_memory
+            .read()
+            .get(id)
+            .map(|m| m.experience.content.clone())
+            .or_else(|| {
+                self.session_memory
+                    .read()
+                    .get(id)
+                    .map(|m| m.experience.content.clone())
+            })
+            .or_else(|| {
+                self.long_term_memory
+                    .get(id)
+                    .ok()
+                    .map(|m| m.experience.content.clone())
+            })
     }
 
     fn recall_fused(&self, query: &Query) -> Result<Vec<SharedMemory>> {
@@ -4093,6 +4115,14 @@ impl MemorySystem {
             }
             let mut merged: Vec<(MemoryId, f32)> = best.into_iter().collect();
             merged.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            // The id is a per-ingest uuid; equal similarities are ordered by
+            // content so two ingests of one corpus agree (see order_ties_by_content).
+            order_ties_by_content(
+                &mut merged,
+                |a, b| a.1.to_bits() == b.1.to_bits(),
+                |x| x.0.clone(),
+                |id| self.content_of(id),
+            );
             merged
         } else {
             vr_pos
