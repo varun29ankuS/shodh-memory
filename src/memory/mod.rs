@@ -998,33 +998,40 @@ impl MemorySystem {
         )
         .context("Failed to initialize hybrid search engine")?;
 
-        // Backfill BM25 index if empty but memories exist
+        // Backfill BM25 when it is empty or a previous backfill never finished.
+        // Runs even for an empty store, so a pending marker left beside an
+        // index whose memories have all since been deleted is still cleared.
         if hybrid_search_engine.needs_backfill() {
             let existing_memories = storage.get_all()?;
             let memory_count = existing_memories.len();
 
             if memory_count > 0 {
                 tracing::info!(
-                    "BM25 index empty, backfilling {} existing memories...",
+                    "BM25 index empty or incomplete, backfilling {} existing memories...",
                     memory_count
                 );
+            }
 
-                let memories_iter = existing_memories.into_iter().map(|mem| {
-                    (
-                        mem.id,
-                        mem.experience.content,
-                        mem.experience.tags,
-                        mem.experience.entities,
-                    )
-                });
+            let memories_iter = existing_memories.into_iter().map(|mem| {
+                (
+                    mem.id,
+                    mem.experience.content,
+                    mem.experience.tags,
+                    mem.experience.entities,
+                )
+            });
 
-                match hybrid_search_engine.backfill(memories_iter) {
-                    Ok(indexed) => {
+            match hybrid_search_engine.backfill(memories_iter) {
+                Ok(indexed) => {
+                    if indexed > 0 {
                         tracing::info!("BM25 backfill complete: {} memories indexed", indexed);
                     }
-                    Err(e) => {
-                        tracing::warn!("BM25 backfill failed (non-fatal): {}", e);
-                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "BM25 backfill failed (non-fatal; retried on next start): {}",
+                        e
+                    );
                 }
             }
         }

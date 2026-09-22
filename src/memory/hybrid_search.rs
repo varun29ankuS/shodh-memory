@@ -15,7 +15,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -23,7 +23,9 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::{Field, Schema, Value, STORED, STRING, TEXT};
+use tantivy::schema::{
+    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING, TEXT,
+};
 use tantivy::{Index, IndexReader, IndexWriter, TantivyDocument};
 use tracing::{debug, info};
 
@@ -163,26 +165,83 @@ pub struct BM25Index {
     /// once the writer is dead. `MemorySystem::index_coverage` is what catches
     /// a loss that never errored at all.
     index_failures: std::sync::atomic::AtomicU64,
+
+    /// Exists while a backfill is in flight. See [`BM25Index::backfill_pending`].
+    backfill_marker: PathBuf,
+}
+
+/// Tantivy analyzer that lowercases and applies the English (Snowball) stemmer.
+///
+/// Registered by `TokenizerManager::default()` under tantivy's `stemmer`
+/// feature, which is in tantivy's default feature set; this crate depends on
+/// `tantivy = "0.26"` with defaults enabled.
+const STEMMED_TOKENIZER: &str = "en_stem";
+
+/// The schema this binary indexes and queries with.
+///
+/// `content` and `tags` are stemmed; `entities` deliberately is not.
+///
+/// `TEXT` binds tantivy's `default` analyzer (`SimpleTokenizer +
+/// RemoveLongFilter + LowerCaser`), which cannot match a query to an inflected
+/// form of the same word. In the recall corpus the query word "letters" occurs
+/// in no document at all, while seven share its stem, so for `conv-42_q62`
+/// ("How many letters has Joanna recieved?") an offline BM25 over the 5,882
+/// documents ranks the two gold documents 562nd and 271st unstemmed and 9th
+/// and 1st stemmed. Every other
+/// stemmed surface in the codebase (the entity index in `graph_memory`, the
+/// query parser, compression, temporal facts) already stems; BM25 was the
+/// holdout.
+///
+/// `entities` holds proper nouns, and stemming them would re-create the
+/// collision `GraphMemory` keeps proper nouns out of its stemmed index to avoid
+/// ("Paris" → "pari" merging with "Parison"). Tantivy analyzes a query per field
+/// with that field's own analyzer, so a term stems against `content` and stays
+/// literal against `entities`.
+fn build_schema() -> Schema {
+    let stemmed = TextOptions::default().set_indexing_options(
+        TextFieldIndexing::default()
+            .set_tokenizer(STEMMED_TOKENIZER)
+            // Phrase queries (`search_with_term_and_phrase_weights`) need positions.
+            .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+    );
+
+    let mut schema_builder = Schema::builder();
+
+    // Memory ID (stored, not tokenized)
+    schema_builder.add_text_field("id", STRING | STORED);
+
+    // Main content (tokenized + stemmed for BM25)
+    schema_builder.add_text_field("content", stemmed.clone() | STORED);
+
+    // Tags (tokenized + stemmed: lowercase common nouns, low proper-noun risk)
+    schema_builder.add_text_field("tags", stemmed);
+
+    // Entities (tokenized, not stemmed; see above)
+    schema_builder.add_text_field("entities", TEXT);
+
+    schema_builder.build()
 }
 
 impl BM25Index {
-    /// Create or open a BM25 index at the given path
+    /// Create or open a BM25 index at the given path.
+    ///
+    /// # Schema migration
+    ///
+    /// An on-disk index carries its own schema, including each field's
+    /// tokenizer name, in `meta.json`, and `Index::open` takes no schema: it
+    /// rebuilds everything from that file and ignores the one built here. The
+    /// writer and the `QueryParser` then resolve analyzers from the opened
+    /// index, so an index created before an analyzer change would keep indexing
+    /// and querying with the old one indefinitely, with no error, answering
+    /// differently from a fresh install of the same binary.
+    ///
+    /// So the schema is compared on open, and a mismatch rebuilds: the stale
+    /// directory is deleted and recreated empty, which makes
+    /// [`HybridSearchEngine::needs_backfill`] true and lets the startup
+    /// backfill repopulate it from RocksDB, the path a fresh install takes. The
+    /// index is derived data; RocksDB holds every document it contained.
     pub fn new(path: &Path) -> Result<Self> {
-        let mut schema_builder = Schema::builder();
-
-        // Memory ID (stored, not tokenized)
-        schema_builder.add_text_field("id", STRING | STORED);
-
-        // Main content (tokenized for BM25)
-        schema_builder.add_text_field("content", TEXT | STORED);
-
-        // Tags (tokenized)
-        schema_builder.add_text_field("tags", TEXT);
-
-        // Entities (tokenized)
-        schema_builder.add_text_field("entities", TEXT);
-
-        let schema = schema_builder.build();
+        let schema = build_schema();
 
         // Create or open index
         std::fs::create_dir_all(path)?;
@@ -190,7 +249,27 @@ impl BM25Index {
             .context("Failed to open tantivy directory")?;
 
         let index = if Index::exists(&dir)? {
-            Index::open(dir).context("Failed to open existing BM25 index")?
+            let existing = Index::open(dir).context("Failed to open existing BM25 index")?;
+            if existing.schema() == schema {
+                existing
+            } else {
+                // Every handle onto the directory must be gone before removing
+                // it: on Windows the mmapped segment files stay open until this
+                // value is dropped, and `remove_dir_all` fails with a sharing
+                // violation.
+                drop(existing);
+                tracing::warn!(
+                    "BM25 index at {:?} was built with a different schema (analyzer or \
+                     field change); discarding it and rebuilding from long-term storage. \
+                     Lexical search is incomplete until the backfill finishes.",
+                    path
+                );
+                std::fs::remove_dir_all(path)
+                    .with_context(|| format!("Failed to remove stale BM25 index at {path:?}"))?;
+                std::fs::create_dir_all(path)?;
+                Index::create_in_dir(path, schema)
+                    .context("Failed to recreate BM25 index after schema change")?
+            }
         } else {
             Index::create_in_dir(path, schema).context("Failed to create BM25 index")?
         };
@@ -235,7 +314,37 @@ impl BM25Index {
             entities_field,
             commit_failures: std::sync::atomic::AtomicU64::new(0),
             index_failures: std::sync::atomic::AtomicU64::new(0),
+            backfill_marker: path.with_extension("backfill-pending"),
         })
+    }
+
+    /// Whether a backfill started and did not finish.
+    ///
+    /// `is_empty` alone cannot say that: a backfill interrupted after its first
+    /// batch commit leaves an index that is non-empty and incomplete, and from
+    /// then on nothing refills it, so the memories past the interruption are
+    /// stored and lexically unreachable for good. The schema migration in
+    /// [`BM25Index::new`] sends every existing index through a backfill once,
+    /// which turns that from a rare crash window into one every upgrade crosses.
+    /// The marker is a sibling of the index directory, not a file inside it, so
+    /// tantivy's directory management never sees it.
+    pub fn backfill_pending(&self) -> bool {
+        self.backfill_marker.exists()
+    }
+
+    fn begin_backfill(&self) -> Result<()> {
+        std::fs::write(&self.backfill_marker, b"")
+            .with_context(|| format!("Failed to write {:?}", self.backfill_marker))
+    }
+
+    fn finish_backfill(&self) -> Result<()> {
+        match std::fs::remove_file(&self.backfill_marker) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => {
+                Err(e).with_context(|| format!("Failed to remove {:?}", self.backfill_marker))
+            }
+        }
     }
 
     /// Add or update a document in the index
@@ -946,15 +1055,20 @@ impl HybridSearchEngine {
         self.bm25_index.len()
     }
 
-    /// Check if BM25 index is empty (needs backfill)
+    /// Whether the BM25 index must be (re)filled from long-term storage: it is
+    /// empty, or a previous backfill never finished.
     pub fn needs_backfill(&self) -> bool {
-        self.bm25_index.is_empty()
+        self.bm25_index.is_empty() || self.bm25_index.backfill_pending()
     }
 
     /// Backfill BM25 index from existing memories
     ///
-    /// Call this on startup if the BM25 index is empty but memories exist.
-    /// This indexes all memories into BM25 for hybrid search.
+    /// Call this on startup when [`Self::needs_backfill`] is true. It indexes
+    /// every memory given, and is safe to repeat: `upsert` replaces by id, so
+    /// re-running after an interruption converges instead of duplicating.
+    /// The pending marker is set before the first write and cleared only after
+    /// the final commit and reload, so an interrupted run is retried on the
+    /// next start.
     ///
     /// # Arguments
     /// * `memories` - Iterator of (memory_id, content, tags, entities)
@@ -965,6 +1079,8 @@ impl HybridSearchEngine {
     where
         I: Iterator<Item = (MemoryId, String, Vec<String>, Vec<String>)>,
     {
+        self.bm25_index.begin_backfill()?;
+
         let mut count = 0;
         let mut batch_count = 0;
         const BATCH_SIZE: usize = 100;
@@ -991,6 +1107,7 @@ impl HybridSearchEngine {
         // Reload reader to see new documents
         self.bm25_index.reload()?;
 
+        self.bm25_index.finish_backfill()?;
         info!("BM25 backfill complete: indexed {} memories", count);
         Ok(count)
     }
@@ -999,6 +1116,44 @@ impl HybridSearchEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A backfill that dies after its first batch commit leaves an index that
+    /// is non-empty and incomplete. `is_empty` then says nothing is owed, so the
+    /// rest of the corpus would never be indexed. The pending marker has to
+    /// survive the process and say otherwise until a backfill finishes.
+    #[test]
+    fn an_interrupted_backfill_stays_pending_across_a_reopen() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let path = home.path().join("bm25_index");
+
+        {
+            let index = BM25Index::new(&path).expect("create");
+            index.begin_backfill().expect("begin");
+            index
+                .upsert(&MemoryId(uuid::Uuid::new_v4()), "first batch", &[], &[])
+                .expect("upsert");
+            index.commit().expect("commit");
+            // The process dies here: no final commit, no finish_backfill.
+        }
+
+        let reopened = BM25Index::new(&path).expect("reopen");
+        reopened.reload().expect("reload");
+        assert!(
+            !reopened.is_empty(),
+            "precondition: the first batch reached disk, so emptiness alone cannot \
+             see the interruption"
+        );
+        assert!(
+            reopened.backfill_pending(),
+            "an interrupted backfill must still read as pending after a restart"
+        );
+
+        reopened.finish_backfill().expect("finish");
+        assert!(!reopened.backfill_pending());
+        reopened
+            .finish_backfill()
+            .expect("finishing twice is not an error");
+    }
 
     #[test]
     fn test_rrf_fusion_basic() {
