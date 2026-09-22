@@ -120,11 +120,14 @@ fn companion_gate_enabled() -> bool {
 /// alongside: spreading activation was calling `batch_strengthen_synapses`
 /// unconditionally, bypassing the gate entirely).
 /// Whether to rerank the head of the fused ranking with the cross-encoder.
-/// Default OFF: this is an unmeasured lever on the LIVE pipeline until the
-/// paired arms land. The pilot's numbers came from pools exported in an older
-/// pipeline era (its baseline was 0.5466 against today's 0.5312), so they are
-/// a prior, not a promise.
-fn ce_rerank_enabled() -> bool {
+///
+/// The library default is OFF, and stays off, so a caller that never sets the
+/// variable (the recall harness, the ablation matrix, tests, the Python
+/// bindings) keeps the pipeline every existing measurement was taken on. The
+/// SERVER turns it on: `server::run` sets `SHODH_CE_RERANK=1` unless the
+/// operator already set it, because the paired arms measured +16.5pp p@1 and
+/// +8.7pp recall@10 at n=1531 (#536) for ~190 ms/query at depth 30 on CPU.
+pub fn ce_rerank_enabled() -> bool {
     std::env::var("SHODH_CE_RERANK")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
@@ -153,7 +156,14 @@ fn cross_encoder() -> Option<&'static crate::embeddings::cross_encoder::CrossEnc
         match CrossEncoder::load(&CrossEncoder::model_dir()) {
             Ok(ce) => Some(ce),
             Err(e) => {
-                tracing::info!("cross-encoder unavailable, reranking disabled: {e}");
+                // Only reached with reranking enabled, so this is a requested
+                // stage that is not running: recall quality drops to the
+                // unreranked pipeline (-16.5pp p@1 measured). Said once, loudly.
+                tracing::warn!(
+                    "cross-encoder reranking is enabled but the model failed to load ({e}); \
+                     recall runs WITHOUT reranking. Run `shodh init` online, set \
+                     SHODH_CE_MODEL_PATH, or set SHODH_CE_RERANK=0 to silence this."
+                );
                 None
             }
         }
@@ -2081,7 +2091,7 @@ impl MemorySystem {
 
     /// Recall, with optional cross-encoder reranking of the head.
     ///
-    /// `SHODH_CE_RERANK=1` (default off) fetches `SHODH_CE_DEPTH` candidates
+    /// `SHODH_CE_RERANK=1` (off in the library, on in the server) fetches `SHODH_CE_DEPTH` candidates
     /// instead of `k`, rescores that head with a query-candidate interaction
     /// model, and cuts to `k`. Everything below the depth is carried through
     /// untouched — accumulate, never truncate — so the rerank can only reorder

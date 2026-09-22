@@ -49,6 +49,7 @@ Every other memory system delegates intelligence to LLM API calls — that's why
 Storing a memory makes **zero LLM calls**. Recalling makes **zero LLM calls**. Entity extraction, relation typing, knowledge-graph construction, causal tracing, ranking, decay, consolidation — all of it runs locally as algorithms, not API round-trips:
 
 - **Local embeddings** — MiniLM (22MB, INT8) via ONNX Runtime, on-device semantic search
+- **Local reranking** — a cross-encoder (ms-marco-MiniLM-L6, 23 MB int8, ONNX) reads the query and each of the top 30 candidates together, where the embedder sees them apart. On by default in the server: +16.5pp precision@1 and +8.7pp recall@10 on LoCoMo (1,531 held-out questions). It is a 22M-parameter ranking model, not an LLM, and it runs on CPU
 - **Local NER** — GLiNER bi-edge-v2 span typer (ONNX, schema-driven: 141 fine / 18 coarse entity types), auto-downloaded on first run from the pinned release, with a rule-based fallback
 - **Typed relation extraction without an LLM** — directed lexical cues + exemplar-matched semantic typing build a typed knowledge graph (`LocatedIn`, `WorksAt`, `Causes`…) from plain text
 - **Causal lineage** — "what was the root cause of X?" is answered by walking typed causal edges backward through the graph, not by asking a model
@@ -180,7 +181,8 @@ This is based on [Cowan's working memory model](https://doi.org/10.1177/09637214
 |-----------|---------|
 | Store memory (API response) | <200ms |
 | Store memory (core) | 55-60ms |
-| Semantic search | 34-58ms |
+| Semantic search, reranking off (`SHODH_CE_RERANK=0`) | 34-58ms |
+| Cross-encoder rerank of the top 30 (server default) | ~190ms added (int8, 2 CPU threads, measured on a debug build) |
 | Tag search | ~1ms |
 | Entity lookup | 763ns |
 | Graph traversal (3-hop) | 30µs |
@@ -363,6 +365,10 @@ SHODH_MEMORY_PATH=/var/lib/shodh  # Data directory
 SHODH_REQUEST_TIMEOUT=60          # Request timeout in seconds
 SHODH_MAX_CONCURRENT=200          # Max concurrent requests
 SHODH_ROCKSDB_BLOCK_CACHE_MB=256  # Shared RocksDB block cache (MiB)
+SHODH_CE_RERANK=1                 # Cross-encoder reranking (server default: on; 0 disables, e.g. for latency-bound robots)
+SHODH_CE_DEPTH=30                 # Candidates the cross-encoder rescores (latency scales with this)
+# SHODH_CE_MODEL_PATH=/models/ce  # Reranker assets; default: fetched on first start into the cache dir
+# SHODH_OFFLINE=true              # Never download models; a missing reranker means unreranked recall
 SHODH_CORS_ORIGINS=https://app.example.com
 ```
 </details>

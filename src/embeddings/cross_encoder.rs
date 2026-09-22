@@ -66,11 +66,70 @@ pub struct CrossEncoder {
     has_token_type_ids: bool,
 }
 
+/// The model file `load` will open in `dir`, following the same int8/fp32 choice.
+fn model_file(dir: &Path, prefer_int8: bool) -> PathBuf {
+    let int8 = dir.join("model_quint8_avx2.onnx");
+    if prefer_int8 && int8.exists() {
+        int8
+    } else {
+        dir.join("model.onnx")
+    }
+}
+
+/// Make the reranker's assets present, downloading them on first run.
+///
+/// Returns the directory they are in. Skips the network when a resolution
+/// candidate already holds them, and refuses to fetch under `SHODH_OFFLINE`.
+/// Called by the server at startup, before it accepts requests, so the first
+/// recall does not stall on a download.
+pub fn ensure_assets() -> Result<PathBuf> {
+    let prefer_int8 = !fp32_requested();
+    let dir = CrossEncoder::model_dir();
+    if model_file(&dir, prefer_int8).exists() && dir.join("tokenizer.json").exists() {
+        return Ok(dir);
+    }
+    let offline = std::env::var("SHODH_OFFLINE")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    if offline {
+        anyhow::bail!(
+            "cross-encoder assets not found at {} and SHODH_OFFLINE is set",
+            dir.display()
+        );
+    }
+    let progress = Some(crate::embeddings::downloader::make_stderr_progress(
+        "Cross-encoder reranker (23 MB)".to_string(),
+    ));
+    crate::embeddings::downloader::download_cross_encoder_models(progress, !prefer_int8)
+}
+
 impl CrossEncoder {
+    /// Where the reranker's assets are read from.
+    ///
+    /// `SHODH_CE_MODEL_PATH` if set, else the first conventional location that
+    /// holds a model file: the package dir, `./models` and `../models` (a source
+    /// checkout), the first-run download cache, and the platform data dir. Falls
+    /// back to `./models/cross-encoder-ms-marco-minilm-l6` when none does.
     pub fn model_dir() -> PathBuf {
-        std::env::var("SHODH_CE_MODEL_PATH")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("./models/cross-encoder-ms-marco-minilm-l6"))
+        const NAME: &str = "cross-encoder-ms-marco-minilm-l6";
+        if let Ok(p) = std::env::var("SHODH_CE_MODEL_PATH") {
+            return PathBuf::from(p);
+        }
+        let candidates: Vec<Option<PathBuf>> = vec![
+            std::env::var("SHODH_PACKAGE_DIR")
+                .ok()
+                .map(|p| PathBuf::from(p).join("models").join(NAME)),
+            Some(PathBuf::from("./models").join(NAME)),
+            Some(PathBuf::from("../models").join(NAME)),
+            Some(crate::embeddings::downloader::get_cross_encoder_models_dir()),
+            dirs::data_dir().map(|p| p.join("shodh-memory/models").join(NAME)),
+        ];
+        let prefer_int8 = !fp32_requested();
+        candidates
+            .into_iter()
+            .flatten()
+            .find(|dir| model_file(dir, prefer_int8).exists())
+            .unwrap_or_else(|| PathBuf::from("./models").join(NAME))
     }
 
     /// Load the session. Returns Err when the model is absent so the caller can
@@ -96,13 +155,7 @@ impl CrossEncoder {
     /// model emits one logit whose small differences ARE the ranking. Both
     /// variants stay selectable so the end-to-end arms can price that 3.6%.
     pub fn load_variant(dir: &Path, prefer_int8: bool) -> Result<Self> {
-        let int8_path = dir.join("model_quint8_avx2.onnx");
-        let fp32_path = dir.join("model.onnx");
-        let model_path = if prefer_int8 && int8_path.exists() {
-            int8_path
-        } else {
-            fp32_path
-        };
+        let model_path = model_file(dir, prefer_int8);
         let tokenizer_path = dir.join("tokenizer.json");
         if !model_path.exists() {
             anyhow::bail!("cross-encoder model not found at {}", model_path.display());
@@ -254,6 +307,21 @@ impl CrossEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `model_dir` resolves a directory by asking `model_file` what `load` will
+    /// open, so the two must agree: int8 when asked for and present, fp32
+    /// otherwise, including when int8 was asked for but is absent.
+    #[test]
+    fn model_file_prefers_int8_and_falls_back_to_fp32() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let int8 = dir.path().join("model_quint8_avx2.onnx");
+        let fp32 = dir.path().join("model.onnx");
+
+        assert_eq!(model_file(dir.path(), true), fp32, "no int8 present");
+        std::fs::write(&int8, b"").expect("write");
+        assert_eq!(model_file(dir.path(), true), int8);
+        assert_eq!(model_file(dir.path(), false), fp32, "fp32 asked for");
+    }
 
     /// Needs the model on disk:
     ///   cargo test --lib cross_encoder -- --ignored --nocapture

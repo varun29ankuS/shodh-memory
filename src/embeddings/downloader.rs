@@ -107,6 +107,37 @@ const GLINER_ASSETS: &[(&str, &str)] = &[
 /// The GLiNER assets the typer must load to run (`GlinerConfig::assets_present`).
 const GLINER_REQUIRED_ASSETS: &[&str] = &["model.onnx", "tokenizer.json", "label_embeddings.bin"];
 
+/// Hugging Face revision of `cross-encoder/ms-marco-MiniLM-L6-v2` the reranker
+/// was measured with (+16.5pp p@1 at n=1531, #536). Pinned, not `main`: a
+/// silently different export would rank differently while every metric still
+/// looked plausible. The same revision and checksums gate the eval workflows.
+pub const CROSS_ENCODER_HF_REVISION: &str = "233902d25c440f23af6f7d6e94d2946bac0bee0a";
+
+const CROSS_ENCODER_BASE_URL: &str = "https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2/resolve/233902d25c440f23af6f7d6e94d2946bac0bee0a";
+
+/// Cross-encoder assets: `(local filename, path under the repo, SHA-256)`.
+/// `model_quint8_avx2.onnx` (int8, 23 MB) is what loads by default; its ranking
+/// matched fp32 within 0.003 on every metric at n=1531.
+const CROSS_ENCODER_ASSETS: &[(&str, &str, &str)] = &[
+    (
+        "model_quint8_avx2.onnx",
+        "onnx/model_quint8_avx2.onnx",
+        "c80a8b34256ea453093d612e3ac48d3d965a0c0a48c7906709af8b8e28461bf9",
+    ),
+    (
+        "tokenizer.json",
+        "tokenizer.json",
+        "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+    ),
+];
+
+/// The fp32 export, fetched only when `SHODH_CE_FP32` asks for it (91 MB).
+const CROSS_ENCODER_FP32_ASSET: (&str, &str, &str) = (
+    "model.onnx",
+    "onnx/model.onnx",
+    "5d3e70fd0c9ff14b9b5169a51e957b7a9c74897afd0a35ce4bd318150c1d4d4a",
+);
+
 /// Pinned ONNX Runtime version — the single source of truth. Must satisfy the
 /// `ort` crate's minimum (2.0.0-rc.11 requires >= 1.23.x); the download URL
 /// AND the cache directory are both derived from this, so bumping the pin
@@ -195,6 +226,83 @@ pub fn are_gliner_models_downloaded() -> bool {
         }
     }
     true
+}
+
+/// Cache directory for the cross-encoder reranker assets. A resolution
+/// candidate in `CrossEncoder::model_dir`, so assets fetched here are found
+/// without configuration.
+pub fn get_cross_encoder_models_dir() -> PathBuf {
+    get_cache_dir()
+        .join("models")
+        .join("cross-encoder-ms-marco-minilm-l6")
+}
+
+fn cross_encoder_assets(include_fp32: bool) -> Vec<(&'static str, &'static str, &'static str)> {
+    let mut assets = CROSS_ENCODER_ASSETS.to_vec();
+    if include_fp32 {
+        assets.push(CROSS_ENCODER_FP32_ASSET);
+    }
+    assets
+}
+
+/// Whether every cross-encoder asset is in the cache dir and matches its pinned
+/// SHA-256. A mismatched asset is deleted so the next download re-fetches it.
+pub fn are_cross_encoder_models_downloaded(include_fp32: bool) -> bool {
+    let dir = get_cross_encoder_models_dir();
+    for (name, _, expected) in cross_encoder_assets(include_fp32) {
+        let path = dir.join(name);
+        if !path.exists() {
+            return false;
+        }
+        if let Ok(false) = verify_checksum(&path, expected) {
+            tracing::warn!("cross-encoder asset {name} checksum mismatch — will re-download");
+            let _ = fs::remove_file(&path);
+            return false;
+        }
+    }
+    true
+}
+
+/// Download the cross-encoder reranker assets at the pinned revision into
+/// [`get_cross_encoder_models_dir`], verifying each against its SHA-256.
+/// Assets already present and valid are skipped, so an interrupted download
+/// resumes. `include_fp32` also fetches the 91 MB fp32 export.
+pub fn download_cross_encoder_models(
+    progress: Option<ProgressCallback>,
+    include_fp32: bool,
+) -> Result<PathBuf> {
+    let dir = get_cross_encoder_models_dir();
+    if are_cross_encoder_models_downloaded(include_fp32) {
+        tracing::info!("cross-encoder assets already downloaded at {:?}", dir);
+        return Ok(dir);
+    }
+
+    tracing::info!(
+        "Downloading cross-encoder reranker (ms-marco-MiniLM-L6-v2 @ {}) to {:?}",
+        &CROSS_ENCODER_HF_REVISION[..8],
+        dir
+    );
+    fs::create_dir_all(&dir).context("Failed to create cross-encoder cache directory")?;
+
+    for (name, remote, checksum) in cross_encoder_assets(include_fp32) {
+        let dest = dir.join(name);
+        if dest.exists() && matches!(verify_checksum(&dest, checksum), Ok(true)) {
+            continue;
+        }
+        let url = format!("{CROSS_ENCODER_BASE_URL}/{remote}");
+        let bar: Option<ProgressCallback> = progress
+            .as_ref()
+            .map(|_| make_stderr_progress(format!("Cross-encoder {name}")));
+        download_file_with_checksum(
+            &url,
+            &dest,
+            bar.as_ref().map(|p| p.as_ref()),
+            Some(checksum),
+        )?;
+    }
+
+    tracing::info!("cross-encoder assets downloaded to {:?}", dir);
+    Ok(dir)
 }
 
 /// Get the ONNX Runtime directory — keyed by the pinned runtime version.
@@ -960,6 +1068,20 @@ pub fn print_status() {
         }
     );
 
+    // Resolved through the same path the reranker loads from.
+    let ce_dir = crate::embeddings::cross_encoder::CrossEncoder::model_dir();
+    let ce_present =
+        ce_dir.join("model_quint8_avx2.onnx").exists() || ce_dir.join("model.onnx").exists();
+    println!(
+        "  Cross-encoder reranker: {} (on by default in the server; SHODH_CE_RERANK=0 disables)",
+        if ce_present {
+            format!("present at {ce_dir:?}")
+        } else {
+            "MISSING — recall runs unreranked; fetched on server start unless SHODH_OFFLINE"
+                .to_string()
+        }
+    );
+
     if models_downloaded {
         let models_dir = get_models_dir();
         println!("  Embedding model path: {models_dir:?}");
@@ -1058,6 +1180,38 @@ mod tests {
             assert!(url.contains(GLINER_RELEASE_TAG), "tag missing from {url}");
             assert!(url.ends_with(name), "url must end with asset name: {url}");
         }
+    }
+
+    /// The reranker was measured at one revision. Every asset URL must resolve
+    /// to that revision, and every checksum must be a well-formed SHA-256, or
+    /// the server could rank with weights nobody measured.
+    #[test]
+    fn cross_encoder_assets_target_the_measured_revision() {
+        assert!(
+            CROSS_ENCODER_BASE_URL.ends_with(CROSS_ENCODER_HF_REVISION),
+            "base URL must embed the pinned revision"
+        );
+        assert!(CROSS_ENCODER_BASE_URL
+            .starts_with("https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2/resolve/"));
+        let all = cross_encoder_assets(true);
+        assert_eq!(all.len(), CROSS_ENCODER_ASSETS.len() + 1);
+        let mut names = std::collections::HashSet::new();
+        for (name, remote, sha) in all {
+            assert!(names.insert(name), "duplicate local name {name}");
+            assert!(remote.ends_with(name), "{remote} must end with {name}");
+            assert_eq!(sha.len(), 64, "{name}: not a SHA-256");
+            assert!(sha
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        }
+        // The default fetch is the int8 model and its tokenizer, not the 91 MB fp32.
+        let default: Vec<_> = cross_encoder_assets(false).iter().map(|a| a.0).collect();
+        assert_eq!(default, vec!["model_quint8_avx2.onnx", "tokenizer.json"]);
+    }
+
+    #[test]
+    fn cross_encoder_models_dir_is_cache_scoped() {
+        assert!(get_cross_encoder_models_dir().starts_with(get_cache_dir()));
     }
 
     /// Regression for the stale-cache upgrade panic: the runtime cache MUST be

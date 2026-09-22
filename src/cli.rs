@@ -576,6 +576,15 @@ fn handle_init() -> Result<()> {
     shodh_memory::embeddings::minilm::pre_init_ort_runtime(false);
     eprintln!("  ✓ ONNX runtime ready");
 
+    // The server reranks recall with this model by default (SHODH_CE_RERANK=0
+    // opts out), so fetch it here rather than on first server start.
+    match shodh_memory::embeddings::cross_encoder::ensure_assets() {
+        Ok(dir) => eprintln!("  ✓ Cross-encoder reranker ready ({})", dir.display()),
+        Err(e) => eprintln!(
+            "  ! Cross-encoder reranker not downloaded ({e}); the server retries on start"
+        ),
+    }
+
     // 4. Print next steps
     eprintln!();
     eprintln!("  ╔═══════════════════════════════════════════╗");

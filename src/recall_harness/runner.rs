@@ -1415,9 +1415,7 @@ pub(crate) fn guard_ner_backend(manager: &MultiUserMemoryManager) -> Result<()> 
 /// So the flag that turns the lever ON also makes its absence fatal HERE, at
 /// the harness, while leaving the server's graceful degradation intact.
 pub(crate) fn guard_cross_encoder() -> Result<()> {
-    let enabled = std::env::var("SHODH_CE_RERANK")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let enabled = crate::memory::ce_rerank_enabled();
     let dir = crate::embeddings::cross_encoder::CrossEncoder::model_dir();
     guard_cross_encoder_at(enabled, &dir)
 }
@@ -2163,10 +2161,12 @@ impl AblationConfig {
 /// `baseline` and `+graph-expand(K5)` until the flag was deleted as falsified.
 ///
 /// Two operating points. Arms referencing [`ABLATION_BASELINE`] measure the
-/// pipeline as it ships, with the cross-encoder OFF (`SHODH_CE_RERANK` is set
-/// nowhere outside the harness). Arms referencing [`ABLATION_CE_BASELINE`]
-/// measure it with the reranker in, so a leg's contribution is also read where
-/// the largest measured lever is already present.
+/// library default, with the cross-encoder OFF: `recall-eval` never runs
+/// `server::run`, so the server's default-on does not reach it, and
+/// [`preflight_ablation_env`] refuses a preset `SHODH_CE_RERANK`. Arms
+/// referencing [`ABLATION_CE_BASELINE`] measure the pipeline as the server
+/// ships it, with the reranker in, so a leg's contribution is also read where
+/// the largest measured lever is present.
 ///
 /// Any arm that sets `SHODH_DISABLE_BOOSTS` must include `hebbian` (or `all`):
 /// setting the variable REPLACES the default-disabled set rather than adding to

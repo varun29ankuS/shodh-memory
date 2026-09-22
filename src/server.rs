@@ -91,6 +91,29 @@ pub fn run(config: ServerRunConfig) -> Result<()> {
     // Load .env file if present (won't override CLI-set vars)
     let _ = dotenvy::dotenv();
 
+    // Cross-encoder reranking is ON for the server unless the operator said
+    // otherwise, in the environment or in .env (hence after the load above).
+    // Measured +16.5pp p@1 and +8.7pp recall@10 at n=1531 (#536) for ~190 ms
+    // per recall on CPU; SHODH_CE_RERANK=0 opts out where that latency matters.
+    // The library default stays off, so harness and ablation arms keep the
+    // pipeline their baselines were measured on.
+    if std::env::var_os("SHODH_CE_RERANK").is_none() {
+        // SAFETY: still single-threaded; the runtime is built below.
+        unsafe {
+            std::env::set_var("SHODH_CE_RERANK", "1");
+        }
+    }
+    // Fetch the reranker before accepting requests, as GLiNER is fetched at
+    // startup, so the first recall does not stall on a 23 MB download. A
+    // failure is not fatal: recall runs unreranked and says so on first use.
+    if crate::memory::ce_rerank_enabled() {
+        if let Err(e) = crate::embeddings::cross_encoder::ensure_assets() {
+            eprintln!(
+                "warning: cross-encoder reranker unavailable ({e}); recall will run unreranked"
+            );
+        }
+    }
+
     // Build and enter the tokio runtime
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -43,9 +43,17 @@ ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
 #   pinned repo release `gliner-bi-edge-onnx-v1`; this is the SOLE neural typer,
 #   so baking it here is what makes the image run real NER instead of the
 #   rule-based fallback. All assets SHA-256 verified.
+# Cross-encoder ms-marco-MiniLM-L6-v2 int8 (~23MB) + tokenizer — pinned
+#   HuggingFace revision the reranker was measured at (#536). The server reranks
+#   recall with it by default; baked so the container never downloads at start.
 ARG GLINER_RELEASE=gliner-bi-edge-onnx-v1
 ARG GLINER_BASE=https://github.com/varun29ankuS/shodh-memory/releases/download/${GLINER_RELEASE}
-RUN mkdir -p /models/minilm-l6 /models/gliner-bi-edge \
+ARG CE_BASE=https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2/resolve/233902d25c440f23af6f7d6e94d2946bac0bee0a
+RUN mkdir -p /models/minilm-l6 /models/gliner-bi-edge /models/cross-encoder-ms-marco-minilm-l6 \
+    && curl -fSL -o /models/cross-encoder-ms-marco-minilm-l6/model_quint8_avx2.onnx "${CE_BASE}/onnx/model_quint8_avx2.onnx" \
+    && curl -fSL -o /models/cross-encoder-ms-marco-minilm-l6/tokenizer.json         "${CE_BASE}/tokenizer.json" \
+    && echo "c80a8b34256ea453093d612e3ac48d3d965a0c0a48c7906709af8b8e28461bf9  /models/cross-encoder-ms-marco-minilm-l6/model_quint8_avx2.onnx" | sha256sum -c - \
+    && echo "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66  /models/cross-encoder-ms-marco-minilm-l6/tokenizer.json" | sha256sum -c - \
     && curl -fSL -o /models/minilm-l6/model_quantized.onnx \
        "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/onnx/model_quint8_avx2.onnx" \
     && curl -fSL -o /models/minilm-l6/tokenizer.json \
@@ -133,6 +141,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
 # SHODH_MODEL_PATH: tells embedder where the pre-baked MiniLM model is (skips download)
 # SHODH_GLINER_MODEL_PATH: tells the NER stage where the pre-baked GLiNER typer is
 #   (skips first-run download; without it the image would run rule-based fallback NER)
+# SHODH_CE_MODEL_PATH: the pre-baked cross-encoder reranker, on by default in the
+#   server (`docker run -e SHODH_CE_RERANK=0` disables it)
 ENV RUST_LOG=info \
     SHODH_HOST=0.0.0.0 \
     SHODH_PORT=3030 \
@@ -140,6 +150,7 @@ ENV RUST_LOG=info \
     ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so \
     SHODH_MODEL_PATH=/home/shodh/.cache/shodh-memory/models/minilm-l6 \
     SHODH_GLINER_MODEL_PATH=/home/shodh/.cache/shodh-memory/models/gliner-bi-edge \
+    SHODH_CE_MODEL_PATH=/home/shodh/.cache/shodh-memory/models/cross-encoder-ms-marco-minilm-l6 \
     LD_LIBRARY_PATH=/usr/local/lib
 
 # Run the binary
