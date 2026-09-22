@@ -505,6 +505,36 @@ struct RotationOutcome {
     archived: usize,
 }
 
+/// The last nanosecond stamp handed to an audit key, process-wide.
+static LAST_AUDIT_STAMP: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// A nanosecond stamp for an audit key: the clock's reading, or one past the
+/// last stamp issued if the clock has not moved past it.
+///
+/// Audit keys are `{user_id}:{timestamp_nanos:020}`, so two events stamped the
+/// same nanosecond share a key and the later write silently replaces the
+/// earlier. That happens: concurrent requests for one user land in the same
+/// clock tick, and on Windows a tick is 100 ns. Measured: 8 concurrent writers,
+/// 2 of 496 events overwritten.
+///
+/// Uniqueness is bought by moving the stamp, not by changing the key format,
+/// because rotation parses the whole suffix as an `i64` and RETAINS any key it
+/// cannot parse, forever (`parse_audit_key`). A sequence suffix would have
+/// made every new event unrotatable. Stamps stay strictly increasing within a
+/// process, so keys stay in time order, and they differ from the clock by at
+/// most the number of events issued inside one tick.
+fn next_audit_stamp(now_nanos: i64, last: &std::sync::atomic::AtomicI64) -> i64 {
+    use std::sync::atomic::Ordering;
+    let mut stamp = now_nanos;
+    // `fetch_update` retries on contention, so every caller gets a stamp no
+    // other caller got.
+    let _ = last.fetch_update(Ordering::AcqRel, Ordering::Acquire, |prev| {
+        stamp = now_nanos.max(prev.saturating_add(1));
+        Some(stamp)
+    });
+    stamp
+}
+
 /// Parse a `{user_id}:{timestamp_nanos:020}` audit key into its text form and
 /// its nanosecond stamp.
 ///
@@ -1419,21 +1449,21 @@ impl MultiUserMemoryManager {
 
     /// Log audit event (non-blocking with background persistence)
     pub fn log_event(&self, user_id: &str, event_type: &str, memory_id: &str, details: &str) {
+        let now_nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_else(|| {
+            tracing::warn!("audit event timestamp outside i64 nanos range, using 0");
+            0
+        });
+        let stamp = next_audit_stamp(now_nanos, &LAST_AUDIT_STAMP);
         let event = AuditEvent {
-            timestamp: chrono::Utc::now(),
+            // The event carries the stamp its key carries, so the two agree
+            // exactly; the difference from the clock is at most a few ns.
+            timestamp: chrono::DateTime::from_timestamp_nanos(stamp),
             event_type: event_type.to_string(),
             memory_id: memory_id.to_string(),
             details: details.to_string(),
         };
 
-        let key = format!(
-            "{}:{:020}",
-            user_id,
-            event.timestamp.timestamp_nanos_opt().unwrap_or_else(|| {
-                tracing::warn!("audit event timestamp outside i64 nanos range, using 0");
-                0
-            })
-        );
+        let key = format!("{user_id}:{stamp:020}");
         if let Ok(serialized) = crate::serialization::encode(&event) {
             let db = self.shared_db.clone();
             let key_bytes = key.into_bytes();
@@ -5392,6 +5422,110 @@ mod tests {
                 word
             );
         }
+    }
+
+    /// The clock frozen on one reading, as a coarse tick looks to fast callers:
+    /// every stamp must still be distinct and in issue order, and a clock that
+    /// has moved ahead must be used as is.
+    #[test]
+    fn audit_stamps_are_unique_on_a_frozen_clock() {
+        let last = std::sync::atomic::AtomicI64::new(0);
+        let a = next_audit_stamp(1_000, &last);
+        let b = next_audit_stamp(1_000, &last);
+        let c = next_audit_stamp(1_000, &last);
+        assert_eq!((a, b, c), (1_000, 1_001, 1_002));
+        assert_eq!(next_audit_stamp(5_000, &last), 5_000, "a clock ahead wins");
+        assert_eq!(
+            next_audit_stamp(4_000, &last),
+            5_001,
+            "a clock behind the last stamp must not reuse or reorder"
+        );
+
+        // Contended: sixteen threads, one frozen reading, no two stamps equal.
+        let last = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                let last = last.clone();
+                std::thread::spawn(move || {
+                    (0..1_000)
+                        .map(|_| next_audit_stamp(7, &last))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let mut all: Vec<i64> = threads
+            .into_iter()
+            .flat_map(|t| t.join().expect("thread"))
+            .collect();
+        let n = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), n, "two callers were handed the same stamp");
+    }
+
+    /// Every logged audit event must reach `CF_AUDIT`. The key is the user and
+    /// the event's timestamp in nanoseconds, so two events stamped the same
+    /// nanosecond share a key and the second write replaces the first. A clock
+    /// coarser than a nanosecond makes that routine for back-to-back events:
+    /// Windows' system clock ticks every 100 ns, so a burst written in a loop
+    /// (bulk operations log one event per item) lands several events per tick.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_burst_of_audit_events_keeps_every_event() {
+        let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
+        let config = ServerConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            backup_enabled: false,
+            ..ServerConfig::default()
+        };
+        let manager = MultiUserMemoryManager::new(temp_dir.path().to_path_buf(), config)
+            .expect("failed to create manager");
+        const USER: &str = "audit-burst";
+        const N: usize = 500;
+        assert!(
+            manager.server_config.audit_max_entries_per_user >= N,
+            "precondition: rotation's cap must not be what removes events here"
+        );
+
+        // Concurrent writers for one user, as parallel requests produce. A
+        // single thread cannot collide on this clock: one call takes longer
+        // than a tick, which a sequential version of this test confirmed.
+        const WRITERS: usize = 8;
+        let per_writer = N / WRITERS;
+        let manager = std::sync::Arc::new(manager);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
+        let handle = tokio::runtime::Handle::current();
+        let threads: Vec<_> = (0..WRITERS)
+            .map(|w| {
+                let (manager, barrier, handle) = (manager.clone(), barrier.clone(), handle.clone());
+                std::thread::spawn(move || {
+                    let _rt = handle.enter();
+                    barrier.wait();
+                    for i in 0..per_writer {
+                        manager.log_event(USER, "PROBE", &format!("m-{w}-{i}"), "burst");
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("writer thread");
+        }
+        let total = per_writer * WRITERS;
+        manager.task_tracker.close();
+        manager.task_tracker.wait().await;
+
+        let prefix = format!("{USER}:");
+        let stored = manager
+            .shared_db
+            .prefix_iterator_cf(manager.audit_cf(), prefix.as_bytes())
+            .flatten()
+            .take_while(|(k, _)| k.starts_with(prefix.as_bytes()))
+            .count();
+        assert_eq!(
+            stored,
+            total,
+            "{} of {total} audit events were overwritten by a later event with the same key",
+            total - stored
+        );
     }
 
     #[test]
