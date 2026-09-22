@@ -215,6 +215,15 @@ jobs:
           SHODH_GLINER_MODEL_PATH: ${{ github.workspace }}/models/gliner-bi-edge
           SHODH_CE_RERANK: ${{ env.CE_RERANK }}
           SHODH_CE_MODEL_PATH: ${{ github.workspace }}/models/cross-encoder-ms-marco-minilm-l6
+          # Per-stage latency attribution in recall-eval.log (STAGE_TIMING
+          # lines) and current.json. The probe wraps the same production
+          # recall() and the wall clock stays around that call, so the gated
+          # end-to-end numbers are unchanged; what it adds is an answer to
+          # "which stage moved" without a second run. The reranked gate's
+          # p50 went 140 -> 242 -> 235 -> 544 ms across four runs of one
+          # branch while the runner's build step moved 20%; without this,
+          # a slow runner and a slow stage read the same.
+          SHODH_STAGE_TIMING: '1'
         run: |
           set +e
           # RH-12 (#272): --repeats 5 → per-case latency is the median
