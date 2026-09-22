@@ -1072,6 +1072,16 @@ fn run_one_pass(
         let mut rerank_pools: Vec<CaseRankList> = Vec::with_capacity(cases.len());
         let mut leg_lists: Vec<Vec<(String, Vec<String>)>> = Vec::with_capacity(cases.len());
 
+        // TIMED PASS. One production recall per case and nothing else between
+        // two of them. Every diagnostic query (the RECALL_DIAG_K-deep list,
+        // the rerank pool, the per-leg capture) runs in the SECOND pass below,
+        // after the last timed recall, so whatever a diagnostic leaves behind
+        // -- warmed or evicted caches, allocator state, a hotter CPU -- is
+        // never in front of a measured recall. The gated latency is then a
+        // property of the production path alone, whichever diagnostics ride
+        // along in a given run.
+        let mut timed: Vec<(Query, HashMap<Uuid, f32>)> = Vec::with_capacity(cases.len());
+
         for case in cases {
             let mut query = Query {
                 query_text: Some(case.query.clone()),
@@ -1166,6 +1176,38 @@ fn run_one_pass(
                 );
             }
 
+            // Only emit the "missing relevance map" failure once across modes
+            // — the relevance map is a function of fixtures + ingest, not
+            // the mode, so duplicating it would clutter the failure list.
+            if relevance.is_empty() && *mode == layer_modes[0] {
+                failures.push(Failure {
+                    kind: "case".to_string(),
+                    detail: format!(
+                        "case {}: every relevant corpus item was missing from id_map (ingest skipped them)",
+                        case.id
+                    ),
+                });
+            }
+
+            let metrics = Metrics::compute(&retrieved_uuids, &relevance, SMOKE_K);
+            by_category_cases
+                .entry(case.category)
+                .or_default()
+                .push(metrics);
+            per_case.push(metrics);
+            timed.push((query, relevance));
+        }
+
+        // DIAGNOSTIC PASS. Same cases, same order, same read-only queries; the
+        // timed numbers above are already recorded. Every list this pass
+        // produces is aligned with `ranks` by index.
+        let corpus_id = |u: &Uuid| -> String {
+            uuid_to_corpus_id
+                .get(u)
+                .cloned()
+                .unwrap_or_else(|| format!("<unknown:{u}>"))
+        };
+        for (i, (case, (query, relevance))) in cases.iter().zip(&timed).enumerate() {
             // Depth diagnostics: a second, production-shaped recall at
             // `max_results = diag_k` feeds ONLY the per-case recall@50/@100
             // fields (see the diag_k comment above for why it must not be the
@@ -1186,15 +1228,7 @@ fn run_one_pass(
                 };
                 manager.annotate_query_ner(&mut deep_query);
                 match system.read().recall(&deep_query) {
-                    Ok(deep) => deep
-                        .iter()
-                        .map(|m| {
-                            uuid_to_corpus_id
-                                .get(&m.id.0)
-                                .cloned()
-                                .unwrap_or_else(|| format!("<unknown:{}>", m.id.0))
-                        })
-                        .collect(),
+                    Ok(deep) => deep.iter().map(|m| corpus_id(&m.id.0)).collect(),
                     Err(e) => {
                         failures.push(Failure {
                             kind: "case".to_string(),
@@ -1210,11 +1244,7 @@ fn run_one_pass(
             } else {
                 // Diagnostic off: the depth fields degrade to the production
                 // list, exactly as before the two-query split.
-                ranks
-                    .last()
-                    .expect("production rank list was pushed above")
-                    .retrieved
-                    .clone()
+                ranks[i].retrieved.clone()
             };
             if pool_export.is_some() && matches!(*mode, LayerMode::Full) {
                 // Corpus ids, matching `pool` -- `relevance` is keyed by Uuid while
@@ -1246,17 +1276,11 @@ fn run_one_pass(
                 retrieved: deep_retrieved,
             });
 
-            let corpus_id = |u: &Uuid| -> String {
-                uuid_to_corpus_id
-                    .get(u)
-                    .cloned()
-                    .unwrap_or_else(|| format!("<unknown:{u}>"))
-            };
             // The funnel captures every stage's ordered candidates for this
             // one query on this thread; `take_capture` disarms it before the
-            // next case's timed query, which therefore records nothing.
+            // next query, which therefore records nothing.
             crate::memory::gold_funnel::begin_capture();
-            let pool_result = system.read().rerank_input_pool(&query);
+            let pool_result = system.read().rerank_input_pool(query);
             let legs: Vec<(String, Vec<String>)> = crate::memory::gold_funnel::take_capture()
                 .unwrap_or_default()
                 .into_iter()
@@ -1282,26 +1306,6 @@ fn run_one_pass(
                 case_id: case.id.clone(),
                 retrieved: pool,
             });
-
-            // Only emit the "missing relevance map" failure once across modes
-            // — the relevance map is a function of fixtures + ingest, not
-            // the mode, so duplicating it would clutter the failure list.
-            if relevance.is_empty() && *mode == layer_modes[0] {
-                failures.push(Failure {
-                    kind: "case".to_string(),
-                    detail: format!(
-                        "case {}: every relevant corpus item was missing from id_map (ingest skipped them)",
-                        case.id
-                    ),
-                });
-            }
-
-            let metrics = Metrics::compute(&retrieved_uuids, &relevance, SMOKE_K);
-            by_category_cases
-                .entry(case.category)
-                .or_default()
-                .push(metrics);
-            per_case.push(metrics);
         }
 
         per_mode.insert(
