@@ -338,11 +338,17 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
                     debug_assert_eq!(ref_rank.case_id, cur_rank.case_id);
                     let pool_note =
                         pool_divergence_note(&ref_pass.rerank_pools[k], &cur_pass.rerank_pools[k]);
+                    let leg_note =
+                        leg_divergence_note(&ref_pass.leg_lists[k], &cur_pass.leg_lists[k]);
                     if ref_rank.retrieved != cur_rank.retrieved {
                         let located = pool_note
                             .as_deref()
                             .map(|n| format!(" — {n}"))
-                            .unwrap_or_default();
+                            .unwrap_or_default()
+                            + &leg_note
+                                .as_deref()
+                                .map(|n| format!(" — {n}"))
+                                .unwrap_or_default();
                         failures.push(Failure {
                             kind: "infrastructure".to_string(),
                             detail: format!(
@@ -353,7 +359,8 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
                         });
                     } else if let Some(note) = pool_note.filter(|n| !n.starts_with(POOL_IDENTICAL))
                     {
-                        hidden_pool_divergence.push(format!("{}: {note}", ref_rank.case_id));
+                        let legs = leg_note.map(|n| format!(" — {n}")).unwrap_or_default();
+                        hidden_pool_divergence.push(format!("{}: {note}{legs}", ref_rank.case_id));
                     }
                 }
                 // Not a gate failure, since the output agreed. But a pool that
@@ -501,24 +508,70 @@ fn pool_divergence_note(a: &CaseRankList, b: &CaseRankList) -> Option<String> {
             a.retrieved.len()
         ));
     }
+    Some(format!(
+        "rerank pool diverged {}",
+        list_divergence(&a.retrieved, &b.retrieved)
+    ))
+}
+
+/// Where two ordered candidate lists part ways: the first differing position
+/// and the members each has that the other lacks.
+fn list_divergence(a: &[String], b: &[String]) -> String {
     let first = a
-        .retrieved
         .iter()
-        .zip(&b.retrieved)
+        .zip(b)
         .position(|(x, y)| x != y)
-        .unwrap_or_else(|| a.retrieved.len().min(b.retrieved.len()));
-    let set_a: HashSet<&String> = a.retrieved.iter().collect();
-    let set_b: HashSet<&String> = b.retrieved.iter().collect();
+        .unwrap_or_else(|| a.len().min(b.len()));
+    let set_a: HashSet<&String> = a.iter().collect();
+    let set_b: HashSet<&String> = b.iter().collect();
     let mut only_a: Vec<&String> = set_a.difference(&set_b).copied().collect();
     let mut only_b: Vec<&String> = set_b.difference(&set_a).copied().collect();
     only_a.sort();
     only_b.sort();
-    Some(format!(
-        "rerank pool diverged at position {first} (repeat 0 has {:?}, the other {:?}); \
+    format!(
+        "at position {first} (repeat 0 has {:?}, the other {:?}); \
          only in repeat 0: {only_a:?}, only in the other: {only_b:?}",
-        a.retrieved.get(first),
-        b.retrieved.get(first),
-    ))
+        a.get(first),
+        b.get(first),
+    )
+}
+
+/// Name the first pipeline stage whose candidate list differs between two
+/// repeats of one query, or say that every captured stage agreed.
+///
+/// `None` when nothing was captured in either repeat. The stages are compared
+/// in the order the pipeline recorded them, so the first difference is the
+/// leg the divergence entered through; every stage after it inherits it.
+fn leg_divergence_note(a: &[(String, Vec<String>)], b: &[(String, Vec<String>)]) -> Option<String> {
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    for (i, (x, y)) in a.iter().zip(b).enumerate() {
+        if x.0 != y.0 {
+            return Some(format!(
+                "stage sequence differs at index {i}: repeat 0 recorded {:?}, the other {:?}",
+                x.0, y.0
+            ));
+        }
+        if x.1 != y.1 {
+            return Some(format!(
+                "first differing leg: {} ({} vs {} candidates) {}",
+                x.0,
+                x.1.len(),
+                y.1.len(),
+                list_divergence(&x.1, &y.1)
+            ));
+        }
+    }
+    if a.len() != b.len() {
+        return Some(format!(
+            "stage sequence lengths differ: repeat 0 recorded {} stages, the other {}",
+            a.len(),
+            b.len()
+        ));
+    }
+    let names: Vec<&str> = a.iter().map(|(n, _)| n.as_str()).collect();
+    Some(format!("every captured leg identical: {names:?}"))
 }
 
 /// Build per-case diagnostics from one mode's aligned outputs.
@@ -844,6 +897,11 @@ struct ModePassResult {
     /// state. Diagnostic only: it locates a repeat divergence (a different pool
     /// vs different scores over the same pool) and is never gated on.
     rerank_pools: Vec<CaseRankList>,
+    /// For each case, the ordered candidate list every pipeline stage
+    /// recorded while the pool query ran (graph, vector, hybrid, fusion, ...),
+    /// in pipeline order, as corpus ids. Empty when reranking is off. Lets a
+    /// divergence be placed on the first leg it appears in, not the last.
+    leg_lists: Vec<Vec<(String, Vec<String>)>>,
     /// Per-case stage breakdown, aligned with `latencies_ms` by index. Empty
     /// unless `SHODH_STAGE_TIMING=1`. Diagnostic only — never gated on.
     stage_probes: Vec<crate::stage_probe::Probe>,
@@ -1012,6 +1070,7 @@ fn run_one_pass(
         let mut ranks: Vec<CaseRankList> = Vec::with_capacity(cases.len());
         let mut deep_ranks: Vec<CaseRankList> = Vec::with_capacity(cases.len());
         let mut rerank_pools: Vec<CaseRankList> = Vec::with_capacity(cases.len());
+        let mut leg_lists: Vec<Vec<(String, Vec<String>)>> = Vec::with_capacity(cases.len());
 
         for case in cases {
             let mut query = Query {
@@ -1187,16 +1246,25 @@ fn run_one_pass(
                 retrieved: deep_retrieved,
             });
 
-            let pool: Vec<String> = match system.read().rerank_input_pool(&query) {
-                Ok(Some(pool)) => pool
-                    .iter()
-                    .map(|m| {
-                        uuid_to_corpus_id
-                            .get(&m.id.0)
-                            .cloned()
-                            .unwrap_or_else(|| format!("<unknown:{}>", m.id.0))
-                    })
-                    .collect(),
+            let corpus_id = |u: &Uuid| -> String {
+                uuid_to_corpus_id
+                    .get(u)
+                    .cloned()
+                    .unwrap_or_else(|| format!("<unknown:{u}>"))
+            };
+            // The funnel captures every stage's ordered candidates for this
+            // one query on this thread; `take_capture` disarms it before the
+            // next case's timed query, which therefore records nothing.
+            crate::memory::gold_funnel::begin_capture();
+            let pool_result = system.read().rerank_input_pool(&query);
+            let legs: Vec<(String, Vec<String>)> = crate::memory::gold_funnel::take_capture()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(stage, ids)| (stage, ids.iter().map(|id| corpus_id(&id.0)).collect()))
+                .collect();
+            leg_lists.push(legs);
+            let pool: Vec<String> = match pool_result {
+                Ok(Some(pool)) => pool.iter().map(|m| corpus_id(&m.id.0)).collect(),
                 Ok(None) => Vec::new(),
                 Err(e) => {
                     failures.push(Failure {
@@ -1245,6 +1313,7 @@ fn run_one_pass(
                 ranks,
                 deep_ranks,
                 rerank_pools,
+                leg_lists,
                 stage_probes,
             },
         );
@@ -3805,6 +3874,71 @@ mod tests {
         assert!(
             swapped.contains(r#"only in repeat 0: ["x"], only in the other: ["y"]"#),
             "{swapped}"
+        );
+    }
+
+    /// The leg note has to name the FIRST stage that differs, in pipeline
+    /// order, so a divergence is attributed to the leg it entered through and
+    /// not to the fusion that merely carried it.
+    #[test]
+    fn leg_divergence_note_names_the_first_differing_stage() {
+        let legs = |stages: &[(&str, Vec<&str>)]| -> Vec<(String, Vec<String>)> {
+            stages
+                .iter()
+                .map(|(name, ids)| {
+                    (
+                        name.to_string(),
+                        ids.iter().map(|s| s.to_string()).collect(),
+                    )
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            leg_divergence_note(&legs(&[]), &legs(&[("vector", vec!["a"])])),
+            None
+        );
+
+        let same = leg_divergence_note(
+            &legs(&[("graph", vec!["g"]), ("vector", vec!["a", "b"])]),
+            &legs(&[("graph", vec!["g"]), ("vector", vec!["a", "b"])]),
+        )
+        .expect("captured");
+        assert!(same.starts_with("every captured leg identical"), "{same}");
+        assert!(same.contains(r#"["graph", "vector"]"#), "{same}");
+
+        // Graph agrees, vector differs, fusion differs too: vector is named.
+        let located = leg_divergence_note(
+            &legs(&[
+                ("graph", vec!["g"]),
+                ("vector", vec!["a", "b", "x"]),
+                ("fusion", vec!["a", "x"]),
+            ]),
+            &legs(&[
+                ("graph", vec!["g"]),
+                ("vector", vec!["a", "b", "y"]),
+                ("fusion", vec!["a", "y"]),
+            ]),
+        )
+        .expect("captured");
+        assert!(
+            located.starts_with("first differing leg: vector"),
+            "{located}"
+        );
+        assert!(located.contains("position 2"), "{located}");
+        assert!(
+            located.contains(r#"only in repeat 0: ["x"], only in the other: ["y"]"#),
+            "{located}"
+        );
+
+        let reordered = leg_divergence_note(
+            &legs(&[("graph", vec!["g"]), ("vector", vec!["a", "b"])]),
+            &legs(&[("vector", vec!["a", "b"]), ("graph", vec!["g"])]),
+        )
+        .expect("captured");
+        assert!(
+            reordered.starts_with("stage sequence differs at index 0"),
+            "{reordered}"
         );
     }
 

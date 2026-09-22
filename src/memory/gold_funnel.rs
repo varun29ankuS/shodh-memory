@@ -21,6 +21,11 @@ struct FunnelState {
     gold: HashSet<MemoryId>,
     /// (stage name, best gold rank at that stage; None if no gold present).
     stages: Vec<(String, Option<usize>)>,
+    /// When armed by [`begin_capture`], every recorded stage's full ordered
+    /// candidate list, in pipeline order. This is what lets a repeat
+    /// divergence be placed on the leg it first entered rather than on the
+    /// fused output it surfaced in.
+    capture: Option<Vec<(String, Vec<MemoryId>)>>,
 }
 
 /// Arm the funnel for the next recall with this query's gold ids. Clears any prior state.
@@ -29,8 +34,28 @@ pub fn begin(gold: HashSet<MemoryId>) {
         *c.borrow_mut() = Some(FunnelState {
             gold,
             stages: Vec::new(),
+            capture: None,
         });
     });
+}
+
+/// Arm the funnel to keep every stage's full ordered candidate list for the
+/// next recall on this thread. No gold is tracked; the stage ranks read as
+/// absent. Clears any prior state.
+pub fn begin_capture() {
+    FUNNEL.with(|c| {
+        *c.borrow_mut() = Some(FunnelState {
+            gold: HashSet::new(),
+            stages: Vec::new(),
+            capture: Some(Vec::new()),
+        });
+    });
+}
+
+/// Disarm and return the captured per-stage candidate lists, in the order the
+/// pipeline recorded them (None if no capture was armed).
+pub fn take_capture() -> Option<Vec<(String, Vec<MemoryId>)>> {
+    FUNNEL.with(|c| c.borrow_mut().take().and_then(|s| s.capture))
 }
 
 /// Disarm and return the recorded per-stage ranks (None if the funnel was never armed).
@@ -46,14 +71,27 @@ pub fn record<'a>(stage: &str, ids: impl Iterator<Item = &'a MemoryId>) {
         let Some(state) = borrow.as_mut() else {
             return;
         };
-        let mut best: Option<usize> = None;
-        for (i, id) in ids.enumerate() {
-            if state.gold.contains(id) {
-                best = Some(i);
-                break;
+        let FunnelState {
+            gold,
+            stages,
+            capture,
+        } = state;
+        let best: Option<usize> = if let Some(capture) = capture.as_mut() {
+            let list: Vec<MemoryId> = ids.cloned().collect();
+            let best = list.iter().position(|id| gold.contains(id));
+            capture.push((stage.to_string(), list));
+            best
+        } else {
+            let mut best = None;
+            for (i, id) in ids.enumerate() {
+                if gold.contains(id) {
+                    best = Some(i);
+                    break;
+                }
             }
-        }
-        state.stages.push((stage.to_string(), best));
+            best
+        };
+        stages.push((stage.to_string(), best));
     });
 }
 
