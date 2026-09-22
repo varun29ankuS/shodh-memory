@@ -185,7 +185,7 @@ const ENV_MUTATION_INVENTORY: &[(&str, usize, &str)] = &[
     ),
     (
         "src/server.rs",
-        8,
+        9,
         "server bootstrap, documented as running before the tokio runtime          spawns any thread",
     ),
     (
