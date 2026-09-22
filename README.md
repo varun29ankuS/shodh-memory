@@ -182,7 +182,7 @@ This is based on [Cowan's working memory model](https://doi.org/10.1177/09637214
 | Store memory (API response) | <200ms |
 | Store memory (core) | 55-60ms |
 | Semantic search, reranking off (`SHODH_CE_RERANK=0`) | 34-58ms |
-| Cross-encoder rerank of the top 30 (server default) | ~190ms added (int8, 2 CPU threads, measured on a debug build) |
+| Cross-encoder rerank of the top 30 (server default) | +64ms p50, +106ms p95 (int8, release build, CI runner, 100-query LoCoMo gate) |
 | Tag search | ~1ms |
 | Entity lookup | 763ns |
 | Graph traversal (3-hop) | 30µs |

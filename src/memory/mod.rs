@@ -126,7 +126,8 @@ fn companion_gate_enabled() -> bool {
 /// bindings) keeps the pipeline every existing measurement was taken on. The
 /// SERVER turns it on: `server::run` sets `SHODH_CE_RERANK=1` unless the
 /// operator already set it, because the paired arms measured +16.5pp p@1 and
-/// +8.7pp recall@10 at n=1531 (#536) for ~190 ms/query at depth 30 on CPU.
+/// +8.7pp recall@10 at n=1531 (#536), for +64 ms p50 / +106 ms p95 per recall
+/// at depth 30 (release build, CPU, the 100-query L1 gate).
 pub fn ce_rerank_enabled() -> bool {
     std::env::var("SHODH_CE_RERANK")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))

@@ -93,8 +93,9 @@ pub fn run(config: ServerRunConfig) -> Result<()> {
 
     // Cross-encoder reranking is ON for the server unless the operator said
     // otherwise, in the environment or in .env (hence after the load above).
-    // Measured +16.5pp p@1 and +8.7pp recall@10 at n=1531 (#536) for ~190 ms
-    // per recall on CPU; SHODH_CE_RERANK=0 opts out where that latency matters.
+    // Measured +16.5pp p@1 and +8.7pp recall@10 at n=1531 (#536), for +64 ms
+    // p50 / +106 ms p95 per recall (release build, CPU). SHODH_CE_RERANK=0 opts
+    // out where that latency matters.
     // The library default stays off, so harness and ablation arms keep the
     // pipeline their baselines were measured on.
     if std::env::var_os("SHODH_CE_RERANK").is_none() {
