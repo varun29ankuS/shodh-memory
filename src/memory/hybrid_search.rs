@@ -249,21 +249,32 @@ fn collect_top_with_stable_ties(
     }
     let live_docs = searcher.num_docs() as usize;
     let mut window = limit.saturating_mul(2);
-    loop {
+    let mut hits = loop {
         let hits = searcher
             .search(query, &TopDocs::with_limit(window).order_by_score())
             .context("BM25 search failed")?;
         // Fewer than asked for: every match is in hand.
         if hits.len() < window {
-            return Ok(hits);
+            break hits;
         }
         let boundary = hits[limit - 1].0;
         let last = hits[window - 1].0;
         if last.total_cmp(&boundary).is_lt() || window >= live_docs {
-            return Ok(hits);
+            break hits;
         }
         window = window.saturating_mul(2).min(live_docs);
+    };
+    // Only the boundary's plateau can change the cut. Everything below it is
+    // dropped here, before the caller pays a document fetch for it.
+    if hits.len() > limit {
+        let boundary = hits[limit - 1].0;
+        let keep = hits
+            .iter()
+            .position(|(score, _)| score.total_cmp(&boundary).is_lt())
+            .unwrap_or(hits.len());
+        hits.truncate(keep);
     }
+    Ok(hits)
 }
 
 /// Total order for BM25 hits: score, then content, then id.
