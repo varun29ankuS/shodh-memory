@@ -22,11 +22,11 @@ use anyhow::{Context, Result};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::{Query, QueryParser};
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING, TEXT,
 };
-use tantivy::{Index, IndexReader, IndexWriter, TantivyDocument};
+use tantivy::{DocAddress, Index, IndexReader, IndexWriter, Score, Searcher, TantivyDocument};
 use tracing::{debug, info};
 
 use super::types::MemoryId;
@@ -220,6 +220,63 @@ fn build_schema() -> Schema {
     schema_builder.add_text_field("entities", TEXT);
 
     schema_builder.build()
+}
+
+/// The top `limit` hits of `query`, plus every hit that ties with the last of
+/// them, so the caller can cut that tie by a key the corpus determines.
+///
+/// `TopDocs` breaks equal scores by ascending `DocAddress`, and the segment
+/// ordinal inside a `DocAddress` is the segment's position in `meta.json`,
+/// which tantivy writes from a `HashMap` of segment ids. So two indexes built
+/// from one corpus, with one document per commit as `remember` does it, put
+/// the same tied documents in different orders, and a cut at `limit` through
+/// a tie keeps a different subset each time. BM25 ties are not rare: every
+/// document that matches the same query terms with the same frequencies and
+/// the same (quantised) length scores bit-identically, whatever segment holds
+/// it, because the corpus statistics are summed over the whole searcher.
+///
+/// Fetching twice the limit covers the tie in one search in the ordinary
+/// case; when the tie still runs past the window the window doubles, bounded
+/// by the number of live documents, so no match on the boundary score is ever
+/// left out of the caller's cut.
+fn collect_top_with_stable_ties(
+    searcher: &Searcher,
+    query: &dyn Query,
+    limit: usize,
+) -> Result<Vec<(Score, DocAddress)>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let live_docs = searcher.num_docs() as usize;
+    let mut window = limit.saturating_mul(2);
+    loop {
+        let hits = searcher
+            .search(query, &TopDocs::with_limit(window).order_by_score())
+            .context("BM25 search failed")?;
+        // Fewer than asked for: every match is in hand.
+        if hits.len() < window {
+            return Ok(hits);
+        }
+        let boundary = hits[limit - 1].0;
+        let last = hits[window - 1].0;
+        if last.total_cmp(&boundary).is_lt() || window >= live_docs {
+            return Ok(hits);
+        }
+        window = window.saturating_mul(2).min(live_docs);
+    }
+}
+
+/// Total order for BM25 hits: score, then content, then id.
+///
+/// Content is what makes the order a function of the corpus rather than of
+/// the index layout. The id is a per-ingest v4 uuid and only separates two
+/// documents with identical text, which no lexical key can tell apart.
+fn order_hits_by_score_then_content(hits: &mut [(MemoryId, f32, String)]) {
+    hits.sort_by(|a, b| {
+        b.1.total_cmp(&a.1)
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.0.cmp(&b.0))
+    });
 }
 
 impl BM25Index {
@@ -557,25 +614,31 @@ impl BM25Index {
             }
         };
 
-        let top_docs = searcher
-            .search(&parsed_query, &TopDocs::with_limit(limit).order_by_score())
-            .context("BM25 search failed")?;
+        let top_docs = collect_top_with_stable_ties(&searcher, &parsed_query, limit)?;
 
-        let mut results = Vec::with_capacity(top_docs.len());
-
+        let mut hits: Vec<(MemoryId, f32, String)> = Vec::with_capacity(top_docs.len());
         for (score, doc_address) in top_docs {
-            if let Ok(doc) = searcher.doc::<TantivyDocument>(doc_address) {
-                if let Some(id_value) = doc.get_first(self.id_field) {
-                    if let Some(id_str) = id_value.as_str() {
-                        if let Ok(uuid) = uuid::Uuid::parse_str(id_str) {
-                            results.push((MemoryId(uuid), score));
-                        }
-                    }
-                }
-            }
+            let Ok(doc) = searcher.doc::<TantivyDocument>(doc_address) else {
+                continue;
+            };
+            let Some(uuid) = doc
+                .get_first(self.id_field)
+                .and_then(|v| v.as_str())
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            else {
+                continue;
+            };
+            let content = doc
+                .get_first(self.content_field)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            hits.push((MemoryId(uuid), score, content));
         }
+        order_hits_by_score_then_content(&mut hits);
+        hits.truncate(limit);
 
-        Ok(results)
+        Ok(hits.into_iter().map(|(id, score, _)| (id, score)).collect())
     }
 
     /// Get document count
@@ -1116,6 +1179,64 @@ impl HybridSearchEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Index `n` documents that all score identically for `keyword`, one
+    /// commit per document as `remember` does it, so the index is many
+    /// segments in whatever order tantivy's segment register drew.
+    fn index_tied_corpus(path: &Path, n: usize) -> (BM25Index, HashMap<MemoryId, String>) {
+        let index = BM25Index::new(path).expect("create");
+        let mut contents = HashMap::with_capacity(n);
+        for i in 0..n {
+            let id = MemoryId(uuid::Uuid::new_v4());
+            // Same term frequency and the same length for every document:
+            // bit-identical BM25 scores, distinct text.
+            let content = format!("keyword filler{i:03}");
+            index.upsert(&id, &content, &[], &[]).expect("upsert");
+            index.commit().expect("commit");
+            contents.insert(id, content);
+        }
+        index.reload().expect("reload");
+        (index, contents)
+    }
+
+    /// Two ingests of one corpus must cut a BM25 tie the same way. Before the
+    /// stable cut, which tied documents survived the cut was decided by the
+    /// segment order behind `DocAddress`, which is a `HashMap` order in
+    /// tantivy and so differed between the two builds.
+    #[test]
+    fn bm25_cut_through_a_tie_is_decided_by_the_corpus_not_the_segment_layout() {
+        let home = tempfile::tempdir().expect("tempdir");
+        const DOCS: usize = 150;
+        const LIMIT: usize = 100;
+
+        let (first, first_contents) = index_tied_corpus(&home.path().join("first"), DOCS);
+        let (second, second_contents) = index_tied_corpus(&home.path().join("second"), DOCS);
+
+        let cut = |index: &BM25Index, contents: &HashMap<MemoryId, String>| -> Vec<String> {
+            index
+                .search("keyword", LIMIT)
+                .expect("search")
+                .into_iter()
+                .map(|(id, _)| contents[&id].clone())
+                .collect()
+        };
+        let first_cut = cut(&first, &first_contents);
+        let second_cut = cut(&second, &second_contents);
+
+        assert_eq!(
+            first_cut.len(),
+            LIMIT,
+            "precondition: more matches than the limit"
+        );
+        assert_eq!(
+            first_cut, second_cut,
+            "the same corpus and query kept different documents through the cut"
+        );
+        let expected: Vec<String> = (0..LIMIT)
+            .map(|i| format!("keyword filler{i:03}"))
+            .collect();
+        assert_eq!(first_cut, expected, "ties are ordered by content");
+    }
 
     /// A backfill that dies after its first batch commit leaves an index that
     /// is non-empty and incomplete. `is_empty` then says nothing is owed, so the
