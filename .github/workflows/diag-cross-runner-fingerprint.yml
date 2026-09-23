@@ -1,0 +1,135 @@
+# Cross-runner model-output fingerprint (diagnostic).
+#
+# Four L1 gate runs of one tree gave three different per-case result sets
+# across ubuntu-latest runners, each run byte-stable over 5 repeats. This runs
+# tests/onnx_cross_runner_fingerprint.rs on N runners in parallel, records each
+# runner's CPU model and ISA flags, and uploads one fingerprint per slot. Diff
+# the fingerprints between slots that landed on different CPUs: the first stage
+# whose hash differs is the first divergent stage.
+name: diag — cross-runner fingerprint
+on:
+  workflow_dispatch:
+    inputs:
+      slots:
+        description: 'Parallel runners to sample (JSON array)'
+        required: false
+        default: '[1,2,3,4,5,6,7,8]'
+  push:
+    branches: [diag/cross-runner-fingerprints]
+    paths:
+      - '.github/workflows/diag-cross-runner-fingerprint.yml'
+      - 'tests/onnx_cross_runner_fingerprint.rs'
+
+permissions:
+  contents: read
+
+jobs:
+  fingerprint:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: ${{ fromJSON(github.event.inputs.slots || '[1,2,3,4,5,6,7,8]') }}
+    name: fingerprint-${{ matrix.slot }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+          save-if: false
+
+      - name: CPU identity
+        run: |
+          mkdir -p fp
+          { lscpu; echo; grep -m1 '^model name' /proc/cpuinfo; grep -m1 '^flags' /proc/cpuinfo; nproc; } | tee fp/cpu.txt
+          echo "## slot ${{ matrix.slot }}" >> "$GITHUB_STEP_SUMMARY"
+          grep -m1 '^model name' /proc/cpuinfo >> "$GITHUB_STEP_SUMMARY"
+          echo -n "isa: " >> "$GITHUB_STEP_SUMMARY"
+          grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^(avx2|fma|avx512f|avx512bw|avx512_vnni|avx_vnni|amx_int8|amx_bf16|avx512_bf16|avx512_fp16)$' | paste -sd, >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-dev libclang-dev clang
+
+      - name: Cache GLiNER typer assets
+        id: gliner-cache
+        uses: actions/cache@v6
+        with:
+          path: models/gliner-bi-edge
+          key: gliner-bi-edge-onnx-v1
+      - name: Fetch GLiNER typer assets
+        if: steps.gliner-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p models/gliner-bi-edge
+          gh release download gliner-bi-edge-onnx-v1 --repo "$GITHUB_REPOSITORY" --dir models/gliner-bi-edge
+
+      - name: Cache MiniLM embedder weights
+        id: minilm-cache
+        uses: actions/cache@v6
+        with:
+          path: models/minilm-l6
+          key: minilm-l6-c9745ed1-v1
+      - name: Fetch MiniLM embedder weights
+        if: steps.minilm-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p models/minilm-l6
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o models/minilm-l6/model_quantized.onnx "$BASE/onnx/model_quint8_avx2.onnx"
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o models/minilm-l6/tokenizer.json "$BASE/tokenizer.json"
+
+      - name: Cache cross-encoder assets
+        id: ce-cache
+        uses: actions/cache@v6
+        with:
+          path: models/cross-encoder-ms-marco-minilm-l6
+          key: ce-ms-marco-minilm-l6-233902d2-int8-v1
+      - name: Fetch cross-encoder assets
+        if: steps.ce-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          CE=models/cross-encoder-ms-marco-minilm-l6
+          mkdir -p "$CE"
+          BASE="https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2/resolve/233902d25c440f23af6f7d6e94d2946bac0bee0a"
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o "$CE/model_quint8_avx2.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o "$CE/tokenizer.json" "$BASE/tokenizer.json"
+
+      - name: Verify model assets
+        run: |
+          sha256sum models/minilm-l6/model_quantized.onnx models/gliner-bi-edge/model.onnx \
+            models/gliner-bi-edge/label_embeddings.bin models/cross-encoder-ms-marco-minilm-l6/model_quint8_avx2.onnx \
+            | tee fp/models.sha256
+
+      - name: Run fingerprint probe
+        env:
+          SHODH_MODEL_PATH: ${{ github.workspace }}/models/minilm-l6
+          SHODH_GLINER_MODEL_PATH: ${{ github.workspace }}/models/gliner-bi-edge
+          SHODH_CE_MODEL_PATH: ${{ github.workspace }}/models/cross-encoder-ms-marco-minilm-l6
+          SHODH_ONNX_THREADS: '1'
+          RAYON_NUM_THREADS: '1'
+          SHODH_FINGERPRINT_OUT: ${{ github.workspace }}/fp/fingerprint.jsonl
+        run: |
+          set -o pipefail
+          cargo test --release --test onnx_cross_runner_fingerprint -- --ignored --nocapture 2>&1 | tee fp/probe.log
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo '```'
+            grep -E '"stage":"(env|minilm_all|distance|gliner_all|ce_all|runtime)"' fp/fingerprint.jsonl || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload fingerprint
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fingerprint-${{ matrix.slot }}
+          path: fp/
+          retention-days: 14
