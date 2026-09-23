@@ -171,7 +171,7 @@ fn cross_runner_fingerprint() {
         }
         emit(serde_json::json!({
             "stage": "minilm", "i": i, "dim": e.len(),
-            "sha256": sha256_f32(&e), "head": head_bits(&e, 6),
+            "sha256": sha256_f32(&e), "head": head_bits(&e, 6), "all": head_bits(&e, e.len()),
         }));
         embeddings.push(e);
     }
@@ -233,7 +233,7 @@ fn cross_runner_fingerprint() {
         let scores: Vec<f32> = spans.iter().map(|s| s.score).collect();
         emit(serde_json::json!({
             "stage": "gliner", "i": i, "n_spans": spans.len(),
-            "sha256": sha256_str(&line), "score_head": head_bits(&scores, 6),
+            "sha256": sha256_str(&line), "score_head": head_bits(&scores, scores.len()),
             "spans_head": spans.iter().take(4).map(|s| format!("{}:{}", s.text, s.fine_label)).collect::<Vec<_>>(),
         }));
     }
@@ -273,7 +273,7 @@ fn cross_runner_fingerprint() {
         }
         emit(serde_json::json!({
             "stage": "ce", "i": i, "n": scores.len(),
-            "sha256": sha256_f32(&scores), "head": head_bits(&scores, 8),
+            "sha256": sha256_f32(&scores), "head": head_bits(&scores, 8), "all": head_bits(&scores, scores.len()),
         }));
     }
     emit(serde_json::json!({
