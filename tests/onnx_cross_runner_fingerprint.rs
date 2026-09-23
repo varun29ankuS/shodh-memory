@@ -120,7 +120,8 @@ fn cross_runner_fingerprint() {
         }
     }
 
-    let out_path = std::env::var("SHODH_FINGERPRINT_OUT").unwrap_or_else(|_| "fingerprint.jsonl".into());
+    let out_path =
+        std::env::var("SHODH_FINGERPRINT_OUT").unwrap_or_else(|_| "fingerprint.jsonl".into());
     let mut out = std::fs::File::create(&out_path).expect("create fingerprint output");
     let mut emit = |v: serde_json::Value| {
         let line = v.to_string();
@@ -153,7 +154,10 @@ fn cross_runner_fingerprint() {
     // ---- MiniLM (quint8_avx2 dynamic-quantised export) ----
     let embed_cfg = EmbeddingConfig::from_env();
     let embedder = MiniLMEmbedder::new(embed_cfg.clone()).expect("load MiniLM");
-    assert!(embedder.is_model_loaded(), "MiniLM must be the real ONNX model, not simplified");
+    assert!(
+        embedder.is_model_loaded(),
+        "MiniLM must be the real ONNX model, not simplified"
+    );
     let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
     let mut all = Sha256::new();
     for (i, t) in texts.iter().enumerate() {
@@ -201,7 +205,10 @@ fn cross_runner_fingerprint() {
     // ---- GLiNER bi-edge (fp32 export) ----
     let gl_cfg = GlinerConfig::from_env();
     let typer = GlinerTyper::new(gl_cfg.clone());
-    assert!(typer.is_available(), "GLiNER must be loadable — refusing to fingerprint the fallback NER");
+    assert!(
+        typer.is_available(),
+        "GLiNER must be loadable — refusing to fingerprint the fallback NER"
+    );
     let mut gl_all = String::new();
     for (i, t) in texts.iter().enumerate() {
         let spans = typer.try_extract(t).expect("gliner extract");

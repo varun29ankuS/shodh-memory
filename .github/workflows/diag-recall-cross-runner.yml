@@ -1,0 +1,153 @@
+# Cross-runner recall stage export (diagnostic).
+#
+# The locomo-gate run of recall.yml, on N runners in parallel with a single
+# repeat, with SHODH_STAGE_EXPORT writing every stage's fingerprint (stored
+# embedding bytes, NER spans, graph node/edge sets, per-leg candidate lists
+# with score bits, rerank pool, cross-encoder scores, final ranks) next to
+# the runner's CPU identity, the binary's sha256 and the loaded ONNX
+# Runtime's sha256. Diff two slots that landed on different CPUs and the
+# first record that differs names the first divergent stage.
+name: diag — recall cross-runner stages
+on:
+  workflow_dispatch:
+    inputs:
+      slots:
+        description: 'Parallel runners to sample (JSON array)'
+        required: false
+        default: '[1,2,3,4]'
+  push:
+    branches: [diag/cross-runner-fingerprints]
+    paths:
+      - '.github/workflows/diag-recall-cross-runner.yml'
+      - 'src/recall_harness/runner.rs'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  stages:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: ${{ fromJSON(github.event.inputs.slots || '[1,2,3,4]') }}
+    name: stages-${{ matrix.slot }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+          save-if: false
+
+      - name: CPU identity
+        run: |
+          mkdir -p diag
+          { lscpu; echo; grep -m1 '^model name' /proc/cpuinfo; grep -m1 '^flags' /proc/cpuinfo; nproc; } | tee diag/cpu.txt
+          echo "## slot ${{ matrix.slot }}" >> "$GITHUB_STEP_SUMMARY"
+          grep -m1 '^model name' /proc/cpuinfo >> "$GITHUB_STEP_SUMMARY"
+          echo -n "isa: " >> "$GITHUB_STEP_SUMMARY"
+          grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^(avx2|fma|avx512f|avx512bw|avx512_vnni|avx_vnni|amx_int8|amx_bf16|avx512_bf16|avx512_fp16)$' | paste -sd, >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-dev libclang-dev clang
+
+      - name: Cache GLiNER typer assets
+        id: gliner-cache
+        uses: actions/cache@v6
+        with:
+          path: models/gliner-bi-edge
+          key: gliner-bi-edge-onnx-v1
+      - name: Fetch GLiNER typer assets
+        if: steps.gliner-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p models/gliner-bi-edge
+          gh release download gliner-bi-edge-onnx-v1 --repo "$GITHUB_REPOSITORY" --dir models/gliner-bi-edge
+
+      - name: Cache MiniLM embedder weights
+        id: minilm-cache
+        uses: actions/cache@v6
+        with:
+          path: models/minilm-l6
+          key: minilm-l6-c9745ed1-v1
+      - name: Fetch MiniLM embedder weights
+        if: steps.minilm-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p models/minilm-l6
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o models/minilm-l6/model_quantized.onnx "$BASE/onnx/model_quint8_avx2.onnx"
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o models/minilm-l6/tokenizer.json "$BASE/tokenizer.json"
+
+      - name: Cache cross-encoder assets
+        id: ce-cache
+        uses: actions/cache@v6
+        with:
+          path: models/cross-encoder-ms-marco-minilm-l6
+          key: ce-ms-marco-minilm-l6-233902d2-int8-v1
+      - name: Fetch cross-encoder assets
+        if: steps.ce-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          CE=models/cross-encoder-ms-marco-minilm-l6
+          mkdir -p "$CE"
+          BASE="https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2/resolve/233902d25c440f23af6f7d6e94d2946bac0bee0a"
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o "$CE/model_quint8_avx2.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o "$CE/tokenizer.json" "$BASE/tokenizer.json"
+
+      - name: Verify model assets
+        run: |
+          sha256sum models/minilm-l6/model_quantized.onnx models/gliner-bi-edge/model.onnx \
+            models/gliner-bi-edge/label_embeddings.bin models/cross-encoder-ms-marco-minilm-l6/model_quint8_avx2.onnx \
+            | tee diag/models.sha256
+
+      - name: Build recall-eval
+        run: |
+          cargo build --release --bin recall-eval
+          sha256sum target/release/recall-eval | tee diag/binary.sha256
+
+      - name: Run locomo-gate once with stage export
+        env:
+          SHODH_MODEL_PATH: ${{ github.workspace }}/models/minilm-l6
+          SHODH_GLINER_MODEL_PATH: ${{ github.workspace }}/models/gliner-bi-edge
+          SHODH_CE_RERANK: '1'
+          SHODH_CE_MODEL_PATH: ${{ github.workspace }}/models/cross-encoder-ms-marco-minilm-l6
+          SHODH_STAGE_TIMING: '1'
+          SHODH_STAGE_EXPORT: ${{ github.workspace }}/diag/stages.jsonl
+        run: |
+          set -o pipefail
+          ./target/release/recall-eval \
+            --suite locomo-gate \
+            --layer full \
+            --repeats 1 \
+            --output diag/current.json \
+            --per-case-output diag/per-case.json \
+            --storage ./recall-storage 2>&1 | tr '\r' '\n' | grep -v 'ONNX Runtime  ' | tee diag/recall-eval.log
+          find ~/.cache/shodh-memory -name 'libonnxruntime*' -type f -exec sha256sum {} \; | tee diag/ort.sha256
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo '```'
+            cat diag/binary.sha256 diag/ort.sha256 2>/dev/null || true
+            grep -E '"kind":"graph"' diag/stages.jsonl | python3 -c 'import json,sys; [print({k:v for k,v in json.loads(l).items() if not isinstance(v,list)}) for l in sys.stdin]' || true
+            grep -E '^  (full|latency p50)' diag/recall-eval.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload stage export
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: stages-${{ matrix.slot }}
+          path: diag/
+          retention-days: 14
