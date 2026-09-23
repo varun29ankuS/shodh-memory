@@ -811,6 +811,13 @@ impl RRFusion {
         // pure function of the corpus, so a run of equal scores is ordered by
         // it; the id then only separates byte-identical texts, where either
         // order is equivalent. The lookup runs only inside runs of two or more.
+        //
+        // Cost, settled: with the live weights (0.35/0.40) and k = 45, at most
+        // eight (bm25 rank, vector rank) pairs can tie exactly in f32 for one
+        // query, so this is at most ~16 lazy storage reads. The gate's
+        // per-stage timing with this in place put the whole fusion stage at
+        // 0.64 ms p50 (run 35761020588). An in-memory content-hash key on the
+        // id mapping was considered and is not worth its schema change.
         let mut results: Vec<_> = scores.into_iter().collect();
         results.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         crate::memory::order_ties_by_content(

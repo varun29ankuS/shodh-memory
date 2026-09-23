@@ -182,12 +182,14 @@ This is based on [Cowan's working memory model](https://doi.org/10.1177/09637214
 | Store memory (API response) | <200ms |
 | Store memory (core) | 55-60ms |
 | Semantic search, reranking off (`SHODH_CE_RERANK=0`) | 34-58ms |
-| Cross-encoder rerank of the top 30 (server default) | +64ms p50, +106ms p95 (int8, release build, CI runner, 100-query LoCoMo gate) |
+| Cross-encoder rerank of the top 30 (server default) | +156ms p50, +216ms p95 end to end (76→232 p50, 79→295 p95; int8, release build, CI runner, 100-query LoCoMo gate). The cross-encoder itself is ~190ms mean per query, 83% of query time |
 | Tag search | ~1ms |
 | Entity lookup | 763ns |
 | Graph traversal (3-hop) | 30µs |
 
 Single binary. No GPU required. Content-hash dedup ensures identical memories are never stored twice.
+
+The reranker numbers are an order of magnitude, not a promise: on identical code, runner speed moved the gate's p50 by up to 2.3× between runs (140 to 544ms). The gate now runs with per-stage timing on (`SHODH_STAGE_TIMING=1`, `STAGE_TIMING` rows in its `recall-eval.log`), which is how the cost above is attributed to the cross-encoder rather than to the runner.
 
 ## 51 MCP Tools
 
