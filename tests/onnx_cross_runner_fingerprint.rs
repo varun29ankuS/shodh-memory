@@ -154,14 +154,18 @@ fn cross_runner_fingerprint() {
     // ---- MiniLM (quint8_avx2 dynamic-quantised export) ----
     let embed_cfg = EmbeddingConfig::from_env();
     let embedder = MiniLMEmbedder::new(embed_cfg.clone()).expect("load MiniLM");
-    assert!(
-        embedder.is_model_loaded(),
-        "MiniLM must be the real ONNX model, not simplified"
-    );
     let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
     let mut all = Sha256::new();
     for (i, t) in texts.iter().enumerate() {
         let e = embedder.encode(t).expect("encode");
+        // The session is lazy: it exists only after the first encode. The
+        // simplified (hash) embedder needs an explicit env opt-in the workflow
+        // never sets, but a fingerprint of hashes would still diff clean, so
+        // refuse to record one.
+        assert!(
+            embedder.is_model_loaded(),
+            "MiniLM must be the real ONNX model, not simplified"
+        );
         for v in &e {
             all.update(v.to_le_bytes());
         }
