@@ -836,7 +836,10 @@ pub fn compare_to_baseline(
             return vec![Failure {
                 kind: "infrastructure".to_string(),
                 detail: format!(
-                    "{which} report does not record whether it reranked with the                      cross-encoder; the reranker moves p@1 by about 15pp, so a run of unknown                      setting is not diffable. Regenerate the baseline as                      tests/recall/README.md describes"
+                    "{which} report does not record whether it reranked with the \
+                     cross-encoder; the reranker moves p@1 by about 15pp, so a run of \
+                     unknown setting is not diffable. Regenerate the baseline as \
+                     tests/recall/README.md describes"
                 ),
             }];
         }
@@ -848,7 +851,9 @@ pub fn compare_to_baseline(
         return vec![Failure {
             kind: "infrastructure".to_string(),
             detail: format!(
-                "reranker setting differs: baseline {}, current {}. These are two                  pipelines, so their difference is not a regression or an improvement of                  either. Compare against a baseline recorded under the same setting",
+                "reranker setting differs: baseline {}, current {}. These are two \
+                 pipelines, so their difference is not a regression or an improvement \
+                 of either. Compare against a baseline recorded under the same setting",
                 base_rerank.describe(),
                 cur_rerank.describe()
             ),
