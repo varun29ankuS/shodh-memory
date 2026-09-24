@@ -47,6 +47,40 @@ pub struct KernelClass {
     pub features: Vec<String>,
 }
 
+/// The cross-encoder setting a run measured under.
+///
+/// Reranking is off in the library and on in the server (#562), and it moves p@1 by about
+/// 15pp on the gate. The workflow's `ce_rerank=0` dispatch measures the library default on
+/// purpose. Compared against the reranked baseline, that run reads as a large regression
+/// that no code change caused. Depth decides which candidates the reranker sees, so two
+/// depths are two pipelines as well.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RerankSetting {
+    /// `SHODH_CE_RERANK` as `recall()` reads it.
+    pub enabled: bool,
+    /// Candidates the reranker rescores (`SHODH_CE_DEPTH`). Recorded either way, but
+    /// only compared when both runs rerank: an unreranked run never reads it.
+    pub depth: usize,
+}
+
+impl RerankSetting {
+    /// The setting `recall()` will run under in this process.
+    pub fn current() -> Self {
+        Self {
+            enabled: crate::memory::ce_rerank_enabled(),
+            depth: crate::memory::ce_depth(),
+        }
+    }
+
+    fn describe(&self) -> String {
+        if self.enabled {
+            format!("cross-encoder on, depth {}", self.depth)
+        } else {
+            "cross-encoder off".to_string()
+        }
+    }
+}
+
 impl KernelClass {
     /// Detect the class of the machine this process runs on.
     pub fn detect() -> Self {
@@ -121,6 +155,11 @@ pub struct Report {
     /// which class produced them.
     #[serde(default)]
     pub kernel: KernelClass,
+    /// Whether the run reranked with the cross-encoder, and at what depth. `None` on
+    /// reports written before this field existed, which [`compare_to_baseline`] refuses:
+    /// "not recorded" is not the same as "off".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerank: Option<RerankSetting>,
     /// Git SHA of the working tree the run was produced from.
     pub git_sha: String,
     /// RFC3339 timestamp at the start of the run.
@@ -790,6 +829,36 @@ pub fn compare_to_baseline(
             ),
         }];
     }
+    let (base_rerank, cur_rerank) = match (baseline.rerank, current.rerank) {
+        (Some(b), Some(c)) => (b, c),
+        (b, _) => {
+            let which = if b.is_none() { "baseline" } else { "current" };
+            return vec![Failure {
+                kind: "infrastructure".to_string(),
+                detail: format!(
+                    "{which} report does not record whether it reranked with the \
+                     cross-encoder; the reranker moves p@1 by about 15pp, so a run of \
+                     unknown setting is not diffable. Regenerate the baseline as \
+                     tests/recall/README.md describes"
+                ),
+            }];
+        }
+    };
+    let depth_matters = base_rerank.enabled && cur_rerank.enabled;
+    if base_rerank.enabled != cur_rerank.enabled
+        || (depth_matters && base_rerank.depth != cur_rerank.depth)
+    {
+        return vec![Failure {
+            kind: "infrastructure".to_string(),
+            detail: format!(
+                "reranker setting differs: baseline {}, current {}. These are two \
+                 pipelines, so their difference is not a regression or an improvement \
+                 of either. Compare against a baseline recorded under the same setting",
+                base_rerank.describe(),
+                cur_rerank.describe()
+            ),
+        }];
+    }
     let Some(base_full) = baseline.layers.get("full") else {
         return vec![Failure {
             kind: "infrastructure".to_string(),
@@ -1216,6 +1285,10 @@ mod tests {
                 cpu_model: "AMD EPYC 7763 64-Core Processor".to_string(),
                 features: vec!["avx".into(), "avx2".into(), "fma".into()],
             },
+            rerank: Some(RerankSetting {
+                enabled: true,
+                depth: 30,
+            }),
             git_sha: "deadbeef".to_string(),
             timestamp: chrono::Utc::now(),
             layers,
@@ -1361,6 +1434,98 @@ mod tests {
             };
             assert_eq!(k.class, expected, "{k:?}");
         }
+    }
+
+    /// A `ce_rerank=0` dispatch against the reranked baseline is two pipelines, not a
+    /// regression. The current side would fail every gate, so a comparison that ran would show.
+    #[test]
+    fn different_rerank_setting_refuses_before_any_metric_is_compared() {
+        let baseline = report_with_full(0.6, 0.7, 0.5, 0.4);
+        let mut current = report_with_full(0.1, 0.1, 0.1, 0.1);
+        current.rerank = Some(RerankSetting {
+            enabled: false,
+            depth: 30,
+        });
+        let failures = compare_to_baseline(&baseline, &current, 2.0);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert_eq!(failures[0].kind, "infrastructure");
+        let detail = &failures[0].detail;
+        assert!(detail.contains("reranker setting differs"), "{detail}");
+        assert!(detail.contains("cross-encoder on, depth 30"), "{detail}");
+        assert!(detail.contains("cross-encoder off"), "{detail}");
+    }
+
+    /// Depth decides which candidates the reranker sees, so two depths are refused too.
+    #[test]
+    fn different_rerank_depth_refuses_when_both_rerank() {
+        let baseline = report_with_full(0.6, 0.7, 0.5, 0.4);
+        let mut current = report_with_full(0.6, 0.7, 0.5, 0.4);
+        current.rerank = Some(RerankSetting {
+            enabled: true,
+            depth: 100,
+        });
+        let failures = compare_to_baseline(&baseline, &current, 2.0);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert_eq!(failures[0].kind, "infrastructure");
+        assert!(
+            failures[0].detail.contains("depth 100"),
+            "{}",
+            failures[0].detail
+        );
+    }
+
+    /// Without reranking, `SHODH_CE_DEPTH` is never read, so a differing depth is not a
+    /// different pipeline and the comparison runs.
+    #[test]
+    fn rerank_depth_is_ignored_when_neither_side_reranks() {
+        let mut baseline = report_with_full(0.6, 0.7, 0.5, 0.4);
+        let mut current = report_with_full(0.57, 0.7, 0.5, 0.4);
+        baseline.rerank = Some(RerankSetting {
+            enabled: false,
+            depth: 30,
+        });
+        current.rerank = Some(RerankSetting {
+            enabled: false,
+            depth: 100,
+        });
+        let failures = compare_to_baseline(&baseline, &current, 2.0);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert_eq!(failures[0].kind, "regression");
+    }
+
+    /// Not recorded is refused on either side: it is not the same as off.
+    #[test]
+    fn unrecorded_rerank_setting_is_refused_on_either_side() {
+        let set = Some(RerankSetting {
+            enabled: true,
+            depth: 30,
+        });
+        for (b, c) in [(None, set), (set, None), (None, None)] {
+            let mut baseline = report_with_full(0.6, 0.7, 0.5, 0.4);
+            let mut current = report_with_full(0.6, 0.7, 0.5, 0.4);
+            baseline.rerank = b;
+            current.rerank = c;
+            let failures = compare_to_baseline(&baseline, &current, 2.0);
+            assert_eq!(failures.len(), 1, "{b:?} vs {c:?}: {failures:?}");
+            assert_eq!(failures[0].kind, "infrastructure");
+            assert!(
+                failures[0]
+                    .detail
+                    .contains("does not record whether it reranked"),
+                "{}",
+                failures[0].detail
+            );
+        }
+    }
+
+    /// The baseline checked in before this field existed has no `rerank` key. It must
+    /// parse, as not recorded.
+    #[test]
+    fn report_without_rerank_key_parses_as_unrecorded() {
+        let mut v = serde_json::to_value(report_with_full(0.6, 0.7, 0.5, 0.4)).unwrap();
+        v.as_object_mut().unwrap().remove("rerank");
+        let parsed: Report = serde_json::from_value(v).expect("old report must parse");
+        assert_eq!(parsed.rerank, None);
     }
 
     /// A report of unknown provenance is refused on either side, even against another unknown.

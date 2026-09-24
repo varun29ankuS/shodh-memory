@@ -1231,6 +1231,11 @@ fn summarise(report: &Report) {
         report.kernel.cpu_model,
         report.kernel.features.join(",")
     );
+    match report.rerank {
+        Some(r) if r.enabled => eprintln!("recall-eval: rerank=cross-encoder depth={}", r.depth),
+        Some(_) => eprintln!("recall-eval: rerank=off"),
+        None => eprintln!("recall-eval: rerank=<not recorded>"),
+    }
     // Print modes in pipeline order (vamana_only → full), not BTreeMap order.
     // Match against the canonical mode keys so any unknown key just falls
     // through to the BTreeMap iteration at the bottom.

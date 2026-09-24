@@ -315,6 +315,36 @@ def kernel_note(baseline: dict[str, Any], current: dict[str, Any]) -> list[str]:
     return lines
 
 
+def rerank_note(baseline: dict[str, Any], current: dict[str, Any]) -> list[str]:
+    """Say whether each side reranked with the cross-encoder, and warn when they differ.
+
+    The reranker moves p@1 by about 15pp, so a `ce_rerank=0` run against the
+    reranked baseline reads as a large regression no code caused. The Rust
+    comparator refuses that pair; this says why in the comment.
+    """
+    def describe(report: dict[str, Any]) -> tuple[Any, str]:
+        r = report.get("rerank")
+        if not isinstance(r, dict) or "enabled" not in r:
+            return None, "not recorded"
+        if r["enabled"]:
+            return (True, r.get("depth")), f"cross-encoder on, depth {r.get('depth')}"
+        return (False, None), "cross-encoder off"
+
+    base_key, base_desc = describe(baseline)
+    cur_key, cur_desc = describe(current)
+    lines = [f"Reranker: baseline {base_desc} → current {cur_desc}"]
+    if base_key is None or cur_key is None or base_key != cur_key:
+        lines += [
+            "",
+            "> [!WARNING]",
+            "> **Not comparable: the two runs used different, or unrecorded, reranker "
+            "settings.** They measure two pipelines, so the numbers below are not a "
+            "regression or an improvement of either. The gate refuses this comparison "
+            "as infrastructure.",
+        ]
+    return lines
+
+
 def render(
     baseline: dict[str, Any],
     current: dict[str, Any],
@@ -332,6 +362,7 @@ def render(
         f"({current.get('embedder', '?')}) · tolerance **{tolerance_pct:.1f}%**"
     )
     lines.extend(kernel_note(baseline, current))
+    lines.extend(rerank_note(baseline, current))
     base_repeats = baseline.get("repeats", 1)
     cur_repeats = current.get("repeats", 1)
     lines.append(

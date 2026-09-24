@@ -58,11 +58,15 @@ that much and still pass.
    5 repeats, `ce_rerank=1`). The gate measures the pipeline the server
    ships, which reranks with the cross-encoder by default, so the baseline is
    recorded with it on. `-f ce_rerank=0` measures the library default for
-   comparison and must not be committed as the baseline.
+   comparison and must not be committed as the baseline. Each report records
+   the setting as `rerank` (`enabled`, `depth`), and `recall-eval` refuses to
+   compare two settings as `infrastructure`, so such a run cannot pass or
+   fail the gate by accident.
 2. `gh run download <run-id> -n recall-eval-report`.
 3. Copy `current.json` to `locomo-gate-baseline.json` and `per-case.json` to
    `locomo-gate-baseline.per-case.json`. Check that `git_sha` names the main
-   commit you meant, that `repeats` is 5, and that `kernel.class` is
+   commit you meant, that `repeats` is 5, that `rerank` is
+   `{"enabled": true, "depth": 30}`, and that `kernel.class` is
    `x86_64-avx2-fma`. That is the most common class in the pool, so it is
    the one PR runs land on most often. If the run landed on another class,
    dispatch again.
@@ -211,3 +215,4 @@ share more than `full`.
 | 2026-08-08 | `ec7abd2` | minilm-l6-v2   | `locomo-gate` aggregate baseline, 1 repeat, no per-case file. |
 | 2026-09-22 | `cef6721` | minilm-l6-v2   | `locomo-gate` + per-case, 5 repeats (workflow run 35693977402). After #509 (keyphrases stop becoming graph nodes; q62 lost, q46/q52 gained) and #560 (BM25 stemming; q62, q129, q85 gained, 18 rank-only moves, none lost). recall@10 0.5268 → 0.5618, ndcg@10 0.4111 → 0.4248, p@1 0.31 → 0.31. |
 | 2026-09-24 | `628cbeb` | minilm-l6-v2   | `locomo-gate` + per-case, 5 repeats, cross-encoder on, **kernel class `x86_64-avx2-fma`** (AMD EPYC 7763, workflow run 35956028151). First baseline recorded with the reranker on and the first to record its CPU kernel class. Measured on the PR branch that adds the class field, because a baseline without the field is refused, so it could not come from main first. Per-case results are identical to main `681b2d8` on an AVX2 runner (run 35891724716, 0 of 100 differ). `failures` was cleared by hand: it held that run's refusal of the previous class-less baseline. 43 cases moved vs `cef6721`: 14 gained gold, 3 lost gold (q125, q30, q43), p@1 +13/−1 (q62), 12 rank-only. recall@10 0.5618 → 0.6368, ndcg@10 0.4248 → 0.5409, mrr 0.4042 → 0.5372, p@1 0.31 → 0.46. Latency p50 535 ms. AVX2 runners are the slow class: the same tree ran at 216–240 ms p50 on AVX-512 runners. |
+| 2026-09-24 | `16b8bd5` | minilm-l6-v2   | `locomo-gate` + per-case, 5 repeats, cross-encoder on (depth 30), kernel class `x86_64-avx2-fma` (AMD EPYC 7763, workflow run 35982968874). Re-recorded so the report carries its `rerank` setting. It was measured on the branch that adds the field, because a baseline without it is refused. Per-case results are identical to the previous baseline (0 of 100 differ), and metrics are unchanged. `failures` was cleared by hand: it held that run's refusal of the previous baseline. |
