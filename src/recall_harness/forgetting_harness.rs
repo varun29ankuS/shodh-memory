@@ -27,7 +27,8 @@ use crate::recall_harness::report::{
     DecayReport, DecayRow, SelectiveForgettingReport, SelectiveForgettingRow,
 };
 use crate::recall_harness::runner::{
-    build_manager, ingest_corpus, run_smoke_suite_with_ranks, RunInputs, EVAL_USER,
+    build_manager, ingest_corpus, pin_harness_threads, run_smoke_suite_with_ranks, RunInputs,
+    EVAL_USER,
 };
 
 /// Default age points (days) for the stability curve.
@@ -199,6 +200,9 @@ pub fn analyze_selective_forgetting(
     ages: &[f64],
     reinforce_cycles: usize,
 ) -> Result<SelectiveForgettingReport> {
+    // Held for the whole analysis: build_manager's pin covers only construction,
+    // and the queries below need the frozen clock and single-threaded runtimes.
+    let _harness_env = pin_harness_threads();
     let fx = generate_selective_fixtures(groups);
     let storage = inputs.storage_path.join("selective_forget");
     let manager = build_manager(&storage)?;

@@ -19,6 +19,7 @@ from recall_diff import (
     QUANTIZED_METRICS,
     case_counts,
     classify_case_moves,
+    kernel_note,
     load_per_case,
     render,
     render_case_moves,
@@ -236,11 +237,39 @@ class TestCaseMoves:
         assert "Cases that moved vs baseline (4)" in text
 
 
+class TestKernelNote:
+    AVX2 = {"class": "x86_64-avx2-fma", "cpu_model": "AMD EPYC 7763 64-Core Processor"}
+    AVX512 = {"class": "x86_64-avx512f", "cpu_model": "INTEL(R) XEON(R) PLATINUM 8573C"}
+
+    def test_same_class_names_both_and_does_not_warn(self):
+        lines = kernel_note({"kernel": self.AVX2}, {"kernel": dict(self.AVX2, cpu_model="AMD EPYC 9V74")})
+        assert "`x86_64-avx2-fma` (AMD EPYC 7763" in lines[0]
+        assert "AMD EPYC 9V74" in lines[0]
+        assert not any("Not comparable" in l for l in lines)
+
+    def test_different_class_warns(self):
+        lines = kernel_note({"kernel": self.AVX2}, {"kernel": self.AVX512})
+        assert any("Not comparable" in l for l in lines)
+
+    def test_unrecorded_class_on_either_side_warns(self):
+        # Baselines written before the field existed have no `kernel` key.
+        for base, cur in (({}, {"kernel": self.AVX2}), ({"kernel": self.AVX2}, {}), ({}, {})):
+            lines = kernel_note(base, cur)
+            assert "not recorded" in lines[0]
+            assert any("Not comparable" in l for l in lines)
+
+    def test_render_carries_the_note(self):
+        report = {"layers": {"full": {m: 0.5 for m in ("ndcg@10", "recall@10", "mrr", "p@1")}}}
+        text = render(dict(report, kernel=self.AVX2), dict(report, kernel=self.AVX512), 2.0, None)
+        assert "CPU kernel class: baseline `x86_64-avx2-fma`" in text
+        assert "Not comparable" in text
+
+
 if __name__ == "__main__":
     # A plain runner, because this repo ships no python test dependency and a
     # test that cannot be run is documentation.
     failed = 0
-    for cls in (TestCaseCounts, TestResolutionNote, TestCaseMoves):
+    for cls in (TestCaseCounts, TestResolutionNote, TestCaseMoves, TestKernelNote):
         instance = cls()
         for name in sorted(n for n in dir(cls) if n.startswith("test_")):
             try:

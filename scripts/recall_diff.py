@@ -283,6 +283,38 @@ def fmt_latency(base: float, cur: float) -> str:
 COMMENT_MARKER = "<!-- recall-harness-comment-marker:rh-5 -->"
 
 
+def kernel_note(baseline: dict[str, Any], current: dict[str, Any]) -> list[str]:
+    """Say which CPU kernel class each side ran on, and warn when they differ.
+
+    ONNX Runtime picks its fp32 kernels by CPUID, so identical code ranks
+    differently on an AVX-512 runner and an AVX2-only one. The Rust comparator
+    refuses such a pair as `infrastructure`; this makes the comment say why,
+    so nobody reads the case list below it as something the change did.
+    """
+    def describe(report: dict[str, Any]) -> tuple[str, str]:
+        kernel = report.get("kernel")
+        if not isinstance(kernel, dict) or not kernel.get("class"):
+            return "", "not recorded"
+        model = kernel.get("cpu_model") or "unknown CPU"
+        return kernel["class"], f"`{kernel['class']}` ({model})"
+
+    base_class, base_desc = describe(baseline)
+    cur_class, cur_desc = describe(current)
+    lines = [f"CPU kernel class: baseline {base_desc} → current {cur_desc}"]
+    if not base_class or not cur_class or base_class != cur_class:
+        lines += [
+            "",
+            "> [!WARNING]",
+            "> **Not comparable: the two runs used different, or unrecorded, CPU "
+            "kernel classes.** Identical code ranks differently across classes, "
+            "so any case listed below may have moved because of the runner, not "
+            "the change. The gate refuses this comparison as infrastructure. "
+            "Re-run the job until it lands on the baseline's class, or regenerate "
+            "the baseline (tests/recall/README.md).",
+        ]
+    return lines
+
+
 def render(
     baseline: dict[str, Any],
     current: dict[str, Any],
@@ -299,6 +331,7 @@ def render(
         f"current `{current.get('git_sha', '?')[:7]}` "
         f"({current.get('embedder', '?')}) · tolerance **{tolerance_pct:.1f}%**"
     )
+    lines.extend(kernel_note(baseline, current))
     base_repeats = baseline.get("repeats", 1)
     cur_repeats = current.get("repeats", 1)
     lines.append(

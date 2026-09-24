@@ -28,8 +28,8 @@ use super::fixtures::{
 use super::metrics::{paired_bootstrap_ci, Metrics};
 use super::report::{
     aggregate_category, aggregate_layer, median, AblationCaseRow, AblationReport, AblationRow,
-    CategoryReport, DeltaCi, Failure, FunnelReport, FunnelStageRow, GraphStructure, LayerReport,
-    LearningCurveArm, LearningCurveReport, LinkingReport, LinkingRow, PerCaseRecord,
+    CategoryReport, DeltaCi, Failure, FunnelReport, FunnelStageRow, GraphStructure, KernelClass,
+    LayerReport, LearningCurveArm, LearningCurveReport, LinkingReport, LinkingRow, PerCaseRecord,
     ReachabilityCategory, ReachabilityReport, Report, StageRow, StageTimingReport, SMOKE_K,
 };
 
@@ -442,6 +442,7 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
     let report = Report {
         suite: inputs.suite.clone(),
         embedder: EMBEDDER_ID.to_string(),
+        kernel: KernelClass::detect(),
         git_sha: inputs.git_sha.clone(),
         timestamp: chrono::Utc::now(),
         layers,
@@ -1538,22 +1539,21 @@ pub const EVAL_USER: &str = "recall-eval";
 /// activation / lineage / ontology layer disabled. The manager wires a per-user
 /// graph + NER, so the eval exercises the same ingest path production does.
 pub(crate) fn build_manager(storage_path: &Path) -> Result<MultiUserMemoryManager> {
-    // Pin here, not at the entry points. The pinning was applied per analysis
-    // fn and two paths never got it: bridge_harness::ingest_fresh and
-    // forgetting_harness::analyze_selective_forgetting, both called straight
-    // from the recall-eval dispatch. Unpinned they run with ONNX threads at
-    // the PRODUCTION default of 24 on a 4-core runner, rayon on every core,
-    // SHODH_RECALL_READONLY unset so recall MUTATES usage state mid-eval, and
-    // a live scoring clock -- the last two documented in pin_harness_threads
-    // itself as the causes of repeat non-determinism it exists to prevent.
+    // The env has to be pinned while MultiUserMemoryManager::new runs, because
+    // that call initialises the embedder and NER sessions and reads the thread
+    // counts from the env. Unpinned they would take the PRODUCTION default of
+    // 24 ONNX threads on a 4-core runner, whose float reductions accumulate in
+    // a non-deterministic order.
     //
-    // This is the chokepoint rather than ingest_corpus because the env has to
-    // be set before MultiUserMemoryManager::new below, which initialises the
-    // embedder and reads the thread counts. Every measurement path calls
-    // build_manager, and it is crate-internal to the harness, so the
-    // production server is unaffected. The per-entry-point calls that remain
-    // are now redundant, and harmless: the function only sets what is unset.
-    pin_harness_threads();
+    // The guard is bound for this function only. It restores the env when
+    // build_manager returns, so it covers construction and nothing after it:
+    // the frozen scoring clock and single-threaded rayon that queries rely on
+    // come from the caller's own pin_harness_threads(), held for the whole
+    // measurement. This used to be a bare `pin_harness_threads();` described
+    // as the chokepoint that made the entry-point pins redundant. The guard
+    // was dropped on the same statement, so it pinned nothing, and the entry
+    // points were never redundant.
+    let _harness_env = pin_harness_threads();
     std::fs::create_dir_all(storage_path)
         .with_context(|| format!("creating storage dir {}", storage_path.display()))?;
     MultiUserMemoryManager::new(storage_path.to_path_buf(), ServerConfig::default())

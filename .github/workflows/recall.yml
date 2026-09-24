@@ -205,6 +205,31 @@ jobs:
           echo "BASELINE_SHA=$BASELINE_SHA" >> $GITHUB_ENV
           echo "BASELINE_EMBEDDER=$BASELINE_EMBEDDER" >> $GITHUB_ENV
 
+      - name: Check runner CPU kernel class
+        # ONNX Runtime picks its fp32 kernels by CPUID, so identical code ranks
+        # differently on AVX-512 and AVX2-only runners (see `KernelClass` in
+        # src/recall_harness/report.rs). recall-eval refuses a cross-class
+        # comparison as `infrastructure`, but only after the ~15 minute build
+        # and run. This step applies the same rule from /proc/cpuinfo so a PR
+        # run on the wrong class fails in seconds with a re-run instruction.
+        # recall-eval stays the authority. Manual dispatches are not stopped
+        # here: regenerating a baseline has to be able to measure on any class.
+        run: |
+          flags=" $(grep -m1 '^flags' /proc/cpuinfo | cut -d: -f2) "
+          has() { [[ "$flags" == *" $1 "* ]]; }
+          if has avx512f; then RUNNER_CLASS=x86_64-avx512f
+          elif has avx2 && has fma; then RUNNER_CLASS=x86_64-avx2-fma
+          elif has avx; then RUNNER_CLASS=x86_64-avx
+          else RUNNER_CLASS=x86_64-sse
+          fi
+          CPU_MODEL=$(grep -m1 '^model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^ *//')
+          BASELINE_CLASS=$(jq -r '.kernel.class // ""' tests/recall/locomo-gate-baseline.json)
+          echo "Runner: class=$RUNNER_CLASS cpu=$CPU_MODEL · baseline class=${BASELINE_CLASS:-<not recorded>}"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$BASELINE_CLASS" ] && [ "$RUNNER_CLASS" != "$BASELINE_CLASS" ]; then
+            echo "::error::This runner's CPU kernel class is $RUNNER_CLASS ($CPU_MODEL), and the baseline was recorded on $BASELINE_CLASS. Results are not comparable across classes. Re-run this job; GitHub assigns runner hardware per job."
+            exit 1
+          fi
+
       - name: Build recall-eval
         run: cargo build --release --bin recall-eval
 

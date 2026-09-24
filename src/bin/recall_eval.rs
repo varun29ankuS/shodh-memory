@@ -1225,6 +1225,12 @@ fn summarise(report: &Report) {
         "recall-eval: suite={} cases={} repeats={} embedder={} sha={}",
         report.suite, report.case_count, report.repeats, report.embedder, report.git_sha
     );
+    eprintln!(
+        "recall-eval: kernel_class={} cpu={:?} features={}",
+        report.kernel.class,
+        report.kernel.cpu_model,
+        report.kernel.features.join(",")
+    );
     // Print modes in pipeline order (vamana_only → full), not BTreeMap order.
     // Match against the canonical mode keys so any unknown key just falls
     // through to the BTreeMap iteration at the bottom.

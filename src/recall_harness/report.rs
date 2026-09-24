@@ -20,6 +20,95 @@ pub const SMOKE_K: usize = 10;
 /// value, never a plausible model name, so `compare_to_baseline` can refuse it.
 pub const EMBEDDER_UNKNOWN: &str = "unknown";
 
+/// Which family of floating-point kernels the runner's CPU makes ONNX Runtime compute with.
+///
+/// ONNX Runtime's MLAS picks its fp32 kernels by CPUID at load time, and no environment
+/// variable or session option pins the choice. Where the CPU exposes AVX-512F it swaps the
+/// GEMM, exp and max-reduction kernels (`GemmFloatKernel` Fma3 → Avx512F, and the softmax /
+/// LayerNorm reductions) for ones that accumulate in a different order. So the same model
+/// on the same input gives different low bits on the two families. Measured on the CI fleet
+/// (runs 35901281838 and 35902501577): the MiniLM embedder drifts by up to 1.5e-8, GLiNER by
+/// up to 8 ULP, and the quantized cross-encoder by up to 0.06 in logit, enough to reorder
+/// near-ties. Every runner in one class produced byte-identical results end to end. An
+/// EPYC 9V74 whose hypervisor hid AVX-512 fell in the AVX2 class, so the class is what the
+/// CPU *exposes*, not what the chip is.
+///
+/// `class` is the comparison key. `cpu_model` and `features` are recorded so a mismatch, or
+/// a divergence the class does not explain, can be traced to hardware from the report alone.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct KernelClass {
+    /// `"x86_64-avx512f"`, `"x86_64-avx2-fma"`, `"x86_64-avx"` or `"x86_64-sse"` on x86_64,
+    /// following MLAS's own dispatch order. On other architectures, the architecture name:
+    /// that split has not been measured there, and nothing gates on those machines.
+    pub class: String,
+    /// `model name` from `/proc/cpuinfo`, or empty where that file does not exist.
+    pub cpu_model: String,
+    /// The dispatch-relevant CPU features the runner exposes, in probe order.
+    pub features: Vec<String>,
+}
+
+impl KernelClass {
+    /// Detect the class of the machine this process runs on.
+    pub fn detect() -> Self {
+        let (class, features) = Self::detect_class_and_features();
+        Self {
+            class,
+            cpu_model: Self::cpu_model(),
+            features,
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn detect_class_and_features() -> (String, Vec<String>) {
+        // `is_x86_feature_detected!` checks both CPUID and that the OS saves the
+        // register state (XGETBV), which is the same condition MLAS applies before
+        // taking an AVX or AVX-512 path.
+        let probes = [
+            ("avx", std::is_x86_feature_detected!("avx")),
+            ("avx2", std::is_x86_feature_detected!("avx2")),
+            ("fma", std::is_x86_feature_detected!("fma")),
+            ("avx512f", std::is_x86_feature_detected!("avx512f")),
+            ("avx512bw", std::is_x86_feature_detected!("avx512bw")),
+            ("avx512dq", std::is_x86_feature_detected!("avx512dq")),
+            ("avx512vl", std::is_x86_feature_detected!("avx512vl")),
+            ("avx512vnni", std::is_x86_feature_detected!("avx512vnni")),
+        ];
+        let has = |name: &str| probes.iter().any(|(n, on)| *n == name && *on);
+        let class = if has("avx512f") {
+            "x86_64-avx512f"
+        } else if has("avx2") && has("fma") {
+            "x86_64-avx2-fma"
+        } else if has("avx") {
+            "x86_64-avx"
+        } else {
+            "x86_64-sse"
+        };
+        let features = probes
+            .iter()
+            .filter(|(_, on)| *on)
+            .map(|(n, _)| (*n).to_string())
+            .collect();
+        (class.to_string(), features)
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn detect_class_and_features() -> (String, Vec<String>) {
+        (std::env::consts::ARCH.to_string(), Vec::new())
+    }
+
+    fn cpu_model() -> String {
+        std::fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|info| {
+                info.lines()
+                    .find(|l| l.starts_with("model name"))
+                    .and_then(|l| l.split_once(':'))
+                    .map(|(_, v)| v.trim().to_string())
+            })
+            .unwrap_or_default()
+    }
+}
+
 /// Top-level recall-eval report.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Report {
@@ -27,6 +116,11 @@ pub struct Report {
     pub suite: String,
     /// Embedding model name, e.g. `"minilm-l6-v2"`.
     pub embedder: String,
+    /// The CPU kernel class the run computed on. Reports written before this field existed
+    /// parse with an empty class, which [`compare_to_baseline`] refuses: nobody can say
+    /// which class produced them.
+    #[serde(default)]
+    pub kernel: KernelClass,
     /// Git SHA of the working tree the run was produced from.
     pub git_sha: String,
     /// RFC3339 timestamp at the start of the run.
@@ -665,6 +759,37 @@ pub fn compare_to_baseline(
             ),
         }];
     }
+    // Same reasoning one level down: identical code on the two CPU kernel classes gives
+    // different rankings (see `KernelClass`), so a case that moved across classes may have
+    // moved because of the runner, and nothing in the diff can say which. A report that does
+    // not record its class is refused for the same reason an unknown embedder is.
+    for (which, k) in [("baseline", &baseline.kernel), ("current", &current.kernel)] {
+        if k.class.is_empty() {
+            return vec![Failure {
+                kind: "infrastructure".to_string(),
+                detail: format!(
+                    "{which} report does not record the CPU kernel class it ran on; results \
+                     differ across classes, so a run of unknown class is not diffable. \
+                     Regenerate the baseline as tests/recall/README.md describes"
+                ),
+            }];
+        }
+    }
+    if baseline.kernel.class != current.kernel.class {
+        return vec![Failure {
+            kind: "infrastructure".to_string(),
+            detail: format!(
+                "CPU kernel class differs: baseline {:?} ({}), current {:?} ({}). ONNX Runtime \
+                 picks its fp32 kernels by CPUID, so identical code ranks differently across \
+                 classes. Re-run the job until it lands on a {:?} runner",
+                baseline.kernel.class,
+                baseline.kernel.cpu_model,
+                current.kernel.class,
+                current.kernel.cpu_model,
+                baseline.kernel.class
+            ),
+        }];
+    }
     let Some(base_full) = baseline.layers.get("full") else {
         return vec![Failure {
             kind: "infrastructure".to_string(),
@@ -1086,6 +1211,11 @@ mod tests {
         Report {
             suite: "smoke".to_string(),
             embedder: "test".to_string(),
+            kernel: KernelClass {
+                class: "x86_64-avx2-fma".to_string(),
+                cpu_model: "AMD EPYC 7763 64-Core Processor".to_string(),
+                features: vec!["avx".into(), "avx2".into(), "fma".into()],
+            },
             git_sha: "deadbeef".to_string(),
             timestamp: chrono::Utc::now(),
             layers,
@@ -1145,6 +1275,92 @@ mod tests {
             "{}",
             failures[0].detail
         );
+    }
+
+    /// Two kernel classes, identical numbers: refused, and no metric failure rides along.
+    /// The current side would fail every gate, so a comparison that ran would show it.
+    #[test]
+    fn different_kernel_class_refuses_before_any_metric_is_compared() {
+        let baseline = report_with_full(0.6, 0.7, 0.5, 0.4);
+        let mut current = report_with_full(0.1, 0.1, 0.1, 0.1);
+        current.kernel = KernelClass {
+            class: "x86_64-avx512f".to_string(),
+            cpu_model: "INTEL(R) XEON(R) PLATINUM 8573C".to_string(),
+            features: vec!["avx512f".into()],
+        };
+        let failures = compare_to_baseline(&baseline, &current, 2.0);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert_eq!(failures[0].kind, "infrastructure");
+        let detail = &failures[0].detail;
+        assert!(detail.contains("kernel class differs"), "{detail}");
+        assert!(detail.contains("x86_64-avx2-fma"), "{detail}");
+        assert!(detail.contains("PLATINUM 8573C"), "{detail}");
+    }
+
+    /// Same class on different chips is comparable: the class, not the chip, decides the
+    /// kernels. On the CI fleet an EPYC 7763 and an EPYC 9V74 with AVX-512 hidden gave
+    /// byte-identical results.
+    #[test]
+    fn same_kernel_class_on_a_different_chip_is_compared() {
+        let baseline = report_with_full(0.6, 0.7, 0.5, 0.4);
+        let mut current = report_with_full(0.57, 0.7, 0.5, 0.4);
+        current.kernel.cpu_model = "AMD EPYC 9V74 80-Core Processor".to_string();
+        let failures = compare_to_baseline(&baseline, &current, 2.0);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert_eq!(failures[0].kind, "regression");
+    }
+
+    /// A report that predates the field parses with an empty class and is refused on either
+    /// side. This is the path the first run after this change takes against an old baseline.
+    #[test]
+    fn unrecorded_kernel_class_is_refused_on_either_side() {
+        for (b, c) in [("", "x86_64-avx2-fma"), ("x86_64-avx2-fma", ""), ("", "")] {
+            let mut baseline = report_with_full(0.6, 0.7, 0.5, 0.4);
+            let mut current = report_with_full(0.6, 0.7, 0.5, 0.4);
+            baseline.kernel.class = b.to_string();
+            current.kernel.class = c.to_string();
+            let failures = compare_to_baseline(&baseline, &current, 2.0);
+            assert_eq!(failures.len(), 1, "{b:?} vs {c:?}: {failures:?}");
+            assert_eq!(failures[0].kind, "infrastructure");
+            assert!(
+                failures[0]
+                    .detail
+                    .contains("does not record the CPU kernel class"),
+                "{}",
+                failures[0].detail
+            );
+        }
+    }
+
+    /// The baseline checked in before this field existed has no `kernel` key. It must still
+    /// parse, with an empty class, rather than fail deserialisation.
+    #[test]
+    fn report_without_kernel_key_parses_with_empty_class() {
+        let mut v = serde_json::to_value(report_with_full(0.6, 0.7, 0.5, 0.4)).unwrap();
+        v.as_object_mut().unwrap().remove("kernel");
+        let parsed: Report = serde_json::from_value(v).expect("old report must parse");
+        assert_eq!(parsed.kernel, KernelClass::default());
+    }
+
+    /// Detection names a class on every machine, and on x86_64 the class agrees with the
+    /// features it recorded.
+    #[test]
+    fn detected_kernel_class_is_consistent_with_its_features() {
+        let k = KernelClass::detect();
+        assert!(!k.class.is_empty());
+        if cfg!(target_arch = "x86_64") {
+            let has = |f: &str| k.features.iter().any(|x| x == f);
+            let expected = if has("avx512f") {
+                "x86_64-avx512f"
+            } else if has("avx2") && has("fma") {
+                "x86_64-avx2-fma"
+            } else if has("avx") {
+                "x86_64-avx"
+            } else {
+                "x86_64-sse"
+            };
+            assert_eq!(k.class, expected, "{k:?}");
+        }
     }
 
     /// A report of unknown provenance is refused on either side, even against another unknown.

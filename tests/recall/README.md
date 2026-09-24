@@ -25,11 +25,29 @@ CI's L1 Smoke Suite (`.github/workflows/recall.yml`) runs the 100-case
   rank-only.
 
 On this suite the 2% tolerance is below one case for p@1 (n=100, one case =
-0.01), so for that metric the gate is a no-net-loss check. The runs are
-deterministic (five repeats must be byte-identical, and identical code gives
-identical per-case results across CI runs), so any case that moves is a real
-change, not noise. The case list is how a reviewer decides whether a change is
-worth what it moved.
+0.01), so for that metric the gate is a no-net-loss check. Within one CPU
+kernel class the runs are deterministic: five repeats must be byte-identical,
+and identical code gives identical per-case results on every runner of that
+class. So within a class, any case that moves is a real change, not noise. The
+case list is how a reviewer decides whether a change is worth what it moved.
+
+**Across kernel classes, identical code does not give identical results.**
+ONNX Runtime picks its fp32 kernels by CPUID, and no setting pins the choice.
+GitHub's `ubuntu-latest` pool mixes AVX2-only runners (mostly AMD EPYC 7763)
+with AVX-512 ones (EPYC 9V74, Xeon Platinum 8573C, Xeon 6973P-C). The two
+classes give different low bits in all three models. In the cross-encoder the
+difference reaches 0.06 in logit, and on the gate it moved 1 of 100 cases,
+with 14 reranker pools changing
+(runs 35901281838 and 35902501577, 2026-09-23). A hypervisor can hide AVX-512
+from a chip that has it, and such a runner lands in the AVX2 class. So the
+class is what the runner *exposes*. Each report records it as `kernel.class`,
+with the CPU model and features alongside. `recall-eval` refuses to compare
+two classes as `infrastructure`, and the workflow fails a PR run on the wrong
+class within seconds. Re-run the job: GitHub assigns runner hardware per job.
+One gate run on the same tree (35894635781) matched neither class and was
+never reproduced across 16 sampled runners. If a same-class comparison ever
+moves cases on unchanged code, the recorded `cpu_model` and `features` are the
+first thing to compare.
 
 **Regenerate both files together, from the same run, on `main`, after a merged
 change that intentionally moved quality.** A stale baseline hides regressions:
@@ -44,7 +62,10 @@ that much and still pass.
 2. `gh run download <run-id> -n recall-eval-report`.
 3. Copy `current.json` to `locomo-gate-baseline.json` and `per-case.json` to
    `locomo-gate-baseline.per-case.json`. Check that `git_sha` names the main
-   commit you meant and that `repeats` is 5.
+   commit you meant, that `repeats` is 5, and that `kernel.class` is
+   `x86_64-avx2-fma`. That is the most common class in the pool, so it is
+   the one PR runs land on most often. If the run landed on another class,
+   dispatch again.
 4. Add a row to the regeneration history below, and in the PR list the cases
    that moved since the previous baseline.
 
