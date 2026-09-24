@@ -108,6 +108,39 @@ git diff tests/recall/baseline.json
 If a metric moved by more than ~2% in either direction, write a one-paragraph
 justification in the PR description so future bisects have context.
 
+## Stage fingerprints (`SHODH_STAGE_EXPORT`)
+
+`SHODH_STAGE_EXPORT=<path.jsonl>` makes `recall-eval` write every stage of the
+`full` pipeline as JSON lines:
+- `ingest`: one record per corpus item, with a hash of its stored embedding
+  bytes and its NER spans.
+- `graph`: one record for the graph's node and edge sets, keyed by entity name
+  because uuids are minted per process.
+- `case`: one record per case, with each retrieval leg, the fused ranking, the
+  reranker's pool and its scores, and the final ranking.
+
+Scores are written as f32 bit patterns, so a one-ULP move shows up as a move.
+The file is overwritten on each repeat; the repeat gate requires the repeats
+to agree, so the last one stands for the run.
+
+The repeat check compares stages within one process. The export lets you
+compare two processes, from two machines, two commits or two settings:
+
+```bash
+python scripts/stage_diff.py a.jsonl b.jsonl
+```
+
+For each stage it reports whether the order changed or only the scores did.
+Comparing an AVX2 runner with an AVX-512 one located the cross-runner
+divergence (#566):
+- 330 of 629 embeddings and 469 NER score sets differ.
+- 0 NER span sets and 0 graph nodes or edges differ.
+- Leg order differs on 33 to 100 cases; the reranker's pool differs on 14.
+
+The per-case records are also the training data for anything that learns from
+the reranker's scores over its pool. Collect them on one CPU kernel class: the
+scores differ across classes.
+
 ## Per-pipeline-layer attribution (`--layer`)
 
 `recall-eval` accepts a `--layer` flag (RH-8, #270) that selects which

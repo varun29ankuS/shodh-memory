@@ -25,6 +25,7 @@ on:
       - 'Cargo.lock'
       - '.github/workflows/recall.yml'
       - 'scripts/recall_diff.py'
+      - 'scripts/stage_diff.py'
   workflow_dispatch:
     inputs:
       tolerance:
@@ -273,7 +274,9 @@ jobs:
       - name: Test diff renderer
         if: always() && hashFiles('current.json') != ''
         working-directory: scripts
-        run: python3 test_recall_diff.py
+        run: |
+          python3 test_recall_diff.py
+          python3 test_stage_diff.py
 
       - name: Render diff table
         id: render

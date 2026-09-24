@@ -2141,6 +2141,21 @@ impl MemorySystem {
             }
         };
 
+        // Funnel stage for the reranker's own scores, in the pool's (fused)
+        // order so a capture can be joined to the `fusion` stage by index. A
+        // capture that ends at `fusion` cannot tell a pool change from a
+        // score change over the same pool; this is the last float that decides
+        // the order the caller sees.
+        if crate::memory::gold_funnel::is_armed() {
+            crate::memory::gold_funnel::record_scored(
+                "ce",
+                deep[..head]
+                    .iter()
+                    .map(|m| &m.id)
+                    .zip(scores.iter().copied()),
+            );
+        }
+
         let out = rerank_head_by_scores(deep, &scores);
 
         tracing::info!(
