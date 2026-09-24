@@ -20,31 +20,82 @@ pub const SMOKE_K: usize = 10;
 /// value, never a plausible model name, so `compare_to_baseline` can refuse it.
 pub const EMBEDDER_UNKNOWN: &str = "unknown";
 
-/// Which family of floating-point kernels the runner's CPU makes ONNX Runtime compute with.
+/// Which family of kernels the runner's CPU makes ONNX Runtime compute with.
 ///
-/// ONNX Runtime's MLAS picks its fp32 kernels by CPUID at load time, and no environment
-/// variable or session option pins the choice. Where the CPU exposes AVX-512F it swaps the
-/// GEMM, exp and max-reduction kernels (`GemmFloatKernel` Fma3 → Avx512F, and the softmax /
-/// LayerNorm reductions) for ones that accumulate in a different order. So the same model
-/// on the same input gives different low bits on the two families. Measured on the CI fleet
-/// (runs 35901281838 and 35902501577): the MiniLM embedder drifts by up to 1.5e-8, GLiNER by
-/// up to 8 ULP, and the quantized cross-encoder by up to 0.06 in logit, enough to reorder
-/// near-ties. Every runner in one class produced byte-identical results end to end. An
-/// EPYC 9V74 whose hypervisor hid AVX-512 fell in the AVX2 class, so the class is what the
-/// CPU *exposes*, not what the chip is.
+/// ONNX Runtime's MLAS picks its kernels by CPUID at load time, and no environment variable
+/// or session option pins the choice. Where the CPU exposes AVX-512F it swaps the fp32 GEMM,
+/// exp and max-reduction kernels (`GemmFloatKernel` Fma3 → Avx512F, and the softmax /
+/// LayerNorm reductions) for ones that accumulate in a different order, so the same model on
+/// the same input gives different low bits. Measured on the CI fleet (runs 35901281838 and
+/// 35902501577): the MiniLM embedder drifts by up to 1.5e-8, GLiNER by up to 8 ULP, and the
+/// quantized cross-encoder by up to 0.06 in logit, enough to reorder near-ties.
+///
+/// AVX-512 is not one class. On the gate, a Xeon Platinum 8573C and a Xeon 6973P-C, both
+/// AVX-512 with VNNI, differ from each other on 6 cases (runs 35887740236 and 35982981356;
+/// the latter reproduces run 35894635781 on all 100 cases). The 6973P-C also exposes AMX,
+/// AVX512-FP16, AVX512-BF16 and AVX-VNNI. Which of those MLAS keys on was not isolated. So
+/// the class names every dispatch-relevant feature the CPU exposes: two machines share a
+/// class only if they expose the same set. Splitting too finely costs a re-run. Splitting
+/// too coarsely reports runner differences as regressions, which is the failure this
+/// exists to prevent.
+///
+/// The class is what the CPU *exposes*, not what the chip is. An EPYC 9V74 whose
+/// hypervisor hid AVX-512 produced the AVX2 class's results byte for byte.
 ///
 /// `class` is the comparison key. `cpu_model` and `features` are recorded so a mismatch, or
 /// a divergence the class does not explain, can be traced to hardware from the report alone.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct KernelClass {
-    /// `"x86_64-avx512f"`, `"x86_64-avx2-fma"`, `"x86_64-avx"` or `"x86_64-sse"` on x86_64,
-    /// following MLAS's own dispatch order. On other architectures, the architecture name:
-    /// that split has not been measured there, and nothing gates on those machines.
+    /// On x86_64, the base level MLAS dispatches on (`x86_64-avx512f`, `x86_64-avx2-fma`,
+    /// `x86_64-avx` or `x86_64-sse`), then `+feature` for every [`KERNEL_CLASS_EXTRAS`]
+    /// entry the CPU exposes, in that order. An AVX2 machine with none of them is plain
+    /// `x86_64-avx2-fma`. On other architectures, the architecture name: that split has not
+    /// been measured there, and nothing gates on those machines.
     pub class: String,
     /// `model name` from `/proc/cpuinfo`, or empty where that file does not exist.
     pub cpu_model: String,
     /// The dispatch-relevant CPU features the runner exposes, in probe order.
     pub features: Vec<String>,
+}
+
+/// Features beyond the base level that name a separate class, in class-name order. Kept in
+/// step with the `Check runner CPU kernel class` step in `.github/workflows/recall.yml`,
+/// which derives the same name from `/proc/cpuinfo` (where the spellings differ:
+/// `avx512_vnni`, `amx_int8`, ...). That workflow checks the two names agree on every run.
+pub const KERNEL_CLASS_EXTRAS: [&str; 10] = [
+    "avx512bw",
+    "avx512dq",
+    "avx512vl",
+    "avx512vnni",
+    "avx512bf16",
+    "avx512fp16",
+    "avxvnni",
+    "amx-tile",
+    "amx-int8",
+    "amx-bf16",
+];
+
+/// The class name for a set of exposed x86_64 features, using the names
+/// `is_x86_feature_detected!` uses.
+pub fn class_from_features(features: &[&str]) -> String {
+    let has = |f: &str| features.contains(&f);
+    let mut class = if has("avx512f") {
+        "x86_64-avx512f"
+    } else if has("avx2") && has("fma") {
+        "x86_64-avx2-fma"
+    } else if has("avx") {
+        "x86_64-avx"
+    } else {
+        "x86_64-sse"
+    }
+    .to_string();
+    for extra in KERNEL_CLASS_EXTRAS {
+        if has(extra) {
+            class.push('+');
+            class.push_str(extra);
+        }
+    }
+    class
 }
 
 /// The cross-encoder setting a run measured under.
@@ -95,9 +146,9 @@ impl KernelClass {
     #[cfg(target_arch = "x86_64")]
     fn detect_class_and_features() -> (String, Vec<String>) {
         // `is_x86_feature_detected!` checks both CPUID and that the OS saves the
-        // register state (XGETBV), which is the same condition MLAS applies before
-        // taking an AVX or AVX-512 path.
-        let probes = [
+        // register state (XGETBV), which is the condition MLAS applies before taking
+        // an AVX or AVX-512 path.
+        let mut probes = vec![
             ("avx", std::is_x86_feature_detected!("avx")),
             ("avx2", std::is_x86_feature_detected!("avx2")),
             ("fma", std::is_x86_feature_detected!("fma")),
@@ -106,23 +157,30 @@ impl KernelClass {
             ("avx512dq", std::is_x86_feature_detected!("avx512dq")),
             ("avx512vl", std::is_x86_feature_detected!("avx512vl")),
             ("avx512vnni", std::is_x86_feature_detected!("avx512vnni")),
+            ("avx512bf16", std::is_x86_feature_detected!("avx512bf16")),
+            ("avx512fp16", std::is_x86_feature_detected!("avx512fp16")),
+            ("avxvnni", std::is_x86_feature_detected!("avxvnni")),
         ];
-        let has = |name: &str| probes.iter().any(|(n, on)| *n == name && *on);
-        let class = if has("avx512f") {
-            "x86_64-avx512f"
-        } else if has("avx2") && has("fma") {
-            "x86_64-avx2-fma"
-        } else if has("avx") {
-            "x86_64-avx"
+        // AMX detection is still unstable in `is_x86_feature_detected!`, so read CPUID
+        // leaf 7 directly: EDX bit 22 is AMX-BF16, 24 AMX-TILE, 25 AMX-INT8. This does
+        // not check that the OS enabled the tile state. That only matters if a kernel
+        // hides AMX that the CPU has, and then the class splits finer than needed,
+        // which costs a re-run and never a false comparison.
+        let edx = if core::arch::x86_64::__cpuid(0).eax >= 7 {
+            core::arch::x86_64::__cpuid_count(7, 0).edx
         } else {
-            "x86_64-sse"
+            0
         };
-        let features = probes
+        probes.push(("amx-tile", edx & (1 << 24) != 0));
+        probes.push(("amx-int8", edx & (1 << 25) != 0));
+        probes.push(("amx-bf16", edx & (1 << 22) != 0));
+        let features: Vec<String> = probes
             .iter()
             .filter(|(_, on)| *on)
             .map(|(n, _)| (*n).to_string())
             .collect();
-        (class.to_string(), features)
+        let names: Vec<&str> = features.iter().map(String::as_str).collect();
+        (class_from_features(&names), features)
     }
 
     #[cfg(not(target_arch = "x86_64"))]
@@ -1415,24 +1473,77 @@ mod tests {
         assert_eq!(parsed.kernel, KernelClass::default());
     }
 
-    /// Detection names a class on every machine, and on x86_64 the class agrees with the
-    /// features it recorded.
+    /// The feature sets the CI fleet actually exposed (run 35900250723's cpu.txt and the
+    /// gate reports), with `is_x86_feature_detected!` spellings.
+    const EPYC_7763: &[&str] = &["avx", "avx2", "fma"];
+    /// An EPYC 9V74 whose hypervisor hid AVX-512: it exposes what a 7763 does.
+    const EPYC_9V74_MASKED: &[&str] = &["avx", "avx2", "fma"];
+    const XEON_8573C: &[&str] = &[
+        "avx",
+        "avx2",
+        "fma",
+        "avx512f",
+        "avx512bw",
+        "avx512dq",
+        "avx512vl",
+        "avx512vnni",
+    ];
+    const XEON_6973P_C: &[&str] = &[
+        "avx",
+        "avx2",
+        "fma",
+        "avx512f",
+        "avx512bw",
+        "avx512dq",
+        "avx512vl",
+        "avx512vnni",
+        "avx512bf16",
+        "avx512fp16",
+        "avxvnni",
+        "amx-tile",
+        "amx-int8",
+        "amx-bf16",
+    ];
+
+    /// The split the gate measured: the 8573C and the 6973P-C gave different results on 6
+    /// cases, so they must not share a class, even though both are AVX-512 with VNNI.
     #[test]
-    fn detected_kernel_class_is_consistent_with_its_features() {
+    fn xeon_8573c_and_6973p_c_are_different_classes() {
+        let a = class_from_features(XEON_8573C);
+        let b = class_from_features(XEON_6973P_C);
+        assert_ne!(a, b);
+        assert_eq!(a, "x86_64-avx512f+avx512bw+avx512dq+avx512vl+avx512vnni");
+        assert!(b.ends_with("+amx-tile+amx-int8+amx-bf16"), "{b}");
+    }
+
+    /// The machines that gave byte-identical results share a class, and that class is the
+    /// exact string the checked-in baseline records.
+    #[test]
+    fn avx2_machines_keep_the_baseline_class() {
+        assert_eq!(class_from_features(EPYC_7763), "x86_64-avx2-fma");
+        assert_eq!(class_from_features(EPYC_9V74_MASKED), "x86_64-avx2-fma");
+    }
+
+    /// Feature order in the input does not change the name: it follows
+    /// `KERNEL_CLASS_EXTRAS`, so two runners that probe in a different order still agree.
+    #[test]
+    fn class_name_is_independent_of_feature_order() {
+        let mut reversed: Vec<&str> = XEON_6973P_C.to_vec();
+        reversed.reverse();
+        assert_eq!(
+            class_from_features(&reversed),
+            class_from_features(XEON_6973P_C)
+        );
+    }
+
+    /// On this machine, the class detection reports is the one its own features name.
+    #[test]
+    fn detected_class_is_named_by_its_features() {
         let k = KernelClass::detect();
         assert!(!k.class.is_empty());
         if cfg!(target_arch = "x86_64") {
-            let has = |f: &str| k.features.iter().any(|x| x == f);
-            let expected = if has("avx512f") {
-                "x86_64-avx512f"
-            } else if has("avx2") && has("fma") {
-                "x86_64-avx2-fma"
-            } else if has("avx") {
-                "x86_64-avx"
-            } else {
-                "x86_64-sse"
-            };
-            assert_eq!(k.class, expected, "{k:?}");
+            let names: Vec<&str> = k.features.iter().map(String::as_str).collect();
+            assert_eq!(k.class, class_from_features(&names), "{k:?}");
         }
     }
 

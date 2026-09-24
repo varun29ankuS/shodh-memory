@@ -32,22 +32,41 @@ class. So within a class, any case that moves is a real change, not noise. The
 case list is how a reviewer decides whether a change is worth what it moved.
 
 **Across kernel classes, identical code does not give identical results.**
-ONNX Runtime picks its fp32 kernels by CPUID, and no setting pins the choice.
-GitHub's `ubuntu-latest` pool mixes AVX2-only runners (mostly AMD EPYC 7763)
-with AVX-512 ones (EPYC 9V74, Xeon Platinum 8573C, Xeon 6973P-C). The two
-classes give different low bits in all three models. In the cross-encoder the
-difference reaches 0.06 in logit, and on the gate it moved 1 of 100 cases,
-with 14 reranker pools changing
-(runs 35901281838 and 35902501577, 2026-09-23). A hypervisor can hide AVX-512
-from a chip that has it, and such a runner lands in the AVX2 class. So the
-class is what the runner *exposes*. Each report records it as `kernel.class`,
-with the CPU model and features alongside. `recall-eval` refuses to compare
-two classes as `infrastructure`, and the workflow fails a PR run on the wrong
-class within seconds. Re-run the job: GitHub assigns runner hardware per job.
-One gate run on the same tree (35894635781) matched neither class and was
-never reproduced across 16 sampled runners. If a same-class comparison ever
-moves cases on unchanged code, the recorded `cpu_model` and `features` are the
-first thing to compare.
+ONNX Runtime picks its kernels by CPUID, and no setting pins the choice.
+GitHub's `ubuntu-latest` pool mixes CPUs that expose different features. On one
+tree, the gate gave three distinct results:
+
+| Runner | Exposes | vs the AVX2 result |
+| ------ | ------- | ------------------ |
+| AMD EPYC 7763 (most runners) | AVX2, FMA | — |
+| Xeon Platinum 8573C | + AVX-512 with VNNI | 1 case (q30) |
+| Xeon 6973P-C | + AVX-512 with VNNI, AMX, FP16, BF16, AVX-VNNI | 7 cases |
+
+Where AVX-512 is exposed, the embedder drifts by up to 1.5e-8, GLiNER by up to
+8 ULP, and the cross-encoder by up to 0.06 in logit (runs 35901281838 and
+35902501577). A hypervisor can hide AVX-512 from a chip that has it: an EPYC
+9V74 with AVX-512 masked gave the 7763's results byte for byte. So the class is
+what the runner *exposes*.
+
+The class therefore names every dispatch-relevant feature the runner exposes,
+for example `x86_64-avx2-fma` or
+`x86_64-avx512f+avx512bw+avx512dq+avx512vl+avx512vnni`. Which of the
+6973P-C's extra features makes the difference was not isolated, so two machines
+share a class only if they expose the same set. A split that is too fine costs a
+re-run. A split that is too coarse reports runner differences as regressions.
+The first version of this check (#566) used AVX-512 alone as the key, and it
+put the 8573C and the 6973P-C in one class. The 6973P-C's 7-case result, first
+seen in run 35894635781, was reproduced exactly by run 35982981356 on a 6973P-C.
+Model fingerprints on 32 texts had shown the two CPUs agreeing, which was too
+small a sample to separate them.
+
+Each report records the class as `kernel.class`, with the CPU model and
+features alongside. `recall-eval` refuses to compare two classes as
+`infrastructure`. The workflow fails a PR run on the wrong class within seconds
+(re-run the job: GitHub assigns runner hardware per job), and it checks that its
+own derivation of the class agrees with `recall-eval`'s. If a same-class
+comparison ever moves cases on unchanged code, compare the recorded
+`cpu_model` and `features` first.
 
 **Regenerate both files together, from the same run, on `main`, after a merged
 change that intentionally moved quality.** A stale baseline hides regressions:
