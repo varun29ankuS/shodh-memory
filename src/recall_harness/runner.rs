@@ -30,7 +30,8 @@ use super::report::{
     aggregate_category, aggregate_layer, median, AblationCaseRow, AblationReport, AblationRow,
     CategoryReport, DeltaCi, Failure, FunnelReport, FunnelStageRow, GraphStructure, KernelClass,
     LayerReport, LearningCurveArm, LearningCurveReport, LinkingReport, LinkingRow, PerCaseRecord,
-    ReachabilityCategory, ReachabilityReport, Report, StageRow, StageTimingReport, SMOKE_K,
+    ReachabilityCategory, ReachabilityReport, Report, RerankSetting, StageRow, StageTimingReport,
+    SMOKE_K,
 };
 
 /// Embedder identifier emitted in the report. Matches the model wired into
@@ -443,6 +444,7 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
         suite: inputs.suite.clone(),
         embedder: EMBEDDER_ID.to_string(),
         kernel: KernelClass::detect(),
+        rerank: Some(RerankSetting::current()),
         git_sha: inputs.git_sha.clone(),
         timestamp: chrono::Utc::now(),
         layers,

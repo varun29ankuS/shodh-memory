@@ -58,11 +58,15 @@ that much and still pass.
    5 repeats, `ce_rerank=1`). The gate measures the pipeline the server
    ships, which reranks with the cross-encoder by default, so the baseline is
    recorded with it on. `-f ce_rerank=0` measures the library default for
-   comparison and must not be committed as the baseline.
+   comparison and must not be committed as the baseline. Each report records
+   the setting as `rerank` (`enabled`, `depth`), and `recall-eval` refuses to
+   compare two settings as `infrastructure`, so such a run cannot pass or
+   fail the gate by accident.
 2. `gh run download <run-id> -n recall-eval-report`.
 3. Copy `current.json` to `locomo-gate-baseline.json` and `per-case.json` to
    `locomo-gate-baseline.per-case.json`. Check that `git_sha` names the main
-   commit you meant, that `repeats` is 5, and that `kernel.class` is
+   commit you meant, that `repeats` is 5, that `rerank` is
+   `{"enabled": true, "depth": 30}`, and that `kernel.class` is
    `x86_64-avx2-fma`. That is the most common class in the pool, so it is
    the one PR runs land on most often. If the run landed on another class,
    dispatch again.

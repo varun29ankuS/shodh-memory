@@ -141,7 +141,7 @@ pub fn ce_rerank_enabled() -> bool {
 /// How many candidates to rescore. Depth is a latency knob and barely a p@1
 /// knob — the pilot measured depth 30 keeping ~98% of depth 100's p@1 gain for
 /// 40% of the cost — so raising it buys recall@10, not precision@1.
-fn ce_depth() -> usize {
+pub fn ce_depth() -> usize {
     std::env::var("SHODH_CE_DEPTH")
         .ok()
         .and_then(|s| s.parse().ok())

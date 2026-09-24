@@ -20,6 +20,7 @@ from recall_diff import (
     case_counts,
     classify_case_moves,
     kernel_note,
+    rerank_note,
     load_per_case,
     render,
     render_case_moves,
@@ -265,11 +266,37 @@ class TestKernelNote:
         assert "Not comparable" in text
 
 
+class TestRerankNote:
+    ON30 = {"enabled": True, "depth": 30}
+
+    def test_same_setting_does_not_warn(self):
+        lines = rerank_note({"rerank": self.ON30}, {"rerank": dict(self.ON30)})
+        assert lines[0] == "Reranker: baseline cross-encoder on, depth 30 → current cross-encoder on, depth 30"
+        assert not any("Not comparable" in l for l in lines)
+
+    def test_off_against_on_warns(self):
+        lines = rerank_note({"rerank": self.ON30}, {"rerank": {"enabled": False, "depth": 30}})
+        assert "cross-encoder off" in lines[0]
+        assert any("Not comparable" in l for l in lines)
+
+    def test_depth_matters_only_when_reranking(self):
+        on100 = {"enabled": True, "depth": 100}
+        assert any("Not comparable" in l for l in rerank_note({"rerank": self.ON30}, {"rerank": on100}))
+        off30, off100 = {"enabled": False, "depth": 30}, {"enabled": False, "depth": 100}
+        assert not any("Not comparable" in l for l in rerank_note({"rerank": off30}, {"rerank": off100}))
+
+    def test_unrecorded_warns(self):
+        for base, cur in (({}, {"rerank": self.ON30}), ({"rerank": self.ON30}, {}), ({}, {})):
+            lines = rerank_note(base, cur)
+            assert "not recorded" in lines[0]
+            assert any("Not comparable" in l for l in lines)
+
+
 if __name__ == "__main__":
     # A plain runner, because this repo ships no python test dependency and a
     # test that cannot be run is documentation.
     failed = 0
-    for cls in (TestCaseCounts, TestResolutionNote, TestCaseMoves, TestKernelNote):
+    for cls in (TestCaseCounts, TestResolutionNote, TestCaseMoves, TestKernelNote, TestRerankNote):
         instance = cls()
         for name in sorted(n for n in dir(cls) if n.startswith("test_")):
             try:
