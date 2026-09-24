@@ -342,7 +342,10 @@ jobs:
           fi
 
       - name: Enforce gate
-        if: always()
+        # Only when the eval ran. After an earlier failure (a wrong-class
+        # runner, a missing model) the job is already red for the right reason,
+        # and an empty exit code here would add a second, misleading error.
+        if: always() && steps.run_eval.conclusion != 'skipped'
         env:
           EXIT: ${{ steps.run_eval.outputs.exit_code }}
         run: |
