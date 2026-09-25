@@ -20,7 +20,7 @@ use crate::handlers::MultiUserMemoryManager;
 use crate::memory::retrieval::RetrievalOutcome;
 use crate::memory::types::MemoryId;
 use crate::memory::types::{ExperienceType, LayerMode, NerEntityRecord};
-use crate::memory::{Experience, Query};
+use crate::memory::{Experience, MemorySystem, Query};
 
 use super::fixtures::{
     self, CorpusItem, SmokeCase, SmokeCategory, SMOKE_CASES_PATH, SMOKE_CORPUS_PATH,
@@ -999,6 +999,32 @@ fn run_one_pass(
         }
     }
 
+    // Stage fingerprints (`SHODH_STAGE_EXPORT=<jsonl path>`, Full mode only).
+    //
+    // The repeat determinism check compares stages between passes of ONE
+    // process. This writes the same stages, plus the ingest-side ones it cannot
+    // see (embedding bytes, NER spans, the graph's node and edge sets), so two
+    // processes can be diffed stage by stage: two machines, two commits, or two
+    // settings. It is how the cross-runner divergence was located (#566):
+    // embeddings and NER scores drift by CPU kernel class while the graph's
+    // membership does not. Every per-case record also carries the reranker's
+    // scores over its pool, which is the data a depth router trains on.
+    // Scores travel as f32 bit patterns, so a one-ULP move shows as a move.
+    // Off unless the variable is set.
+    let stage_export: Option<PathBuf> = std::env::var("SHODH_STAGE_EXPORT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    let mut stage_lines: Vec<String> = Vec::new();
+    if stage_export.is_some() {
+        stage_lines.extend(ingest_fingerprints(
+            &manager,
+            &system.read(),
+            corpus,
+            &id_map,
+        )?);
+    }
+
     // SHODH_VAMANA_QUALITY_REBUILD=1 — A/B lever: bulk alpha-RNG rebuild at the
     // ingest→query boundary. The harness is the only place that KNOWS this
     // boundary; a search-time trigger fires on remember()'s dedup search before
@@ -1346,6 +1372,55 @@ fn run_one_pass(
                 case_id: case.id.clone(),
                 retrieved: pool,
             });
+
+            if stage_export.is_some() && matches!(*mode, LayerMode::Full) {
+                // One more production-shaped recall with the funnel armed, so
+                // the reranker's own scores (`ce` stage) sit beside the pool
+                // stages captured above. Scores travel as f32 bit patterns:
+                // a diff must show a one-ULP move as a move.
+                crate::memory::gold_funnel::begin_capture();
+                let final_ids: Vec<String> = match system.read().recall(query) {
+                    Ok(m) => m.iter().map(|m| corpus_id(&m.id.0)).collect(),
+                    Err(_) => Vec::new(),
+                };
+                let ce_stages = crate::memory::gold_funnel::take_capture().unwrap_or_default();
+                let bits = |entries: &[(String, Option<f32>)]| -> Vec<(String, Option<String>)> {
+                    entries
+                        .iter()
+                        .map(|(id, s)| (id.clone(), s.map(|v| format!("{:08x}", v.to_bits()))))
+                        .collect()
+                };
+                let legs_json: Vec<serde_json::Value> = leg_lists[i]
+                    .iter()
+                    .map(|(stage, entries)| {
+                        serde_json::json!({ "stage": stage, "items": bits(entries) })
+                    })
+                    .collect();
+                let ce_json: Vec<serde_json::Value> = ce_stages
+                    .iter()
+                    .filter(|(stage, _)| stage == "ce")
+                    .map(|(stage, entries)| {
+                        let entries: Vec<(String, Option<f32>)> = entries
+                            .iter()
+                            .map(|(id, s)| (corpus_id(&id.0), *s))
+                            .collect();
+                        serde_json::json!({ "stage": stage, "items": bits(&entries) })
+                    })
+                    .collect();
+                stage_lines.push(
+                    serde_json::json!({
+                        "kind": "case",
+                        "case_id": case.id,
+                        "ranks": ranks[i].retrieved,
+                        "final_captured": final_ids,
+                        "deep": deep_ranks[i].retrieved,
+                        "pool": rerank_pools[i].retrieved,
+                        "legs": legs_json,
+                        "ce": ce_json,
+                    })
+                    .to_string(),
+                );
+            }
         }
 
         per_mode.insert(
@@ -1379,6 +1454,26 @@ fn run_one_pass(
         }
     }
 
+    if let Some(path) = &stage_export {
+        if !stage_lines.is_empty() {
+            use std::io::Write as _;
+            // Truncate, as the pool export does: every repeat runs this pass, and
+            // appending would write each case once per repeat with nothing to tell
+            // them apart. The repeat gate requires the passes to agree, so the last
+            // pass's records stand for the run.
+            let mut f = std::fs::File::create(path)
+                .with_context(|| format!("creating stage export {}", path.display()))?;
+            for line in &stage_lines {
+                writeln!(f, "{line}")?;
+            }
+            eprintln!(
+                "  stage export: {} records -> {}",
+                stage_lines.len(),
+                path.display()
+            );
+        }
+    }
+
     if let Some(path) = &feature_export {
         if !feature_lines.is_empty() {
             use std::io::Write as _;
@@ -1394,6 +1489,131 @@ fn run_one_pass(
     }
 
     Ok(OnePassResult { per_mode, failures })
+}
+
+/// Ingest-side fingerprints for `SHODH_STAGE_EXPORT`: one record per corpus
+/// item (stored embedding bytes, NER spans with score bits) and one for the
+/// graph (node and edge sets, keyed by entity NAME because uuids are minted
+/// per process). Every value is hashed over its raw little-endian bytes and
+/// accompanied by the leading bit patterns, so a diff between two machines
+/// shows both whether and by how much a stage moved.
+fn ingest_fingerprints(
+    manager: &MultiUserMemoryManager,
+    system: &MemorySystem,
+    corpus: &[CorpusItem],
+    id_map: &HashMap<String, Uuid>,
+) -> Result<Vec<String>> {
+    use sha2::{Digest, Sha256};
+    let bits = |values: &[f32], n: usize| -> Vec<String> {
+        values
+            .iter()
+            .take(n)
+            .map(|v| format!("{:08x}", v.to_bits()))
+            .collect()
+    };
+    let sha_f32 = |values: &[f32]| -> String {
+        let mut h = Sha256::new();
+        for v in values {
+            h.update(v.to_le_bytes());
+        }
+        hex::encode(h.finalize())
+    };
+    let ner = manager.get_neural_ner();
+    let mut lines = Vec::with_capacity(corpus.len() + 1);
+    let mut all_embeddings = Sha256::new();
+    let mut all_ner = Sha256::new();
+    for item in corpus {
+        let Some(uuid) = id_map.get(&item.id) else {
+            continue;
+        };
+        let embedding = system
+            .get_memory(&MemoryId(*uuid))
+            .with_context(|| format!("stage export: reading memory {}", item.id))?
+            .experience
+            .embeddings
+            .unwrap_or_default();
+        for v in &embedding {
+            all_embeddings.update(v.to_le_bytes());
+        }
+        // The same call ingest_corpus made for this item; the session is
+        // deterministic within a process (the repeat gate proves it), so this
+        // is the span set the graph was built from.
+        let spans: Vec<String> = ner
+            .extract(&item.content)
+            .unwrap_or_default()
+            .iter()
+            .map(|e| {
+                format!(
+                    "{}|{}|{:?}|{:08x}|{}|{}",
+                    e.text,
+                    e.entity_type.as_str(),
+                    e.fine_label,
+                    e.confidence.to_bits(),
+                    e.start,
+                    e.end
+                )
+            })
+            .collect();
+        let ner_line = spans.join(";");
+        all_ner.update(ner_line.as_bytes());
+        lines.push(
+            serde_json::json!({
+                "kind": "ingest",
+                "id": item.id,
+                "embedding_dim": embedding.len(),
+                "embedding_sha256": sha_f32(&embedding),
+                "embedding_head": bits(&embedding, 4),
+                "ner_sha256": hex::encode(Sha256::digest(ner_line.as_bytes())),
+                "ner": spans,
+            })
+            .to_string(),
+        );
+    }
+
+    let graph = manager.get_user_graph(EVAL_USER)?;
+    let graph = graph.read();
+    let entities = graph.get_all_entities()?;
+    let names: HashMap<Uuid, String> = entities.iter().map(|e| (e.uuid, e.name.clone())).collect();
+    let mut nodes: Vec<String> = entities
+        .iter()
+        .map(|e| format!("{}|{:?}|{}", e.name, e.labels, e.mention_count))
+        .collect();
+    nodes.sort();
+    let mut edges: Vec<String> = graph
+        .get_all_relationships()?
+        .iter()
+        .map(|r| {
+            format!(
+                "{}|{}|{}|{:08x}",
+                names
+                    .get(&r.from_entity)
+                    .cloned()
+                    .unwrap_or_else(|| r.from_entity.to_string()),
+                names
+                    .get(&r.to_entity)
+                    .cloned()
+                    .unwrap_or_else(|| r.to_entity.to_string()),
+                r.relation_type.as_str(),
+                r.strength.to_bits()
+            )
+        })
+        .collect();
+    edges.sort();
+    lines.push(
+        serde_json::json!({
+            "kind": "graph",
+            "embeddings_sha256": hex::encode(all_embeddings.finalize()),
+            "ner_sha256": hex::encode(all_ner.finalize()),
+            "node_count": nodes.len(),
+            "nodes_sha256": hex::encode(Sha256::digest(nodes.join("\n").as_bytes())),
+            "edge_count": edges.len(),
+            "edges_sha256": hex::encode(Sha256::digest(edges.join("\n").as_bytes())),
+            "nodes": nodes,
+            "edges": edges,
+        })
+        .to_string(),
+    );
+    Ok(lines)
 }
 
 /// Pin parallel runtimes to a single thread for the harness process.
