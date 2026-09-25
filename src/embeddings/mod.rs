@@ -20,6 +20,7 @@ pub mod downloader;
 pub mod gliner;
 pub mod keywords;
 pub mod minilm;
+pub mod model_tape;
 pub mod ner;
 
 // Re-export chunking types

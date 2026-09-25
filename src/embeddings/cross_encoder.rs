@@ -160,6 +160,10 @@ impl CrossEncoder {
         if !model_path.exists() {
             anyhow::bail!("cross-encoder model not found at {}", model_path.display());
         }
+        super::model_tape::register_model(
+            super::model_tape::Model::CrossEncoder,
+            &[&model_path, &tokenizer_path],
+        );
 
         // Point ort at the pinned runtime before touching a session. The crate
         // is built with `load-dynamic`, so without this the loader takes the
@@ -241,7 +245,18 @@ impl CrossEncoder {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
+        // Under a model tape each pair is keyed on its own, so a replayed score does
+        // not depend on which other candidates share the batch.
+        if let Some(taped) =
+            super::model_tape::cross_encode(query, texts, || self.score_pairs_live(query, texts))
+        {
+            return taped;
+        }
+        self.score_pairs_live(query, texts)
+    }
 
+    /// One ONNX run over the batch; `texts` is non-empty.
+    fn score_pairs_live(&self, query: &str, texts: &[&str]) -> Result<Vec<f32>> {
         let pairs: Vec<(String, String)> = texts
             .iter()
             .map(|t| (query.to_string(), (*t).to_string()))

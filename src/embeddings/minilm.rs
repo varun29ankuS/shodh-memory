@@ -536,6 +536,10 @@ impl MiniLMEmbedder {
         // past the tightest layer. Runs at construction (i.e. server startup)
         // even under lazy loading, so the failure is loud and immediate.
         Self::validate_sequence_contract(&config)?;
+        super::model_tape::register_model(
+            super::model_tape::Model::Embedder,
+            &[&config.model_path, &config.tokenizer_path],
+        );
 
         let (query_prefix, doc_prefix) = embedder_prefixes();
         let (native_hidden, dimension) = embedder_dims();
@@ -1142,6 +1146,13 @@ impl MiniLMEmbedder {
             &owned
         };
 
+        // A model tape, when one is in use, answers before either path below: replay
+        // must never reach a model or the simplified fallback, and recording must
+        // only ever keep a real model output.
+        if let Some(taped) = super::model_tape::embed(text, || self.generate_embedding_onnx(text)) {
+            return taped;
+        }
+
         // Use simplified mode if in that mode
         if self.simplified_mode {
             let start = std::time::Instant::now();
@@ -1262,6 +1273,24 @@ impl Embedder for MiniLMEmbedder {
         let empty_embedding = vec![0.0; self.dimension];
         if texts.iter().all(|t| t.is_empty()) {
             return Ok(vec![empty_embedding; texts.len()]);
+        }
+
+        // Under a model tape each text goes through `encode`, so it is keyed and
+        // replayed like any other. The batch path pads to its longest member, which
+        // would make a text's recorded vector depend on its neighbours. Batch
+        // encoding only runs in env-gated harness paths (entity-name embeddings,
+        // consolidation), so it is not what a recording is taken to measure.
+        if super::model_tape::active() {
+            return texts
+                .iter()
+                .map(|t| {
+                    if t.is_empty() {
+                        Ok(vec![0.0; self.dimension])
+                    } else {
+                        self.encode(t)
+                    }
+                })
+                .collect();
         }
 
         // Apply the document/passage instruction prefix to every non-empty text
