@@ -107,7 +107,9 @@ jobs:
     # RH-12 (#272): with --repeats 5 the suite runs 5 independent
     # ingest+query passes (~5-6min each on a warm runner) plus build.
     # 60min keeps headroom for cold builds and unusually slow runners.
-    timeout-minutes: 60
+    # A recording runs every model live on every call (no NER cache), then
+    # scores the rest of the 100 x 629 cross-encoder table, so it gets longer.
+    timeout-minutes: ${{ github.event.inputs.model_tape == 'record' && 150 || 60 }}
     steps:
       - uses: actions/checkout@v7
 
@@ -408,10 +410,12 @@ jobs:
           echo "Kernel class agrees: $REPORTED"
 
       - name: Enforce gate
-        # Only when the eval ran. After an earlier failure (a wrong-class
-        # runner, a missing model) the job is already red for the right reason,
-        # and an empty exit code here would add a second, misleading error.
-        if: always() && steps.run_eval.conclusion != 'skipped'
+        # Only when the eval step completed. After an earlier failure (a
+        # wrong-class runner, a missing model) or a timeout that cancelled the
+        # eval, the job is already red for the right reason, and an empty exit
+        # code here would add a second, misleading error. The eval step itself
+        # always exits 0 once it finishes; its real exit code is the output.
+        if: always() && steps.run_eval.conclusion == 'success'
         env:
           EXIT: ${{ steps.run_eval.outputs.exit_code }}
         run: |

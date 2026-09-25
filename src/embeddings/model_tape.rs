@@ -303,7 +303,11 @@ fn hash_files(files: &[&Path]) -> Result<String> {
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut combined = Sha256::new();
     for path in files {
-        let digest = if let Some(d) = cache.lock().get(*path).cloned() {
+        // Bound before the match: a guard taken in an `if let` scrutinee lives until
+        // the end of the whole `if let ... else`, so locking again in the `else` arm
+        // to insert deadlocks on this non-reentrant mutex.
+        let cached = cache.lock().get(*path).cloned();
+        let digest = if let Some(d) = cached {
             d
         } else {
             let mut f =
@@ -736,6 +740,20 @@ mod tests {
             "Nate invited Joanna.".to_string(),
         );
         assert_eq!(t.ce[&key].to_bits(), (-1.630_57f32).to_bits());
+    }
+
+    /// Hashing a path the first time takes the cache's lock twice, once to look and
+    /// once to insert. It used to take the second while still holding the first, and
+    /// the recording run hung for its whole 60-minute timeout (run 36111970285).
+    /// Returning at all is the check; the second call is the cached path.
+    #[test]
+    fn hashing_model_files_does_not_deadlock_and_is_stable() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), b"model bytes").unwrap();
+        let first = hash_files(&[f.path()]).unwrap();
+        let second = hash_files(&[f.path()]).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
     }
 
     #[test]
