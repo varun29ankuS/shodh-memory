@@ -3378,11 +3378,23 @@ pub const NER_ENTITY_MIN_LENGTH: usize = 3;
 
 /// Confidence floor for NER entities at graph insertion time.
 ///
-/// The NER model filters at 0.7 during extraction (SHODH_NER_CONFIDENCE env),
-/// but some garbage entities ("decided", common verbs) pass at 0.7-0.8 confidence.
-/// This second gate at graph insertion catches marginal entities that shouldn't
-/// become graph nodes. Raised from 0.5 to 0.6 after observing verb noise.
-pub const NER_GRAPH_CONFIDENCE_FLOOR: f32 = 0.6;
+/// Equal to the typer's own commit threshold, so this gate admits every span
+/// the schema-driven typer committed and rejects only what a replay or
+/// fallback path hands in below that line. The graph's rule since #509 is that
+/// a committed span IS the authority for a node; a second, higher floor here
+/// would overrule the typer with a number it never saw.
+///
+/// History, because the previous value was a unit error and not a policy:
+/// this constant was 0.6, raised from 0.5 on 2026-04-29 (#261) against
+/// BERT-tiny-NER, whose per-token softmax put real names at 0.9+ and verb noise
+/// at 0.7–0.8, with extraction already cut at 0.7. GLiNER bi-edge replaced that
+/// model on 2026-07-12 (3fa7cb5c) and its scores are a different quantity — a
+/// per-span sigmoid competing against 140 other labels, committed at 0.3 — but
+/// the floor was not revisited. Measured on the production typer: 88% of the
+/// spans it committed on the directional corpus (342 of 389) and 95% on the
+/// first 50 LoCoMo turns (70 of 74), including every PER span in the latter,
+/// scored below 0.6 and never became nodes. Nothing scored 0.8 or higher.
+pub const NER_GRAPH_CONFIDENCE_FLOOR: f32 = crate::embeddings::gliner::DEFAULT_THRESHOLD;
 
 /// Minimum surfacings without utility before habituation penalty kicks in.
 /// Below this threshold, we assume the memory might still be useful in the right context.
