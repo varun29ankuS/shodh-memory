@@ -303,6 +303,17 @@ impl GlinerTyper {
                 "GLiNER bi-edge assets not found at {:?} — typer disabled (extract returns empty)",
                 config.model_path
             );
+        } else {
+            // The label set is an input to the model, so a different
+            // label_embeddings.bin is a different model as far as a tape is concerned.
+            super::model_tape::register_model(
+                super::model_tape::Model::Ner,
+                &[
+                    &config.model_path,
+                    &config.tokenizer_path,
+                    &config.label_embeddings_path,
+                ],
+            );
         }
         Self {
             config,

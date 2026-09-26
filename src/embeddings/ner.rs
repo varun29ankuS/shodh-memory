@@ -337,6 +337,14 @@ impl NeuralNer {
             return Ok(Vec::new());
         }
 
+        // A model tape, when one is in use, answers before the cache and before the
+        // fallback below: a replay miss must reach the caller as an error (and the
+        // tape's problem list), never become a rule-based entity list, and recording
+        // keeps only GLiNER's own output.
+        if let Some(taped) = super::model_tape::ner(text, || self.extract_gliner(text)) {
+            return taped;
+        }
+
         // NER replay hook (SHODH_NER_REPLAY) — offline-entity ablation, default off.
         if let Some(ents) = ner_replay_lookup(text) {
             return Ok(ents);
