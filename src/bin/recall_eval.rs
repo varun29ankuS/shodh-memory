@@ -49,6 +49,9 @@ enum Suite {
     /// conversation's 629-turn corpus. The per-PR recall-regression gate that
     /// replaced the synthetic smoke suite. Fast (~1-2 min), real data.
     LocomoGate,
+    /// Who did what to whom: 240 questions over 60 pairs of role-swapped twin
+    /// memories with identical words. Chance is 50% p@1. Diagnostic, not gated.
+    Directional,
 }
 
 impl Suite {
@@ -57,6 +60,7 @@ impl Suite {
             Suite::Smoke => "smoke",
             Suite::Locomo => "locomo",
             Suite::LocomoGate => "locomo-gate",
+            Suite::Directional => "directional",
         }
     }
 
@@ -73,6 +77,10 @@ impl Suite {
             Suite::LocomoGate => Some((
                 fx::manifest_path(fx::LOCOMO_GATE_CORPUS_PATH),
                 fx::manifest_path(fx::LOCOMO_GATE_CASES_PATH),
+            )),
+            Suite::Directional => Some((
+                fx::manifest_path(fx::DIRECTIONAL_CORPUS_PATH),
+                fx::manifest_path(fx::DIRECTIONAL_CASES_PATH),
             )),
         }
     }

@@ -4070,6 +4070,9 @@ fn category_name(c: SmokeCategory) -> &'static str {
         SmokeCategory::Negation => "negation",
         SmokeCategory::SingleHop => "single_hop",
         SmokeCategory::OpenDomain => "open_domain",
+        SmokeCategory::DirObject => "dir_object",
+        SmokeCategory::DirSubject => "dir_subject",
+        SmokeCategory::DirPassive => "dir_passive",
     }
 }
 
