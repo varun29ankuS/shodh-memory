@@ -450,8 +450,28 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
             // now refuses it outright instead of laundering it through the
             // legacy chain, and it is reported as a warning rather than
             // rewritten in place.
+            // An encrypted record is read through its envelope when this
+            // process holds the key. When it does not (this command opens the
+            // DB directly; a keystore is only unsealed by MemoryStorage::new),
+            // the record is left exactly as it is: its payload was written by
+            // the current encoder, so it is not legacy, and it is not
+            // decodable here, so it is not rewritten.
+            let plain = match crate::memory::storage::decrypt_memory_record(&key, &value) {
+                Ok(plain) => plain,
+                Err(e) => {
+                    if crate::memory::storage::encryption_active() {
+                        eprintln!(
+                            "  WARNING: cannot decrypt memory key ({} bytes): {e:#}",
+                            key.len()
+                        );
+                    } else {
+                        counts.memories_skipped += 1;
+                    }
+                    continue;
+                }
+            };
             if let serialization::ShoEnvelope::Valid { version, .. } =
-                serialization::read_sho_envelope(&value)
+                serialization::read_sho_envelope(&plain)
             {
                 if version == serialization::SHO_VERSION_POSTCARD {
                     // Already postcard
@@ -472,7 +492,9 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
             match crate::memory::storage::deserialize_memory_for_migration_checked(&key, &value) {
                 Ok(memory) => {
                     if !dry_run {
-                        let new_value = serialization::encode_sho(&memory)?;
+                        // Through encode_memory, so a keystore active in this
+                        // process re-encrypts what it rewrites.
+                        let new_value = crate::memory::storage::encode_memory(&memory)?;
                         batch.put(&*key, &new_value);
                         batch_count += 1;
                     }

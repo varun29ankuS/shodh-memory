@@ -872,7 +872,15 @@ pub fn scrub_memories(db: &DB, sweep: &mut Sweep) -> ClassCounts {
 }
 
 fn classify_memory(key: &[u8], value: &[u8], counts: &mut ClassCounts, sweep: &mut Sweep) {
-    let (class, path, decoded_id, detail, created_at, checks) = match decode_memory_value(value) {
+    // The record envelope comes off first, under the key the value was read
+    // at. A ciphertext this process cannot open is `Undecodable` on a path of
+    // its own — it is not corruption, and it must not reach the legacy chain,
+    // whose last branch would fabricate a memory out of the ciphertext bytes.
+    let outcome = match crate::memory::storage::decrypt_memory_record(key, value) {
+        Ok(plain) => decode_memory_value(&plain),
+        Err(e) => DecodeOutcome::Failed(e.to_string(), "encrypted_record"),
+    };
+    let (class, path, decoded_id, detail, created_at, checks) = match outcome {
         DecodeOutcome::EnvelopeCorrupt(detail, path) => (
             RecordClass::ChecksumMismatch,
             path.to_string(),
