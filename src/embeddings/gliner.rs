@@ -108,6 +108,20 @@ pub struct GlinerConfig {
     pub max_len: usize,
 }
 
+/// Default sigmoid probability below which the typer does not commit a span
+/// (`SHODH_GLINER_THRESHOLD` overrides it). The value the gliner parity probe
+/// used.
+///
+/// This is the ONE confidence decision on the NER path. A GLiNER span score is
+/// the sigmoid of a single span/label logit, competing against 140 other
+/// labels; on prose it lands in 0.3–0.8 and a committed span above 0.8 is
+/// rare (0 of 389 spans on the directional corpus, 0 of 74 on the LoCoMo gate
+/// corpus). Any downstream gate that compares this number against a floor
+/// calibrated for a different model's distribution silently rewrites the
+/// typer's decision, which is why [`crate::constants::NER_GRAPH_CONFIDENCE_FLOOR`]
+/// is defined in terms of this constant rather than beside it.
+pub const DEFAULT_THRESHOLD: f32 = 0.3;
+
 impl Default for GlinerConfig {
     fn default() -> Self {
         Self::from_env()
@@ -144,7 +158,7 @@ impl GlinerConfig {
         let threshold = std::env::var("SHODH_GLINER_THRESHOLD")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(0.3);
+            .unwrap_or(DEFAULT_THRESHOLD);
 
         Self {
             model_path: base_path.join("model.onnx"),

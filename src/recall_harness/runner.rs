@@ -5616,4 +5616,251 @@ mod tests {
             failures[0].detail
         );
     }
+
+    /// The production typer, refusing the fallback. A test of what the graph
+    /// admits from NER output is void on the rule-based extractor, whose
+    /// "confidence" is a salience heuristic and not the sigmoid the floor in
+    /// `process_experience_into_graph` was written against.
+    fn production_ner(
+        manager: &MultiUserMemoryManager,
+    ) -> std::sync::Arc<crate::embeddings::ner::NeuralNer> {
+        let ner = manager.get_neural_ner();
+        assert!(
+            !ner.is_fallback_mode(),
+            "GLiNER assets missing — this test pins the PRODUCTION typer. Set \
+             SHODH_GLINER_MODEL_PATH to a directory holding model.onnx, tokenizer.json and \
+             label_embeddings.bin."
+        );
+        ner
+    }
+
+    /// Every entity surface the graph currently holds, lower-cased, with the
+    /// `source` attribute each phase stamps.
+    fn graph_surfaces(manager: &MultiUserMemoryManager) -> BTreeMap<String, String> {
+        let graph = manager.get_user_graph(EVAL_USER).expect("graph");
+        let g = graph.read();
+        g.get_all_entities()
+            .expect("entities")
+            .into_iter()
+            .map(|e| {
+                let source = e
+                    .attributes
+                    .get("source")
+                    .cloned()
+                    .unwrap_or_else(|| "-".to_string());
+                (e.name.to_lowercase(), source)
+            })
+            .collect()
+    }
+
+    /// A span the schema-driven typer committed is the first of the three
+    /// authorities `process_experience_into_graph` admits a node on ("the
+    /// schema-driven typer committed a span for it — the `ner_*` phases above,
+    /// which is where most real entities come from"). This pins that promise on
+    /// the production path the harness runs: NER → `remember` →
+    /// `process_experience_into_graph`, with the request's own tags declared
+    /// and nothing else.
+    ///
+    /// The directional corpus is the sharpest probe because its sentences name
+    /// people and nothing else: "Priya invited Caroline to the housewarming."
+    /// If a committed PER span does not become a node here, the graph leg has
+    /// no seed for any who-did-what-to-whom query, and the CI stage export
+    /// (run 36227833276: 160 memories, 40 people, 14 nodes) is the symptom.
+    #[test]
+    fn ner_committed_person_spans_become_graph_nodes() {
+        let _harness_env = pin_harness_threads();
+        let dir = unique_storage_dir("ner-person-nodes");
+        let manager = build_manager(&dir).expect("manager");
+        let ner = production_ner(&manager);
+
+        let corpus: Vec<CorpusItem> = fixtures::load_corpus(&fixtures::manifest_path(
+            "tests/recall/corpora/directional.jsonl",
+        ))
+        .expect("directional corpus")
+        .into_iter()
+        .take(4)
+        .collect();
+        assert_eq!(
+            corpus.len(),
+            4,
+            "directional corpus is shorter than expected"
+        );
+
+        // What the typer commits, recorded BEFORE ingest so the assertion is
+        // about admission and not about extraction.
+        let mut committed_people: BTreeMap<String, f32> = BTreeMap::new();
+        for item in &corpus {
+            for e in ner.extract(&item.content).expect("extract") {
+                if matches!(e.entity_type, crate::embeddings::ner::NerEntityType::Person) {
+                    let entry = committed_people.entry(e.text.to_lowercase()).or_insert(0.0);
+                    *entry = entry.max(e.confidence);
+                }
+            }
+        }
+        assert!(
+            !committed_people.is_empty(),
+            "the typer committed no PER span on four person-only sentences; the test cannot \
+             say anything about admission"
+        );
+
+        ingest_corpus(&manager, &corpus).expect("ingest");
+        let nodes = graph_surfaces(&manager);
+
+        let dropped: Vec<String> = committed_people
+            .iter()
+            .filter(|(surface, _)| !nodes.contains_key(surface.as_str()))
+            .map(|(surface, conf)| format!("{surface} (PER, conf {conf:.3})"))
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            dropped.is_empty(),
+            "{} of {} typer-committed PER spans never became graph nodes: {:?}. Graph holds {} \
+             nodes: {:?}. NER_GRAPH_CONFIDENCE_FLOOR = {}",
+            dropped.len(),
+            committed_people.len(),
+            dropped,
+            nodes.len(),
+            nodes,
+            crate::constants::NER_GRAPH_CONFIDENCE_FLOOR
+        );
+    }
+
+    /// Census: of the spans the production typer commits on a corpus, how many
+    /// become graph nodes, and where the rest fall against the graph-admission
+    /// confidence floor. Prints per corpus; asserts nothing beyond the typer
+    /// being live. Run explicitly:
+    ///   SHODH_MAX_CORPUS=50 cargo test --lib ner_span_to_node_census -- --ignored --nocapture
+    #[test]
+    #[ignore = "offline census over the fixture corpora — run explicitly"]
+    fn ner_span_to_node_census() {
+        let cap: usize = std::env::var("SHODH_MAX_CORPUS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50);
+        let corpora: [(&str, &str, usize); 2] = [
+            (
+                "directional",
+                "tests/recall/corpora/directional.jsonl",
+                usize::MAX,
+            ),
+            ("locomo-gate", "tests/recall/corpora/locomo-gate.jsonl", cap),
+        ];
+        let floor = crate::constants::NER_GRAPH_CONFIDENCE_FLOOR;
+        for (label, rel, take) in corpora {
+            let _harness_env = pin_harness_threads();
+            let dir = unique_storage_dir(&format!("ner-census-{label}"));
+            let manager = build_manager(&dir).expect("manager");
+            let ner = production_ner(&manager);
+            let corpus: Vec<CorpusItem> = fixtures::load_corpus(&fixtures::manifest_path(rel))
+                .expect("corpus")
+                .into_iter()
+                .take(take)
+                .collect();
+
+            // spans: every committed span; surfaces: distinct lower-cased text.
+            let mut spans = 0usize;
+            let mut spans_at_or_above_floor = 0usize;
+            let mut by_type: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
+            let mut histogram = [0usize; 10];
+            let mut surfaces: BTreeMap<String, (f32, &'static str)> = BTreeMap::new();
+            let mut declared: HashSet<String> = HashSet::new();
+            for item in &corpus {
+                declared.extend(item.tags.iter().map(|t| t.to_lowercase()));
+                for e in ner.extract(&item.content).expect("extract") {
+                    spans += 1;
+                    let bucket = ((e.confidence * 10.0).floor() as usize).min(9);
+                    histogram[bucket] += 1;
+                    let slot = by_type.entry(e.entity_type.as_str()).or_insert((0, 0));
+                    slot.0 += 1;
+                    if e.confidence >= floor {
+                        spans_at_or_above_floor += 1;
+                        slot.1 += 1;
+                    }
+                    let entry = surfaces
+                        .entry(e.text.to_lowercase())
+                        .or_insert((0.0, e.entity_type.as_str()));
+                    entry.0 = entry.0.max(e.confidence);
+                }
+            }
+
+            ingest_corpus(&manager, &corpus).expect("ingest");
+            let nodes = graph_surfaces(&manager);
+            let edges = {
+                let graph = manager.get_user_graph(EVAL_USER).expect("graph");
+                let g = graph.read();
+                let edge_count = g.get_all_relationships().expect("relationships").len();
+                drop(g);
+                edge_count
+            };
+            let mut by_source: BTreeMap<&str, usize> = BTreeMap::new();
+            for source in nodes.values() {
+                *by_source.entry(source.as_str()).or_insert(0) += 1;
+            }
+            let surfaces_as_nodes = surfaces
+                .keys()
+                .filter(|s| nodes.contains_key(s.as_str()))
+                .count();
+            let surfaces_above_floor = surfaces.values().filter(|(c, _)| *c >= floor).count();
+            let surfaces_above_floor_as_nodes = surfaces
+                .iter()
+                .filter(|(s, (c, _))| *c >= floor && nodes.contains_key(s.as_str()))
+                .count();
+            let surfaces_below_floor_as_nodes: Vec<&String> = surfaces
+                .iter()
+                .filter(|(s, (c, _))| *c < floor && nodes.contains_key(s.as_str()))
+                .map(|(s, _)| s)
+                .collect();
+            let node_surfaces_not_from_ner: Vec<String> = nodes
+                .iter()
+                .filter(|(s, _)| !surfaces.contains_key(s.as_str()))
+                .map(|(s, src)| format!("{s}[{src}]"))
+                .collect();
+
+            println!("== {label}: {} memories, floor {floor}", corpus.len());
+            println!(
+                "   spans {spans} | >= floor {spans_at_or_above_floor} ({:.1}%) | by type \
+                 (all, >= floor) {by_type:?}",
+                100.0 * spans_at_or_above_floor as f64 / spans.max(1) as f64
+            );
+            println!("   confidence histogram [0.0-0.1 .. 0.9-1.0]: {histogram:?}");
+            println!(
+                "   distinct NER surfaces {} | >= floor {surfaces_above_floor} | became nodes \
+                 {surfaces_as_nodes} ({:.1}%) | >= floor AND node {surfaces_above_floor_as_nodes}",
+                surfaces.len(),
+                100.0 * surfaces_as_nodes as f64 / surfaces.len().max(1) as f64
+            );
+            println!(
+                "   below-floor surfaces that are nodes anyway (declared/tag-recognised): {:?}",
+                surfaces_below_floor_as_nodes
+            );
+            for ty in ["PER", "ORG", "LOC", "MISC"] {
+                let below: Vec<String> = surfaces
+                    .iter()
+                    .filter(|(_, (c, t))| *t == ty && *c < floor)
+                    .map(|(s, (c, _))| format!("{s}:{c:.2}"))
+                    .collect();
+                let above: Vec<String> = surfaces
+                    .iter()
+                    .filter(|(_, (c, t))| *t == ty && *c >= floor)
+                    .map(|(s, (c, _))| format!("{s}:{c:.2}"))
+                    .collect();
+                println!("   {ty}: {} surfaces below floor {below:?}", below.len());
+                println!("   {ty}: {} surfaces at/above floor {above:?}", above.len());
+            }
+            println!(
+                "   graph: {} nodes, {edges} edges, by source {by_source:?}; declared tag \
+                 surfaces {}",
+                nodes.len(),
+                declared.len()
+            );
+            println!("   nodes not from any NER surface: {node_surfaces_not_from_ner:?}");
+            if label == "directional" {
+                println!(
+                    "   directional nodes: {:?}",
+                    nodes.keys().collect::<Vec<_>>()
+                );
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
 }

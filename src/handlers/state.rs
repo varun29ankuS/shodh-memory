@@ -5394,15 +5394,21 @@ mod tests {
         );
     }
 
+    /// The graph must not overrule the typer on confidence. The floor used to be
+    /// pinned at `>= 0.6`, a value calibrated for BERT-tiny softmax scores; on
+    /// GLiNER's per-span sigmoid it rejected 88–95% of committed spans and every
+    /// PER span on the LoCoMo gate corpus (see `NER_GRAPH_CONFIDENCE_FLOOR`).
     #[test]
-    fn test_ner_confidence_floor_constant() {
-        assert!(
-            crate::constants::NER_GRAPH_CONFIDENCE_FLOOR >= 0.6,
-            "Confidence floor should be >= 0.6 to reject marginal entities"
+    fn test_ner_confidence_floor_matches_typer_threshold() {
+        assert_eq!(
+            crate::constants::NER_GRAPH_CONFIDENCE_FLOOR,
+            crate::embeddings::gliner::DEFAULT_THRESHOLD,
+            "the graph-insertion floor must equal the typer's commit threshold: a higher floor \
+             silently re-decides what the schema-driven typer committed, in units it never saw"
         );
         assert!(
-            crate::constants::NER_GRAPH_CONFIDENCE_FLOOR < 0.8,
-            "Confidence floor should be < 0.8 to not reject legitimate entities"
+            crate::constants::NER_GRAPH_CONFIDENCE_FLOOR > 0.0,
+            "a zero floor would admit spans a replay or fallback path emits with no confidence"
         );
     }
 
