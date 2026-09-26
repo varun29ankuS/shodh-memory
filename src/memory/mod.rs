@@ -154,7 +154,7 @@ pub fn ce_depth() -> usize {
 /// `None` when the model is absent, which is the ordinary case for a build
 /// nobody has provisioned. The failure is cached, so a missing model costs one
 /// log line rather than a load attempt per query.
-fn cross_encoder() -> Option<&'static crate::embeddings::cross_encoder::CrossEncoder> {
+pub(crate) fn cross_encoder() -> Option<&'static crate::embeddings::cross_encoder::CrossEncoder> {
     static CE: OnceLock<Option<crate::embeddings::cross_encoder::CrossEncoder>> = OnceLock::new();
     CE.get_or_init(|| {
         use crate::embeddings::cross_encoder::CrossEncoder;

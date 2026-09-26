@@ -59,10 +59,26 @@ on:
         default: '1'
         type: choice
         options: ['1', '0']
+      model_tape:
+        description: >-
+          Model tape (src/embeddings/model_tape.rs). `record` runs the models and
+          uploads every output they gave as the `model-tape` artifact. `replay`
+          answers every model call from the tape of run `tape_run` instead, so no
+          model arithmetic happens and the result cannot depend on the CPU.
+        required: false
+        default: 'off'
+        type: choice
+        options: ['off', 'record', 'replay']
+      tape_run:
+        description: 'Run id whose `model-tape` artifact to replay (model_tape=replay only)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
   pull-requests: write
+  # model_tape=replay downloads another run's artifact.
+  actions: read
 
 concurrency:
   group: recall-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'auto' }}
@@ -82,6 +98,7 @@ env:
   # with the cross-encoder by default (#562). A dispatch can set 0 to measure
   # the library default for comparison; PR runs always gate the shipped one.
   CE_RERANK: ${{ github.event.inputs.ce_rerank || '1' }}
+  MODEL_TAPE: ${{ github.event.inputs.model_tape || 'off' }}
 
 jobs:
   smoke:
@@ -90,7 +107,9 @@ jobs:
     # RH-12 (#272): with --repeats 5 the suite runs 5 independent
     # ingest+query passes (~5-6min each on a warm runner) plus build.
     # 60min keeps headroom for cold builds and unusually slow runners.
-    timeout-minutes: 60
+    # A recording runs every model live on every call (no NER cache), then
+    # scores the rest of the 100 x 629 cross-encoder table, so it gets longer.
+    timeout-minutes: ${{ github.event.inputs.model_tape == 'record' && 150 || 60 }}
     steps:
       - uses: actions/checkout@v7
 
@@ -238,6 +257,20 @@ jobs:
             exit 1
           fi
 
+      - name: Fetch model tape to replay
+        if: env.MODEL_TAPE == 'replay'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAPE_RUN: ${{ github.event.inputs.tape_run }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAPE_RUN" ]; then
+            echo "::error::model_tape=replay needs tape_run, the id of a run that recorded one."
+            exit 1
+          fi
+          gh run download "$TAPE_RUN" --repo "$GITHUB_REPOSITORY" -n model-tape -D model-tape
+          ls -la model-tape
+
       - name: Build recall-eval
         run: cargo build --release --bin recall-eval
 
@@ -248,6 +281,8 @@ jobs:
           SHODH_GLINER_MODEL_PATH: ${{ github.workspace }}/models/gliner-bi-edge
           SHODH_CE_RERANK: ${{ env.CE_RERANK }}
           SHODH_CE_MODEL_PATH: ${{ github.workspace }}/models/cross-encoder-ms-marco-minilm-l6
+          SHODH_MODEL_TAPE_RECORD: ${{ env.MODEL_TAPE == 'record' && 'model-tape.jsonl.gz' || '' }}
+          SHODH_MODEL_TAPE_REPLAY: ${{ env.MODEL_TAPE == 'replay' && 'model-tape/model-tape.jsonl.gz' || '' }}
           # Per-stage latency attribution in recall-eval.log (STAGE_TIMING
           # lines) and current.json. The probe wraps the same production
           # recall() and the wall clock stays around that call, so the gated
@@ -318,6 +353,15 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+      - name: Upload model tape
+        if: always() && env.MODEL_TAPE == 'record' && hashFiles('model-tape.jsonl.gz') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: model-tape
+          path: model-tape.jsonl.gz
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Post or update PR comment
         if: |
           always()
@@ -366,10 +410,12 @@ jobs:
           echo "Kernel class agrees: $REPORTED"
 
       - name: Enforce gate
-        # Only when the eval ran. After an earlier failure (a wrong-class
-        # runner, a missing model) the job is already red for the right reason,
-        # and an empty exit code here would add a second, misleading error.
-        if: always() && steps.run_eval.conclusion != 'skipped'
+        # Only when the eval step completed. After an earlier failure (a
+        # wrong-class runner, a missing model) or a timeout that cancelled the
+        # eval, the job is already red for the right reason, and an empty exit
+        # code here would add a second, misleading error. The eval step itself
+        # always exits 0 once it finishes; its real exit code is the output.
+        if: always() && steps.run_eval.conclusion == 'success'
         env:
           EXIT: ${{ steps.run_eval.outputs.exit_code }}
         run: |
