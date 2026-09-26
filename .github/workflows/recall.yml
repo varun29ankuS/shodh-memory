@@ -109,7 +109,10 @@ jobs:
     # 60min keeps headroom for cold builds and unusually slow runners.
     # A recording runs every model live on every call (no NER cache), then
     # scores the rest of the 100 x 629 cross-encoder table, so it gets longer.
-    timeout-minutes: ${{ github.event.inputs.model_tape == 'record' && 150 || 60 }}
+    # The held-out `locomo` suite (1,531 questions over 5,882 turns) did not
+    # finish one repeat in 60 minutes with the reranker on (runs 36240584224,
+    # 36240588900, both cancelled at the limit), so it gets the job maximum.
+    timeout-minutes: ${{ github.event.inputs.suite == 'locomo' && 360 || github.event.inputs.model_tape == 'record' && 150 || 60 }}
     steps:
       - uses: actions/checkout@v7
 
