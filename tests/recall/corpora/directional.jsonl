@@ -1,0 +1,160 @@
+{"id": "dir-m000", "content": "Priya invited Caroline to the housewarming.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-01T10:00:00+00:00"}
+{"id": "dir-m001", "content": "Caroline invited Priya to the housewarming.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-01T11:00:00+00:00"}
+{"id": "dir-m002", "content": "Joanna invited Hana to the housewarming.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-01T12:00:00+00:00"}
+{"id": "dir-m003", "content": "Hana invited Joanna to the housewarming.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-01T13:00:00+00:00"}
+{"id": "dir-m004", "content": "Jonas invited Lucas to the housewarming.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-01T14:00:00+00:00"}
+{"id": "dir-m005", "content": "Lucas invited Jonas to the housewarming.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-01T15:00:00+00:00"}
+{"id": "dir-m006", "content": "Hugo invited Daniel to the housewarming.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-01T16:00:00+00:00"}
+{"id": "dir-m007", "content": "Daniel invited Hugo to the housewarming.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-01T17:00:00+00:00"}
+{"id": "dir-m008", "content": "Ethan was invited to the housewarming by Chloe.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-01T18:00:00+00:00"}
+{"id": "dir-m009", "content": "Chloe was invited to the housewarming by Ethan.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-01T19:00:00+00:00"}
+{"id": "dir-m010", "content": "Isla was invited to the housewarming by Arjun.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-01T20:00:00+00:00"}
+{"id": "dir-m011", "content": "Arjun was invited to the housewarming by Isla.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-01T21:00:00+00:00"}
+{"id": "dir-m012", "content": "Hana helped Mei with the move.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-01T22:00:00+00:00"}
+{"id": "dir-m013", "content": "Mei helped Hana with the move.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-01T23:00:00+00:00"}
+{"id": "dir-m014", "content": "Felix helped Melanie with the move.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T00:00:00+00:00"}
+{"id": "dir-m015", "content": "Melanie helped Felix with the move.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T01:00:00+00:00"}
+{"id": "dir-m016", "content": "Grace helped Victor with the move.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T02:00:00+00:00"}
+{"id": "dir-m017", "content": "Victor helped Grace with the move.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T03:00:00+00:00"}
+{"id": "dir-m018", "content": "Sofia helped Diego with the move.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T04:00:00+00:00"}
+{"id": "dir-m019", "content": "Diego helped Sofia with the move.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T05:00:00+00:00"}
+{"id": "dir-m020", "content": "Aisha was helped with the move by Fatima.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T06:00:00+00:00"}
+{"id": "dir-m021", "content": "Fatima was helped with the move by Aisha.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T07:00:00+00:00"}
+{"id": "dir-m022", "content": "Nadia was helped with the move by Zara.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T08:00:00+00:00"}
+{"id": "dir-m023", "content": "Zara was helped with the move by Nadia.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T09:00:00+00:00"}
+{"id": "dir-m024", "content": "Daniel called Amara on Sunday night.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T10:00:00+00:00"}
+{"id": "dir-m025", "content": "Amara called Daniel on Sunday night.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T11:00:00+00:00"}
+{"id": "dir-m026", "content": "Omar called Rafael on Sunday night.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T12:00:00+00:00"}
+{"id": "dir-m027", "content": "Rafael called Omar on Sunday night.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T13:00:00+00:00"}
+{"id": "dir-m028", "content": "Leila called Ethan on Sunday night.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T14:00:00+00:00"}
+{"id": "dir-m029", "content": "Ethan called Leila on Sunday night.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T15:00:00+00:00"}
+{"id": "dir-m030", "content": "Ingrid called Nate on Sunday night.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T16:00:00+00:00"}
+{"id": "dir-m031", "content": "Nate called Ingrid on Sunday night.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T17:00:00+00:00"}
+{"id": "dir-m032", "content": "Elena was called on Sunday night by Zara.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T18:00:00+00:00"}
+{"id": "dir-m033", "content": "Zara was called on Sunday night by Elena.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T19:00:00+00:00"}
+{"id": "dir-m034", "content": "Lucas was called on Sunday night by Diego.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T20:00:00+00:00"}
+{"id": "dir-m035", "content": "Diego was called on Sunday night by Lucas.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T21:00:00+00:00"}
+{"id": "dir-m036", "content": "Isla visited Leila in the hospital.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T22:00:00+00:00"}
+{"id": "dir-m037", "content": "Leila visited Isla in the hospital.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-02T23:00:00+00:00"}
+{"id": "dir-m038", "content": "Joanna visited Tomas in the hospital.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T00:00:00+00:00"}
+{"id": "dir-m039", "content": "Tomas visited Joanna in the hospital.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T01:00:00+00:00"}
+{"id": "dir-m040", "content": "Lucas visited Arjun in the hospital.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T02:00:00+00:00"}
+{"id": "dir-m041", "content": "Arjun visited Lucas in the hospital.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T03:00:00+00:00"}
+{"id": "dir-m042", "content": "Samir visited Tara in the hospital.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T04:00:00+00:00"}
+{"id": "dir-m043", "content": "Tara visited Samir in the hospital.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T05:00:00+00:00"}
+{"id": "dir-m044", "content": "Ingrid was visited in the hospital by Felix.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T06:00:00+00:00"}
+{"id": "dir-m045", "content": "Felix was visited in the hospital by Ingrid.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T07:00:00+00:00"}
+{"id": "dir-m046", "content": "Marco was visited in the hospital by Melanie.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T08:00:00+00:00"}
+{"id": "dir-m047", "content": "Melanie was visited in the hospital by Marco.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T09:00:00+00:00"}
+{"id": "dir-m048", "content": "Oliver hired Nadia for the bakery.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T10:00:00+00:00"}
+{"id": "dir-m049", "content": "Nadia hired Oliver for the bakery.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T11:00:00+00:00"}
+{"id": "dir-m050", "content": "Tara hired Fatima for the bakery.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T12:00:00+00:00"}
+{"id": "dir-m051", "content": "Fatima hired Tara for the bakery.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T13:00:00+00:00"}
+{"id": "dir-m052", "content": "Lucas hired Sofia for the bakery.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T14:00:00+00:00"}
+{"id": "dir-m053", "content": "Sofia hired Lucas for the bakery.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T15:00:00+00:00"}
+{"id": "dir-m054", "content": "Tomas hired Chloe for the bakery.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T16:00:00+00:00"}
+{"id": "dir-m055", "content": "Chloe hired Tomas for the bakery.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T17:00:00+00:00"}
+{"id": "dir-m056", "content": "Marco was hired for the bakery by Caroline.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T18:00:00+00:00"}
+{"id": "dir-m057", "content": "Caroline was hired for the bakery by Marco.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T19:00:00+00:00"}
+{"id": "dir-m058", "content": "Joanna was hired for the bakery by Felix.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T20:00:00+00:00"}
+{"id": "dir-m059", "content": "Felix was hired for the bakery by Joanna.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T21:00:00+00:00"}
+{"id": "dir-m060", "content": "Elena forgave Hana after the argument.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T22:00:00+00:00"}
+{"id": "dir-m061", "content": "Hana forgave Elena after the argument.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-03T23:00:00+00:00"}
+{"id": "dir-m062", "content": "Marco forgave Grace after the argument.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T00:00:00+00:00"}
+{"id": "dir-m063", "content": "Grace forgave Marco after the argument.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T01:00:00+00:00"}
+{"id": "dir-m064", "content": "Zara forgave Caroline after the argument.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T02:00:00+00:00"}
+{"id": "dir-m065", "content": "Caroline forgave Zara after the argument.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T03:00:00+00:00"}
+{"id": "dir-m066", "content": "Aisha forgave Mei after the argument.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T04:00:00+00:00"}
+{"id": "dir-m067", "content": "Mei forgave Aisha after the argument.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T05:00:00+00:00"}
+{"id": "dir-m068", "content": "Chloe was forgiven after the argument by Rafael.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T06:00:00+00:00"}
+{"id": "dir-m069", "content": "Rafael was forgiven after the argument by Chloe.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T07:00:00+00:00"}
+{"id": "dir-m070", "content": "Tara was forgiven after the argument by Melanie.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T08:00:00+00:00"}
+{"id": "dir-m071", "content": "Melanie was forgiven after the argument by Tara.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T09:00:00+00:00"}
+{"id": "dir-m072", "content": "Isla taught Rosa to play guitar.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T10:00:00+00:00"}
+{"id": "dir-m073", "content": "Rosa taught Isla to play guitar.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T11:00:00+00:00"}
+{"id": "dir-m074", "content": "Melanie taught Hana to play guitar.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T12:00:00+00:00"}
+{"id": "dir-m075", "content": "Hana taught Melanie to play guitar.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T13:00:00+00:00"}
+{"id": "dir-m076", "content": "Kwame taught Amara to play guitar.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T14:00:00+00:00"}
+{"id": "dir-m077", "content": "Amara taught Kwame to play guitar.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T15:00:00+00:00"}
+{"id": "dir-m078", "content": "Elena taught Nadia to play guitar.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T16:00:00+00:00"}
+{"id": "dir-m079", "content": "Nadia taught Elena to play guitar.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T17:00:00+00:00"}
+{"id": "dir-m080", "content": "Arjun was taught to play guitar by Priya.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T18:00:00+00:00"}
+{"id": "dir-m081", "content": "Priya was taught to play guitar by Arjun.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T19:00:00+00:00"}
+{"id": "dir-m082", "content": "Clara was taught to play guitar by Zara.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T20:00:00+00:00"}
+{"id": "dir-m083", "content": "Zara was taught to play guitar by Clara.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T21:00:00+00:00"}
+{"id": "dir-m084", "content": "Caroline beat Rafael at chess.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T22:00:00+00:00"}
+{"id": "dir-m085", "content": "Rafael beat Caroline at chess.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-04T23:00:00+00:00"}
+{"id": "dir-m086", "content": "Oliver beat Zara at chess.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T00:00:00+00:00"}
+{"id": "dir-m087", "content": "Zara beat Oliver at chess.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T01:00:00+00:00"}
+{"id": "dir-m088", "content": "Clara beat Felix at chess.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T02:00:00+00:00"}
+{"id": "dir-m089", "content": "Felix beat Clara at chess.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T03:00:00+00:00"}
+{"id": "dir-m090", "content": "Elena beat Arjun at chess.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T04:00:00+00:00"}
+{"id": "dir-m091", "content": "Arjun beat Elena at chess.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T05:00:00+00:00"}
+{"id": "dir-m092", "content": "Rosa was beaten at chess by Leila.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T06:00:00+00:00"}
+{"id": "dir-m093", "content": "Leila was beaten at chess by Rosa.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T07:00:00+00:00"}
+{"id": "dir-m094", "content": "Marco was beaten at chess by Yuki.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T08:00:00+00:00"}
+{"id": "dir-m095", "content": "Yuki was beaten at chess by Marco.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T09:00:00+00:00"}
+{"id": "dir-m096", "content": "Jonas thanked Isla for the birthday gift.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T10:00:00+00:00"}
+{"id": "dir-m097", "content": "Isla thanked Jonas for the birthday gift.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T11:00:00+00:00"}
+{"id": "dir-m098", "content": "Caroline thanked Zara for the birthday gift.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T12:00:00+00:00"}
+{"id": "dir-m099", "content": "Zara thanked Caroline for the birthday gift.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T13:00:00+00:00"}
+{"id": "dir-m100", "content": "Grace thanked Fatima for the birthday gift.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T14:00:00+00:00"}
+{"id": "dir-m101", "content": "Fatima thanked Grace for the birthday gift.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T15:00:00+00:00"}
+{"id": "dir-m102", "content": "Mei thanked Nadia for the birthday gift.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T16:00:00+00:00"}
+{"id": "dir-m103", "content": "Nadia thanked Mei for the birthday gift.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T17:00:00+00:00"}
+{"id": "dir-m104", "content": "Yuki was thanked for the birthday gift by Nate.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T18:00:00+00:00"}
+{"id": "dir-m105", "content": "Nate was thanked for the birthday gift by Yuki.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T19:00:00+00:00"}
+{"id": "dir-m106", "content": "Felix was thanked for the birthday gift by Clara.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T20:00:00+00:00"}
+{"id": "dir-m107", "content": "Clara was thanked for the birthday gift by Felix.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T21:00:00+00:00"}
+{"id": "dir-m108", "content": "Mateo interviewed Melanie for the podcast.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T22:00:00+00:00"}
+{"id": "dir-m109", "content": "Melanie interviewed Mateo for the podcast.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-05T23:00:00+00:00"}
+{"id": "dir-m110", "content": "Grace interviewed Ethan for the podcast.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T00:00:00+00:00"}
+{"id": "dir-m111", "content": "Ethan interviewed Grace for the podcast.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T01:00:00+00:00"}
+{"id": "dir-m112", "content": "Clara interviewed Fatima for the podcast.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T02:00:00+00:00"}
+{"id": "dir-m113", "content": "Fatima interviewed Clara for the podcast.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T03:00:00+00:00"}
+{"id": "dir-m114", "content": "Lucas interviewed Tara for the podcast.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T04:00:00+00:00"}
+{"id": "dir-m115", "content": "Tara interviewed Lucas for the podcast.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T05:00:00+00:00"}
+{"id": "dir-m116", "content": "Ingrid was interviewed for the podcast by Samir.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T06:00:00+00:00"}
+{"id": "dir-m117", "content": "Samir was interviewed for the podcast by Ingrid.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T07:00:00+00:00"}
+{"id": "dir-m118", "content": "Chloe was interviewed for the podcast by Rosa.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T08:00:00+00:00"}
+{"id": "dir-m119", "content": "Rosa was interviewed for the podcast by Chloe.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T09:00:00+00:00"}
+{"id": "dir-m120", "content": "Nate has been training for a half marathon since spring.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T10:00:00+00:00"}
+{"id": "dir-m121", "content": "Joanna started learning to bake sourdough bread.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T11:00:00+00:00"}
+{"id": "dir-m122", "content": "Caroline adopted a rescue dog named Biscuit.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T12:00:00+00:00"}
+{"id": "dir-m123", "content": "Melanie is saving up for a trip to Portugal.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T13:00:00+00:00"}
+{"id": "dir-m124", "content": "Priya repainted the kitchen a pale green.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T14:00:00+00:00"}
+{"id": "dir-m125", "content": "Tomas joined a pottery class on Thursday evenings.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T15:00:00+00:00"}
+{"id": "dir-m126", "content": "Aisha has been reading a lot of science fiction lately.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T16:00:00+00:00"}
+{"id": "dir-m127", "content": "Daniel switched to cycling to work.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T17:00:00+00:00"}
+{"id": "dir-m128", "content": "Mei has been training for a half marathon since spring.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T18:00:00+00:00"}
+{"id": "dir-m129", "content": "Oliver started learning to bake sourdough bread.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T19:00:00+00:00"}
+{"id": "dir-m130", "content": "Fatima adopted a rescue dog named Biscuit.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T20:00:00+00:00"}
+{"id": "dir-m131", "content": "Lucas is saving up for a trip to Portugal.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T21:00:00+00:00"}
+{"id": "dir-m132", "content": "Sofia repainted the kitchen a pale green.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T22:00:00+00:00"}
+{"id": "dir-m133", "content": "Kwame joined a pottery class on Thursday evenings.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-06T23:00:00+00:00"}
+{"id": "dir-m134", "content": "Hana has been reading a lot of science fiction lately.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T00:00:00+00:00"}
+{"id": "dir-m135", "content": "Ethan switched to cycling to work.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T01:00:00+00:00"}
+{"id": "dir-m136", "content": "Leila has been training for a half marathon since spring.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T02:00:00+00:00"}
+{"id": "dir-m137", "content": "Marco started learning to bake sourdough bread.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T03:00:00+00:00"}
+{"id": "dir-m138", "content": "Yuki adopted a rescue dog named Biscuit.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T04:00:00+00:00"}
+{"id": "dir-m139", "content": "Grace is saving up for a trip to Portugal.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T05:00:00+00:00"}
+{"id": "dir-m140", "content": "Omar repainted the kitchen a pale green.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T06:00:00+00:00"}
+{"id": "dir-m141", "content": "Ingrid joined a pottery class on Thursday evenings.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T07:00:00+00:00"}
+{"id": "dir-m142", "content": "Rafael has been reading a lot of science fiction lately.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T08:00:00+00:00"}
+{"id": "dir-m143", "content": "Chloe switched to cycling to work.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T09:00:00+00:00"}
+{"id": "dir-m144", "content": "Arjun has been training for a half marathon since spring.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T10:00:00+00:00"}
+{"id": "dir-m145", "content": "Nadia started learning to bake sourdough bread.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T11:00:00+00:00"}
+{"id": "dir-m146", "content": "Felix adopted a rescue dog named Biscuit.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T12:00:00+00:00"}
+{"id": "dir-m147", "content": "Zara is saving up for a trip to Portugal.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T13:00:00+00:00"}
+{"id": "dir-m148", "content": "Diego repainted the kitchen a pale green.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T14:00:00+00:00"}
+{"id": "dir-m149", "content": "Elena joined a pottery class on Thursday evenings.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T15:00:00+00:00"}
+{"id": "dir-m150", "content": "Samir has been reading a lot of science fiction lately.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T16:00:00+00:00"}
+{"id": "dir-m151", "content": "Clara switched to cycling to work.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T17:00:00+00:00"}
+{"id": "dir-m152", "content": "Jonas has been training for a half marathon since spring.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T18:00:00+00:00"}
+{"id": "dir-m153", "content": "Amara started learning to bake sourdough bread.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T19:00:00+00:00"}
+{"id": "dir-m154", "content": "Victor adopted a rescue dog named Biscuit.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T20:00:00+00:00"}
+{"id": "dir-m155", "content": "Isla is saving up for a trip to Portugal.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T21:00:00+00:00"}
+{"id": "dir-m156", "content": "Mateo repainted the kitchen a pale green.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T22:00:00+00:00"}
+{"id": "dir-m157", "content": "Rosa joined a pottery class on Thursday evenings.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-07T23:00:00+00:00"}
+{"id": "dir-m158", "content": "Hugo has been reading a lot of science fiction lately.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-08T00:00:00+00:00"}
+{"id": "dir-m159", "content": "Tara switched to cycling to work.", "memory_type": "conversation", "tags": ["directional"], "created_at": "2025-03-08T01:00:00+00:00"}

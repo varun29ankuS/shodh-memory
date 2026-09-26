@@ -1,0 +1,240 @@
+{"id": "dir-q000", "category": "dir_object", "query": "Who did Priya invite to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m000", "grade": 3}]}
+{"id": "dir-q001", "category": "dir_subject", "query": "Who invited Caroline to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m000", "grade": 3}]}
+{"id": "dir-q002", "category": "dir_object", "query": "Who did Caroline invite to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m001", "grade": 3}]}
+{"id": "dir-q003", "category": "dir_subject", "query": "Who invited Priya to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m001", "grade": 3}]}
+{"id": "dir-q004", "category": "dir_object", "query": "Who did Joanna invite to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m002", "grade": 3}]}
+{"id": "dir-q005", "category": "dir_subject", "query": "Who invited Hana to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m002", "grade": 3}]}
+{"id": "dir-q006", "category": "dir_object", "query": "Who did Hana invite to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m003", "grade": 3}]}
+{"id": "dir-q007", "category": "dir_subject", "query": "Who invited Joanna to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m003", "grade": 3}]}
+{"id": "dir-q008", "category": "dir_object", "query": "Who did Jonas invite to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m004", "grade": 3}]}
+{"id": "dir-q009", "category": "dir_subject", "query": "Who invited Lucas to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m004", "grade": 3}]}
+{"id": "dir-q010", "category": "dir_object", "query": "Who did Lucas invite to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m005", "grade": 3}]}
+{"id": "dir-q011", "category": "dir_subject", "query": "Who invited Jonas to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m005", "grade": 3}]}
+{"id": "dir-q012", "category": "dir_object", "query": "Who did Hugo invite to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m006", "grade": 3}]}
+{"id": "dir-q013", "category": "dir_subject", "query": "Who invited Daniel to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m006", "grade": 3}]}
+{"id": "dir-q014", "category": "dir_object", "query": "Who did Daniel invite to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m007", "grade": 3}]}
+{"id": "dir-q015", "category": "dir_subject", "query": "Who invited Hugo to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m007", "grade": 3}]}
+{"id": "dir-q016", "category": "dir_passive", "query": "Who did Chloe invite to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m008", "grade": 3}]}
+{"id": "dir-q017", "category": "dir_passive", "query": "Who invited Ethan to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m008", "grade": 3}]}
+{"id": "dir-q018", "category": "dir_passive", "query": "Who did Ethan invite to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m009", "grade": 3}]}
+{"id": "dir-q019", "category": "dir_passive", "query": "Who invited Chloe to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m009", "grade": 3}]}
+{"id": "dir-q020", "category": "dir_passive", "query": "Who did Arjun invite to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m010", "grade": 3}]}
+{"id": "dir-q021", "category": "dir_passive", "query": "Who invited Isla to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m010", "grade": 3}]}
+{"id": "dir-q022", "category": "dir_passive", "query": "Who did Isla invite to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m011", "grade": 3}]}
+{"id": "dir-q023", "category": "dir_passive", "query": "Who invited Arjun to the housewarming?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m011", "grade": 3}]}
+{"id": "dir-q024", "category": "dir_object", "query": "Who did Hana help with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m012", "grade": 3}]}
+{"id": "dir-q025", "category": "dir_subject", "query": "Who helped Mei with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m012", "grade": 3}]}
+{"id": "dir-q026", "category": "dir_object", "query": "Who did Mei help with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m013", "grade": 3}]}
+{"id": "dir-q027", "category": "dir_subject", "query": "Who helped Hana with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m013", "grade": 3}]}
+{"id": "dir-q028", "category": "dir_object", "query": "Who did Felix help with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m014", "grade": 3}]}
+{"id": "dir-q029", "category": "dir_subject", "query": "Who helped Melanie with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m014", "grade": 3}]}
+{"id": "dir-q030", "category": "dir_object", "query": "Who did Melanie help with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m015", "grade": 3}]}
+{"id": "dir-q031", "category": "dir_subject", "query": "Who helped Felix with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m015", "grade": 3}]}
+{"id": "dir-q032", "category": "dir_object", "query": "Who did Grace help with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m016", "grade": 3}]}
+{"id": "dir-q033", "category": "dir_subject", "query": "Who helped Victor with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m016", "grade": 3}]}
+{"id": "dir-q034", "category": "dir_object", "query": "Who did Victor help with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m017", "grade": 3}]}
+{"id": "dir-q035", "category": "dir_subject", "query": "Who helped Grace with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m017", "grade": 3}]}
+{"id": "dir-q036", "category": "dir_object", "query": "Who did Sofia help with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m018", "grade": 3}]}
+{"id": "dir-q037", "category": "dir_subject", "query": "Who helped Diego with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m018", "grade": 3}]}
+{"id": "dir-q038", "category": "dir_object", "query": "Who did Diego help with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m019", "grade": 3}]}
+{"id": "dir-q039", "category": "dir_subject", "query": "Who helped Sofia with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m019", "grade": 3}]}
+{"id": "dir-q040", "category": "dir_passive", "query": "Who did Fatima help with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m020", "grade": 3}]}
+{"id": "dir-q041", "category": "dir_passive", "query": "Who helped Aisha with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m020", "grade": 3}]}
+{"id": "dir-q042", "category": "dir_passive", "query": "Who did Aisha help with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m021", "grade": 3}]}
+{"id": "dir-q043", "category": "dir_passive", "query": "Who helped Fatima with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m021", "grade": 3}]}
+{"id": "dir-q044", "category": "dir_passive", "query": "Who did Zara help with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m022", "grade": 3}]}
+{"id": "dir-q045", "category": "dir_passive", "query": "Who helped Nadia with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m022", "grade": 3}]}
+{"id": "dir-q046", "category": "dir_passive", "query": "Who did Nadia help with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m023", "grade": 3}]}
+{"id": "dir-q047", "category": "dir_passive", "query": "Who helped Zara with the move?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m023", "grade": 3}]}
+{"id": "dir-q048", "category": "dir_object", "query": "Who did Daniel call on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m024", "grade": 3}]}
+{"id": "dir-q049", "category": "dir_subject", "query": "Who called Amara on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m024", "grade": 3}]}
+{"id": "dir-q050", "category": "dir_object", "query": "Who did Amara call on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m025", "grade": 3}]}
+{"id": "dir-q051", "category": "dir_subject", "query": "Who called Daniel on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m025", "grade": 3}]}
+{"id": "dir-q052", "category": "dir_object", "query": "Who did Omar call on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m026", "grade": 3}]}
+{"id": "dir-q053", "category": "dir_subject", "query": "Who called Rafael on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m026", "grade": 3}]}
+{"id": "dir-q054", "category": "dir_object", "query": "Who did Rafael call on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m027", "grade": 3}]}
+{"id": "dir-q055", "category": "dir_subject", "query": "Who called Omar on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m027", "grade": 3}]}
+{"id": "dir-q056", "category": "dir_object", "query": "Who did Leila call on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m028", "grade": 3}]}
+{"id": "dir-q057", "category": "dir_subject", "query": "Who called Ethan on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m028", "grade": 3}]}
+{"id": "dir-q058", "category": "dir_object", "query": "Who did Ethan call on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m029", "grade": 3}]}
+{"id": "dir-q059", "category": "dir_subject", "query": "Who called Leila on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m029", "grade": 3}]}
+{"id": "dir-q060", "category": "dir_object", "query": "Who did Ingrid call on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m030", "grade": 3}]}
+{"id": "dir-q061", "category": "dir_subject", "query": "Who called Nate on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m030", "grade": 3}]}
+{"id": "dir-q062", "category": "dir_object", "query": "Who did Nate call on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m031", "grade": 3}]}
+{"id": "dir-q063", "category": "dir_subject", "query": "Who called Ingrid on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m031", "grade": 3}]}
+{"id": "dir-q064", "category": "dir_passive", "query": "Who did Zara call on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m032", "grade": 3}]}
+{"id": "dir-q065", "category": "dir_passive", "query": "Who called Elena on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m032", "grade": 3}]}
+{"id": "dir-q066", "category": "dir_passive", "query": "Who did Elena call on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m033", "grade": 3}]}
+{"id": "dir-q067", "category": "dir_passive", "query": "Who called Zara on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m033", "grade": 3}]}
+{"id": "dir-q068", "category": "dir_passive", "query": "Who did Diego call on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m034", "grade": 3}]}
+{"id": "dir-q069", "category": "dir_passive", "query": "Who called Lucas on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m034", "grade": 3}]}
+{"id": "dir-q070", "category": "dir_passive", "query": "Who did Lucas call on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m035", "grade": 3}]}
+{"id": "dir-q071", "category": "dir_passive", "query": "Who called Diego on Sunday night?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m035", "grade": 3}]}
+{"id": "dir-q072", "category": "dir_object", "query": "Who did Isla visit in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m036", "grade": 3}]}
+{"id": "dir-q073", "category": "dir_subject", "query": "Who visited Leila in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m036", "grade": 3}]}
+{"id": "dir-q074", "category": "dir_object", "query": "Who did Leila visit in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m037", "grade": 3}]}
+{"id": "dir-q075", "category": "dir_subject", "query": "Who visited Isla in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m037", "grade": 3}]}
+{"id": "dir-q076", "category": "dir_object", "query": "Who did Joanna visit in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m038", "grade": 3}]}
+{"id": "dir-q077", "category": "dir_subject", "query": "Who visited Tomas in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m038", "grade": 3}]}
+{"id": "dir-q078", "category": "dir_object", "query": "Who did Tomas visit in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m039", "grade": 3}]}
+{"id": "dir-q079", "category": "dir_subject", "query": "Who visited Joanna in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m039", "grade": 3}]}
+{"id": "dir-q080", "category": "dir_object", "query": "Who did Lucas visit in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m040", "grade": 3}]}
+{"id": "dir-q081", "category": "dir_subject", "query": "Who visited Arjun in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m040", "grade": 3}]}
+{"id": "dir-q082", "category": "dir_object", "query": "Who did Arjun visit in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m041", "grade": 3}]}
+{"id": "dir-q083", "category": "dir_subject", "query": "Who visited Lucas in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m041", "grade": 3}]}
+{"id": "dir-q084", "category": "dir_object", "query": "Who did Samir visit in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m042", "grade": 3}]}
+{"id": "dir-q085", "category": "dir_subject", "query": "Who visited Tara in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m042", "grade": 3}]}
+{"id": "dir-q086", "category": "dir_object", "query": "Who did Tara visit in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m043", "grade": 3}]}
+{"id": "dir-q087", "category": "dir_subject", "query": "Who visited Samir in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m043", "grade": 3}]}
+{"id": "dir-q088", "category": "dir_passive", "query": "Who did Felix visit in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m044", "grade": 3}]}
+{"id": "dir-q089", "category": "dir_passive", "query": "Who visited Ingrid in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m044", "grade": 3}]}
+{"id": "dir-q090", "category": "dir_passive", "query": "Who did Ingrid visit in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m045", "grade": 3}]}
+{"id": "dir-q091", "category": "dir_passive", "query": "Who visited Felix in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m045", "grade": 3}]}
+{"id": "dir-q092", "category": "dir_passive", "query": "Who did Melanie visit in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m046", "grade": 3}]}
+{"id": "dir-q093", "category": "dir_passive", "query": "Who visited Marco in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m046", "grade": 3}]}
+{"id": "dir-q094", "category": "dir_passive", "query": "Who did Marco visit in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m047", "grade": 3}]}
+{"id": "dir-q095", "category": "dir_passive", "query": "Who visited Melanie in the hospital?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m047", "grade": 3}]}
+{"id": "dir-q096", "category": "dir_object", "query": "Who did Oliver hire for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m048", "grade": 3}]}
+{"id": "dir-q097", "category": "dir_subject", "query": "Who hired Nadia for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m048", "grade": 3}]}
+{"id": "dir-q098", "category": "dir_object", "query": "Who did Nadia hire for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m049", "grade": 3}]}
+{"id": "dir-q099", "category": "dir_subject", "query": "Who hired Oliver for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m049", "grade": 3}]}
+{"id": "dir-q100", "category": "dir_object", "query": "Who did Tara hire for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m050", "grade": 3}]}
+{"id": "dir-q101", "category": "dir_subject", "query": "Who hired Fatima for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m050", "grade": 3}]}
+{"id": "dir-q102", "category": "dir_object", "query": "Who did Fatima hire for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m051", "grade": 3}]}
+{"id": "dir-q103", "category": "dir_subject", "query": "Who hired Tara for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m051", "grade": 3}]}
+{"id": "dir-q104", "category": "dir_object", "query": "Who did Lucas hire for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m052", "grade": 3}]}
+{"id": "dir-q105", "category": "dir_subject", "query": "Who hired Sofia for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m052", "grade": 3}]}
+{"id": "dir-q106", "category": "dir_object", "query": "Who did Sofia hire for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m053", "grade": 3}]}
+{"id": "dir-q107", "category": "dir_subject", "query": "Who hired Lucas for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m053", "grade": 3}]}
+{"id": "dir-q108", "category": "dir_object", "query": "Who did Tomas hire for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m054", "grade": 3}]}
+{"id": "dir-q109", "category": "dir_subject", "query": "Who hired Chloe for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m054", "grade": 3}]}
+{"id": "dir-q110", "category": "dir_object", "query": "Who did Chloe hire for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m055", "grade": 3}]}
+{"id": "dir-q111", "category": "dir_subject", "query": "Who hired Tomas for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m055", "grade": 3}]}
+{"id": "dir-q112", "category": "dir_passive", "query": "Who did Caroline hire for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m056", "grade": 3}]}
+{"id": "dir-q113", "category": "dir_passive", "query": "Who hired Marco for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m056", "grade": 3}]}
+{"id": "dir-q114", "category": "dir_passive", "query": "Who did Marco hire for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m057", "grade": 3}]}
+{"id": "dir-q115", "category": "dir_passive", "query": "Who hired Caroline for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m057", "grade": 3}]}
+{"id": "dir-q116", "category": "dir_passive", "query": "Who did Felix hire for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m058", "grade": 3}]}
+{"id": "dir-q117", "category": "dir_passive", "query": "Who hired Joanna for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m058", "grade": 3}]}
+{"id": "dir-q118", "category": "dir_passive", "query": "Who did Joanna hire for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m059", "grade": 3}]}
+{"id": "dir-q119", "category": "dir_passive", "query": "Who hired Felix for the bakery?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m059", "grade": 3}]}
+{"id": "dir-q120", "category": "dir_object", "query": "Who did Elena forgive after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m060", "grade": 3}]}
+{"id": "dir-q121", "category": "dir_subject", "query": "Who forgave Hana after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m060", "grade": 3}]}
+{"id": "dir-q122", "category": "dir_object", "query": "Who did Hana forgive after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m061", "grade": 3}]}
+{"id": "dir-q123", "category": "dir_subject", "query": "Who forgave Elena after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m061", "grade": 3}]}
+{"id": "dir-q124", "category": "dir_object", "query": "Who did Marco forgive after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m062", "grade": 3}]}
+{"id": "dir-q125", "category": "dir_subject", "query": "Who forgave Grace after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m062", "grade": 3}]}
+{"id": "dir-q126", "category": "dir_object", "query": "Who did Grace forgive after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m063", "grade": 3}]}
+{"id": "dir-q127", "category": "dir_subject", "query": "Who forgave Marco after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m063", "grade": 3}]}
+{"id": "dir-q128", "category": "dir_object", "query": "Who did Zara forgive after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m064", "grade": 3}]}
+{"id": "dir-q129", "category": "dir_subject", "query": "Who forgave Caroline after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m064", "grade": 3}]}
+{"id": "dir-q130", "category": "dir_object", "query": "Who did Caroline forgive after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m065", "grade": 3}]}
+{"id": "dir-q131", "category": "dir_subject", "query": "Who forgave Zara after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m065", "grade": 3}]}
+{"id": "dir-q132", "category": "dir_object", "query": "Who did Aisha forgive after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m066", "grade": 3}]}
+{"id": "dir-q133", "category": "dir_subject", "query": "Who forgave Mei after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m066", "grade": 3}]}
+{"id": "dir-q134", "category": "dir_object", "query": "Who did Mei forgive after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m067", "grade": 3}]}
+{"id": "dir-q135", "category": "dir_subject", "query": "Who forgave Aisha after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m067", "grade": 3}]}
+{"id": "dir-q136", "category": "dir_passive", "query": "Who did Rafael forgive after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m068", "grade": 3}]}
+{"id": "dir-q137", "category": "dir_passive", "query": "Who forgave Chloe after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m068", "grade": 3}]}
+{"id": "dir-q138", "category": "dir_passive", "query": "Who did Chloe forgive after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m069", "grade": 3}]}
+{"id": "dir-q139", "category": "dir_passive", "query": "Who forgave Rafael after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m069", "grade": 3}]}
+{"id": "dir-q140", "category": "dir_passive", "query": "Who did Melanie forgive after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m070", "grade": 3}]}
+{"id": "dir-q141", "category": "dir_passive", "query": "Who forgave Tara after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m070", "grade": 3}]}
+{"id": "dir-q142", "category": "dir_passive", "query": "Who did Tara forgive after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m071", "grade": 3}]}
+{"id": "dir-q143", "category": "dir_passive", "query": "Who forgave Melanie after the argument?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m071", "grade": 3}]}
+{"id": "dir-q144", "category": "dir_object", "query": "Who did Isla teach to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m072", "grade": 3}]}
+{"id": "dir-q145", "category": "dir_subject", "query": "Who taught Rosa to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m072", "grade": 3}]}
+{"id": "dir-q146", "category": "dir_object", "query": "Who did Rosa teach to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m073", "grade": 3}]}
+{"id": "dir-q147", "category": "dir_subject", "query": "Who taught Isla to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m073", "grade": 3}]}
+{"id": "dir-q148", "category": "dir_object", "query": "Who did Melanie teach to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m074", "grade": 3}]}
+{"id": "dir-q149", "category": "dir_subject", "query": "Who taught Hana to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m074", "grade": 3}]}
+{"id": "dir-q150", "category": "dir_object", "query": "Who did Hana teach to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m075", "grade": 3}]}
+{"id": "dir-q151", "category": "dir_subject", "query": "Who taught Melanie to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m075", "grade": 3}]}
+{"id": "dir-q152", "category": "dir_object", "query": "Who did Kwame teach to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m076", "grade": 3}]}
+{"id": "dir-q153", "category": "dir_subject", "query": "Who taught Amara to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m076", "grade": 3}]}
+{"id": "dir-q154", "category": "dir_object", "query": "Who did Amara teach to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m077", "grade": 3}]}
+{"id": "dir-q155", "category": "dir_subject", "query": "Who taught Kwame to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m077", "grade": 3}]}
+{"id": "dir-q156", "category": "dir_object", "query": "Who did Elena teach to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m078", "grade": 3}]}
+{"id": "dir-q157", "category": "dir_subject", "query": "Who taught Nadia to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m078", "grade": 3}]}
+{"id": "dir-q158", "category": "dir_object", "query": "Who did Nadia teach to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m079", "grade": 3}]}
+{"id": "dir-q159", "category": "dir_subject", "query": "Who taught Elena to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m079", "grade": 3}]}
+{"id": "dir-q160", "category": "dir_passive", "query": "Who did Priya teach to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m080", "grade": 3}]}
+{"id": "dir-q161", "category": "dir_passive", "query": "Who taught Arjun to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m080", "grade": 3}]}
+{"id": "dir-q162", "category": "dir_passive", "query": "Who did Arjun teach to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m081", "grade": 3}]}
+{"id": "dir-q163", "category": "dir_passive", "query": "Who taught Priya to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m081", "grade": 3}]}
+{"id": "dir-q164", "category": "dir_passive", "query": "Who did Zara teach to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m082", "grade": 3}]}
+{"id": "dir-q165", "category": "dir_passive", "query": "Who taught Clara to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m082", "grade": 3}]}
+{"id": "dir-q166", "category": "dir_passive", "query": "Who did Clara teach to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m083", "grade": 3}]}
+{"id": "dir-q167", "category": "dir_passive", "query": "Who taught Zara to play guitar?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m083", "grade": 3}]}
+{"id": "dir-q168", "category": "dir_object", "query": "Who did Caroline beat at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m084", "grade": 3}]}
+{"id": "dir-q169", "category": "dir_subject", "query": "Who beat Rafael at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m084", "grade": 3}]}
+{"id": "dir-q170", "category": "dir_object", "query": "Who did Rafael beat at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m085", "grade": 3}]}
+{"id": "dir-q171", "category": "dir_subject", "query": "Who beat Caroline at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m085", "grade": 3}]}
+{"id": "dir-q172", "category": "dir_object", "query": "Who did Oliver beat at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m086", "grade": 3}]}
+{"id": "dir-q173", "category": "dir_subject", "query": "Who beat Zara at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m086", "grade": 3}]}
+{"id": "dir-q174", "category": "dir_object", "query": "Who did Zara beat at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m087", "grade": 3}]}
+{"id": "dir-q175", "category": "dir_subject", "query": "Who beat Oliver at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m087", "grade": 3}]}
+{"id": "dir-q176", "category": "dir_object", "query": "Who did Clara beat at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m088", "grade": 3}]}
+{"id": "dir-q177", "category": "dir_subject", "query": "Who beat Felix at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m088", "grade": 3}]}
+{"id": "dir-q178", "category": "dir_object", "query": "Who did Felix beat at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m089", "grade": 3}]}
+{"id": "dir-q179", "category": "dir_subject", "query": "Who beat Clara at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m089", "grade": 3}]}
+{"id": "dir-q180", "category": "dir_object", "query": "Who did Elena beat at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m090", "grade": 3}]}
+{"id": "dir-q181", "category": "dir_subject", "query": "Who beat Arjun at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m090", "grade": 3}]}
+{"id": "dir-q182", "category": "dir_object", "query": "Who did Arjun beat at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m091", "grade": 3}]}
+{"id": "dir-q183", "category": "dir_subject", "query": "Who beat Elena at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m091", "grade": 3}]}
+{"id": "dir-q184", "category": "dir_passive", "query": "Who did Leila beat at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m092", "grade": 3}]}
+{"id": "dir-q185", "category": "dir_passive", "query": "Who beat Rosa at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m092", "grade": 3}]}
+{"id": "dir-q186", "category": "dir_passive", "query": "Who did Rosa beat at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m093", "grade": 3}]}
+{"id": "dir-q187", "category": "dir_passive", "query": "Who beat Leila at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m093", "grade": 3}]}
+{"id": "dir-q188", "category": "dir_passive", "query": "Who did Yuki beat at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m094", "grade": 3}]}
+{"id": "dir-q189", "category": "dir_passive", "query": "Who beat Marco at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m094", "grade": 3}]}
+{"id": "dir-q190", "category": "dir_passive", "query": "Who did Marco beat at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m095", "grade": 3}]}
+{"id": "dir-q191", "category": "dir_passive", "query": "Who beat Yuki at chess?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m095", "grade": 3}]}
+{"id": "dir-q192", "category": "dir_object", "query": "Who did Jonas thank for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m096", "grade": 3}]}
+{"id": "dir-q193", "category": "dir_subject", "query": "Who thanked Isla for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m096", "grade": 3}]}
+{"id": "dir-q194", "category": "dir_object", "query": "Who did Isla thank for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m097", "grade": 3}]}
+{"id": "dir-q195", "category": "dir_subject", "query": "Who thanked Jonas for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m097", "grade": 3}]}
+{"id": "dir-q196", "category": "dir_object", "query": "Who did Caroline thank for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m098", "grade": 3}]}
+{"id": "dir-q197", "category": "dir_subject", "query": "Who thanked Zara for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m098", "grade": 3}]}
+{"id": "dir-q198", "category": "dir_object", "query": "Who did Zara thank for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m099", "grade": 3}]}
+{"id": "dir-q199", "category": "dir_subject", "query": "Who thanked Caroline for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m099", "grade": 3}]}
+{"id": "dir-q200", "category": "dir_object", "query": "Who did Grace thank for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m100", "grade": 3}]}
+{"id": "dir-q201", "category": "dir_subject", "query": "Who thanked Fatima for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m100", "grade": 3}]}
+{"id": "dir-q202", "category": "dir_object", "query": "Who did Fatima thank for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m101", "grade": 3}]}
+{"id": "dir-q203", "category": "dir_subject", "query": "Who thanked Grace for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m101", "grade": 3}]}
+{"id": "dir-q204", "category": "dir_object", "query": "Who did Mei thank for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m102", "grade": 3}]}
+{"id": "dir-q205", "category": "dir_subject", "query": "Who thanked Nadia for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m102", "grade": 3}]}
+{"id": "dir-q206", "category": "dir_object", "query": "Who did Nadia thank for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m103", "grade": 3}]}
+{"id": "dir-q207", "category": "dir_subject", "query": "Who thanked Mei for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m103", "grade": 3}]}
+{"id": "dir-q208", "category": "dir_passive", "query": "Who did Nate thank for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m104", "grade": 3}]}
+{"id": "dir-q209", "category": "dir_passive", "query": "Who thanked Yuki for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m104", "grade": 3}]}
+{"id": "dir-q210", "category": "dir_passive", "query": "Who did Yuki thank for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m105", "grade": 3}]}
+{"id": "dir-q211", "category": "dir_passive", "query": "Who thanked Nate for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m105", "grade": 3}]}
+{"id": "dir-q212", "category": "dir_passive", "query": "Who did Clara thank for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m106", "grade": 3}]}
+{"id": "dir-q213", "category": "dir_passive", "query": "Who thanked Felix for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m106", "grade": 3}]}
+{"id": "dir-q214", "category": "dir_passive", "query": "Who did Felix thank for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m107", "grade": 3}]}
+{"id": "dir-q215", "category": "dir_passive", "query": "Who thanked Clara for the birthday gift?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m107", "grade": 3}]}
+{"id": "dir-q216", "category": "dir_object", "query": "Who did Mateo interview for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m108", "grade": 3}]}
+{"id": "dir-q217", "category": "dir_subject", "query": "Who interviewed Melanie for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m108", "grade": 3}]}
+{"id": "dir-q218", "category": "dir_object", "query": "Who did Melanie interview for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m109", "grade": 3}]}
+{"id": "dir-q219", "category": "dir_subject", "query": "Who interviewed Mateo for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m109", "grade": 3}]}
+{"id": "dir-q220", "category": "dir_object", "query": "Who did Grace interview for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m110", "grade": 3}]}
+{"id": "dir-q221", "category": "dir_subject", "query": "Who interviewed Ethan for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m110", "grade": 3}]}
+{"id": "dir-q222", "category": "dir_object", "query": "Who did Ethan interview for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m111", "grade": 3}]}
+{"id": "dir-q223", "category": "dir_subject", "query": "Who interviewed Grace for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m111", "grade": 3}]}
+{"id": "dir-q224", "category": "dir_object", "query": "Who did Clara interview for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m112", "grade": 3}]}
+{"id": "dir-q225", "category": "dir_subject", "query": "Who interviewed Fatima for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m112", "grade": 3}]}
+{"id": "dir-q226", "category": "dir_object", "query": "Who did Fatima interview for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m113", "grade": 3}]}
+{"id": "dir-q227", "category": "dir_subject", "query": "Who interviewed Clara for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m113", "grade": 3}]}
+{"id": "dir-q228", "category": "dir_object", "query": "Who did Lucas interview for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m114", "grade": 3}]}
+{"id": "dir-q229", "category": "dir_subject", "query": "Who interviewed Tara for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m114", "grade": 3}]}
+{"id": "dir-q230", "category": "dir_object", "query": "Who did Tara interview for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m115", "grade": 3}]}
+{"id": "dir-q231", "category": "dir_subject", "query": "Who interviewed Lucas for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m115", "grade": 3}]}
+{"id": "dir-q232", "category": "dir_passive", "query": "Who did Samir interview for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m116", "grade": 3}]}
+{"id": "dir-q233", "category": "dir_passive", "query": "Who interviewed Ingrid for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m116", "grade": 3}]}
+{"id": "dir-q234", "category": "dir_passive", "query": "Who did Ingrid interview for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m117", "grade": 3}]}
+{"id": "dir-q235", "category": "dir_passive", "query": "Who interviewed Samir for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m117", "grade": 3}]}
+{"id": "dir-q236", "category": "dir_passive", "query": "Who did Rosa interview for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m118", "grade": 3}]}
+{"id": "dir-q237", "category": "dir_passive", "query": "Who interviewed Chloe for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m118", "grade": 3}]}
+{"id": "dir-q238", "category": "dir_passive", "query": "Who did Chloe interview for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m119", "grade": 3}]}
+{"id": "dir-q239", "category": "dir_passive", "query": "Who interviewed Rosa for the podcast?", "fixture_corpus_id": "directional", "relevant": [{"corpus_item_id": "dir-m119", "grade": 3}]}
