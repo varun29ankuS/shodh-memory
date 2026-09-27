@@ -454,6 +454,7 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
         embedder: EMBEDDER_ID.to_string(),
         kernel: KernelClass::detect(),
         rerank: Some(RerankSetting::current()),
+        model_tape: crate::embeddings::model_tape::replay_digest(),
         git_sha: inputs.git_sha.clone(),
         timestamp: chrono::Utc::now(),
         layers,

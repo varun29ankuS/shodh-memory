@@ -166,6 +166,9 @@ struct Tape {
     problems: Vec<String>,
     /// Replay mode: models whose loaded files matched the tape header.
     verified: std::collections::HashSet<&'static str>,
+    /// Replay mode: sha256 of the tape file, which a report records so that two
+    /// runs can say whether they replayed the same model outputs.
+    digest: Option<String>,
 }
 
 fn state() -> Option<&'static Mutex<Tape>> {
@@ -185,6 +188,7 @@ fn state() -> Option<&'static Mutex<Tape>> {
                 conflicts: HashMap::new(),
                 problems: vec![format!("model tape could not be opened: {e:#}")],
                 verified: Default::default(),
+                digest: None,
             }))
         }
     })
@@ -212,10 +216,12 @@ fn init_from_env() -> Result<Option<Tape>> {
             conflicts: HashMap::new(),
             problems: Vec::new(),
             verified: Default::default(),
+            digest: None,
         })),
         (None, Some(p)) => {
             let path = PathBuf::from(p);
             let (models, tables) = read_tape(&path)?;
+            let digest = file_sha256(&path)?;
             Ok(Some(Tape {
                 mode: Mode::Replay,
                 path,
@@ -224,10 +230,23 @@ fn init_from_env() -> Result<Option<Tape>> {
                 conflicts: HashMap::new(),
                 problems: Vec::new(),
                 verified: Default::default(),
+                digest: Some(digest),
             }))
         }
         (None, None) => Ok(None),
     }
+}
+
+/// On replay, the sha256 of the tape file being replayed. `None` when recording or
+/// with no tape, and also when the tape failed to open (its problem list says so).
+pub fn replay_digest() -> Option<String> {
+    state().and_then(|t| {
+        let t = t.lock();
+        match t.mode {
+            Mode::Replay => t.digest.clone(),
+            Mode::Record => None,
+        }
+    })
 }
 
 /// Whether a tape is in use in this process.
@@ -297,37 +316,40 @@ pub fn register_model(model: Model, files: &[&Path]) {
 }
 
 fn hash_files(files: &[&Path]) -> Result<String> {
-    // Hashing the 149 MB GLiNER graph costs about a second, and a harness builds a
-    // new manager per repeat, so each path is hashed once per process.
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut combined = Sha256::new();
     for path in files {
-        // Bound before the match: a guard taken in an `if let` scrutinee lives until
-        // the end of the whole `if let ... else`, so locking again in the `else` arm
-        // to insert deadlocks on this non-reentrant mutex.
-        let cached = cache.lock().get(*path).cloned();
-        let digest = if let Some(d) = cached {
-            d
-        } else {
-            let mut f =
-                std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-            let mut h = Sha256::new();
-            let mut buf = vec![0u8; 1 << 20];
-            loop {
-                let n = f.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                h.update(&buf[..n]);
-            }
-            let d = hex::encode(h.finalize());
-            cache.lock().insert(path.to_path_buf(), d.clone());
-            d
-        };
-        combined.update(digest.as_bytes());
+        combined.update(file_sha256(path)?.as_bytes());
     }
     Ok(hex::encode(combined.finalize()))
+}
+
+/// Hex sha256 of one file's bytes, the same value `sha256sum` prints.
+///
+/// Hashing the 149 MB GLiNER graph costs about a second, and a harness builds a new
+/// manager per repeat, so each path is hashed once per process.
+fn file_sha256(path: &Path) -> Result<String> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    // Bound before the branch: a guard taken in an `if let` scrutinee lives until the
+    // end of the whole `if let ... else`, so locking again in the `else` arm to insert
+    // deadlocks on this non-reentrant mutex.
+    let cached = cache.lock().get(path).cloned();
+    if let Some(d) = cached {
+        return Ok(d);
+    }
+    let mut f = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    let d = hex::encode(h.finalize());
+    cache.lock().insert(path.to_path_buf(), d.clone());
+    Ok(d)
 }
 
 fn miss(t: &mut Tape, what: String) -> anyhow::Error {
@@ -754,6 +776,19 @@ mod tests {
         let second = hash_files(&[f.path()]).unwrap();
         assert_eq!(first, second);
         assert_eq!(first.len(), 64);
+    }
+
+    /// A report records the tape it replayed by this digest, and the workflow checks a
+    /// downloaded tape against a pinned value with `sha256sum`. The two must agree, so
+    /// the digest is the plain sha256 of the file's bytes (value from Python's hashlib).
+    #[test]
+    fn tape_digest_is_the_plain_sha256_of_the_file() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), b"model bytes").unwrap();
+        assert_eq!(
+            file_sha256(f.path()).unwrap(),
+            "9cb7487000bc86ac36ce83c4acfabe8878552be99572a6770f65ab1d048a5c48"
+        );
     }
 
     #[test]

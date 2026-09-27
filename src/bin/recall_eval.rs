@@ -1244,6 +1244,10 @@ fn summarise(report: &Report) {
         Some(_) => eprintln!("recall-eval: rerank=off"),
         None => eprintln!("recall-eval: rerank=<not recorded>"),
     }
+    match &report.model_tape {
+        Some(d) => eprintln!("recall-eval: model outputs replayed from tape {d}"),
+        None => eprintln!("recall-eval: model outputs computed live"),
+    }
     // Print modes in pipeline order (vamana_only → full), not BTreeMap order.
     // Match against the canonical mode keys so any unknown key just falls
     // through to the BTreeMap iteration at the bottom.

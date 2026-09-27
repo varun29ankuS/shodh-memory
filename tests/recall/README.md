@@ -68,6 +68,37 @@ own derivation of the class agrees with `recall-eval`'s. If a same-class
 comparison ever moves cases on unchanged code, compare the recorded
 `cpu_model` and `features` first.
 
+### Replayed model outputs (`tests/recall/model-tape.json`)
+
+The gate replays a **model tape**: every output the embedder, GLiNER and the
+cross-encoder gave in one recorded run, keyed by the exact input
+(`src/embeddings/model_tape.rs`). A replayed run does no model arithmetic, so it
+gives the same result on every CPU. Two replays on different kernel classes
+matched each other and the live recording on 100/100 cases (#570). A replay is
+also about 15x faster per query.
+
+- `tests/recall/model-tape.json` pins the tape: `{"tag", "asset", "sha256"}`,
+  a GitHub release asset. PR runs and dispatches (`model_tape=pinned`) download
+  it, check the sha256, and replay it. With no pin file, the models run live.
+- Every report records the tape it replayed as `model_tape` (its sha256).
+  `recall-eval` refuses to compare a live run with a replayed one, or two
+  different tapes. Two runs of one tape are compared on any CPU, and the CPU
+  class check is skipped for them.
+- **A change to what a model is fed needs a new tape.** A new prefix, a different
+  entity set, or a new sentence for the relation typer all ask the models for
+  inputs the tape does not hold. Each one is a replay miss, and a miss fails the
+  run as `infrastructure`; it is never silently computed live. Then:
+  1. `gh workflow run recall.yml --ref <branch> -f model_tape=record` records a
+     new tape (the harness also scores every query x corpus reranker pair, so
+     changes to the candidate pool are covered). Check the run reports no tape
+     problems and that repeats 2-5 added no entries.
+  2. Publish `model-tape.jsonl.gz` as a release asset under a new tag, and
+     update the pin file with that tag and its sha256.
+  3. Regenerate the baseline with `model_tape=pinned`, as below. The baseline
+     and the pin must name the same tape.
+- A model or ONNX Runtime upgrade also needs a new tape. The tape records the
+  sha256 of each model's files and refuses to replay against different ones.
+
 **Regenerate both files together, from the same run, on `main`, after a merged
 change that intentionally moved quality.** A stale baseline hides regressions:
 while main sat 3.5pp of recall@10 above the baseline, a PR could lose up to
