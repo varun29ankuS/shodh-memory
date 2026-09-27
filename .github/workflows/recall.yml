@@ -72,14 +72,16 @@ on:
         options: ['1', '0']
       model_tape:
         description: >-
-          Model tape (src/embeddings/model_tape.rs). `record` runs the models and
-          uploads every output they gave as the `model-tape` artifact. `replay`
-          answers every model call from the tape of run `tape_run` instead, so no
-          model arithmetic happens and the result cannot depend on the CPU.
+          Model tape (src/embeddings/model_tape.rs). `pinned` replays the tape
+          named in tests/recall/model-tape.json, as PR runs do, so no model
+          arithmetic happens and the result cannot depend on the CPU; with no pin
+          file the models run live. `record` runs the models and uploads every
+          output they gave as the `model-tape` artifact. `replay` answers every
+          model call from the tape of run `tape_run`. `off` runs the models live.
         required: false
-        default: 'off'
+        default: 'pinned'
         type: choice
-        options: ['off', 'record', 'replay']
+        options: ['pinned', 'off', 'record', 'replay']
       tape_run:
         description: 'Run id whose `model-tape` artifact to replay (model_tape=replay only)'
         required: false
@@ -109,7 +111,8 @@ env:
   # with the cross-encoder by default (#562). A dispatch can set 0 to measure
   # the library default for comparison; PR runs always gate the shipped one.
   CE_RERANK: ${{ github.event.inputs.ce_rerank || '1' }}
-  MODEL_TAPE: ${{ github.event.inputs.model_tape || 'off' }}
+  # PR runs replay the pinned tape: the same model outputs on every runner.
+  MODEL_TAPE: ${{ github.event.inputs.model_tape || 'pinned' }}
 
 jobs:
   smoke:
@@ -236,6 +239,62 @@ jobs:
           echo "BASELINE_SHA=$BASELINE_SHA" >> $GITHUB_ENV
           echo "BASELINE_EMBEDDER=$BASELINE_EMBEDDER" >> $GITHUB_ENV
 
+      - name: Cache pinned model tape
+        if: env.MODEL_TAPE == 'pinned' && hashFiles('tests/recall/model-tape.json') != ''
+        uses: actions/cache@v6
+        with:
+          path: model-tape
+          key: model-tape-${{ hashFiles('tests/recall/model-tape.json') }}
+
+      - name: Resolve model tape
+        # Decides where this run's model outputs come from, and exports TAPE_PATH
+        # (empty = the models run live). A replayed tape is checked against the
+        # sha256 it is pinned or published with; recall-eval records the same
+        # digest in its report, and compare_to_baseline refuses two reports whose
+        # model outputs came from different places.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAPE_RUN: ${{ github.event.inputs.tape_run }}
+        run: |
+          set -euo pipefail
+          TAPE_PATH=""
+          case "$MODEL_TAPE" in
+            pinned)
+              PIN=tests/recall/model-tape.json
+              if [ -f "$PIN" ]; then
+                TAG=$(jq -r '.tag' "$PIN")
+                ASSET=$(jq -r '.asset' "$PIN")
+                SHA=$(jq -r '.sha256' "$PIN")
+                mkdir -p model-tape
+                if [ ! -f "model-tape/$ASSET" ]; then
+                  gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p "$ASSET" -D model-tape
+                fi
+                echo "$SHA  model-tape/$ASSET" | sha256sum -c - || {
+                  echo "::error::model-tape/$ASSET does not match the sha256 pinned in $PIN."
+                  exit 1
+                }
+                TAPE_PATH="model-tape/$ASSET"
+              else
+                echo "::notice::No pinned model tape ($PIN), so the models run live."
+              fi
+              ;;
+            replay)
+              if [ -z "$TAPE_RUN" ]; then
+                echo "::error::model_tape=replay needs tape_run, the id of a run that recorded one."
+                exit 1
+              fi
+              gh run download "$TAPE_RUN" --repo "$GITHUB_REPOSITORY" -n model-tape -D model-tape
+              TAPE_PATH="model-tape/model-tape.jsonl.gz"
+              ;;
+            record|off) ;;
+            *)
+              echo "::error::unknown model_tape value '$MODEL_TAPE'"
+              exit 1
+              ;;
+          esac
+          echo "Model tape: mode=$MODEL_TAPE path=${TAPE_PATH:-<none, models run live>}"
+          echo "TAPE_PATH=$TAPE_PATH" >> "$GITHUB_ENV"
+
       - name: Check runner CPU kernel class
         # ONNX Runtime picks its kernels by CPUID, so identical code ranks
         # differently on runners that expose different CPU features (see
@@ -263,24 +322,14 @@ jobs:
           CPU_MODEL=$(grep -m1 '^model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^ *//')
           BASELINE_CLASS=$(jq -r '.kernel.class // ""' tests/recall/locomo-gate-baseline.json)
           echo "Runner: class=$RUNNER_CLASS cpu=$CPU_MODEL · baseline class=${BASELINE_CLASS:-<not recorded>}"
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$BASELINE_CLASS" ] && [ "$RUNNER_CLASS" != "$BASELINE_CLASS" ]; then
+          if [ -n "$TAPE_PATH" ]; then
+            # Replayed model outputs are the same on every CPU, so the class is
+            # recorded for diagnosis and nothing more.
+            echo "Replaying a model tape: this runner's CPU class does not affect the result."
+          elif [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$BASELINE_CLASS" ] && [ "$RUNNER_CLASS" != "$BASELINE_CLASS" ]; then
             echo "::error::This runner's CPU kernel class is $RUNNER_CLASS ($CPU_MODEL), and the baseline was recorded on $BASELINE_CLASS. Results are not comparable across classes. Re-run this job; GitHub assigns runner hardware per job."
             exit 1
           fi
-
-      - name: Fetch model tape to replay
-        if: env.MODEL_TAPE == 'replay'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAPE_RUN: ${{ github.event.inputs.tape_run }}
-        run: |
-          set -euo pipefail
-          if [ -z "$TAPE_RUN" ]; then
-            echo "::error::model_tape=replay needs tape_run, the id of a run that recorded one."
-            exit 1
-          fi
-          gh run download "$TAPE_RUN" --repo "$GITHUB_REPOSITORY" -n model-tape -D model-tape
-          ls -la model-tape
 
       - name: Build recall-eval
         run: cargo build --release --bin recall-eval
@@ -293,7 +342,7 @@ jobs:
           SHODH_CE_RERANK: ${{ env.CE_RERANK }}
           SHODH_CE_MODEL_PATH: ${{ github.workspace }}/models/cross-encoder-ms-marco-minilm-l6
           SHODH_MODEL_TAPE_RECORD: ${{ env.MODEL_TAPE == 'record' && 'model-tape.jsonl.gz' || '' }}
-          SHODH_MODEL_TAPE_REPLAY: ${{ env.MODEL_TAPE == 'replay' && 'model-tape/model-tape.jsonl.gz' || '' }}
+          SHODH_MODEL_TAPE_REPLAY: ${{ env.TAPE_PATH }}
           # Per-stage latency attribution in recall-eval.log (STAGE_TIMING
           # lines) and current.json. The probe wraps the same production
           # recall() and the wall clock stays around that call, so the gated

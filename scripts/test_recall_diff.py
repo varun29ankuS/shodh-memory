@@ -21,6 +21,7 @@ from recall_diff import (
     classify_case_moves,
     kernel_note,
     rerank_note,
+    tape_note,
     load_per_case,
     render,
     render_case_moves,
@@ -292,11 +293,32 @@ class TestRerankNote:
             assert any("Not comparable" in l for l in lines)
 
 
+class TestTapeNote:
+    TAPE = "a" * 64
+
+    def test_same_tape_hides_the_class_warning(self):
+        base = {"model_tape": self.TAPE, "kernel": {"class": "x86_64-avx2-fma"}}
+        cur = {"model_tape": self.TAPE, "kernel": {"class": "x86_64-avx512f"}}
+        assert not any("Not comparable" in l for l in tape_note(base, cur))
+        lines = kernel_note(base, cur)
+        assert "same model tape" in lines[0]
+        assert not any("Not comparable" in l for l in lines)
+
+    def test_live_against_replayed_warns(self):
+        for base, cur in (({"model_tape": self.TAPE}, {}), ({}, {"model_tape": self.TAPE})):
+            lines = tape_note(base, cur)
+            assert any("Not comparable" in l for l in lines)
+
+    def test_both_live_is_quiet_and_says_so(self):
+        lines = tape_note({}, {})
+        assert lines == ["Model outputs: baseline computed live → current computed live"]
+
+
 if __name__ == "__main__":
     # A plain runner, because this repo ships no python test dependency and a
     # test that cannot be run is documentation.
     failed = 0
-    for cls in (TestCaseCounts, TestResolutionNote, TestCaseMoves, TestKernelNote, TestRerankNote):
+    for cls in (TestCaseCounts, TestResolutionNote, TestCaseMoves, TestKernelNote, TestRerankNote, TestTapeNote):
         instance = cls()
         for name in sorted(n for n in dir(cls) if n.startswith("test_")):
             try:

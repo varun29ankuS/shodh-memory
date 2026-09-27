@@ -301,6 +301,11 @@ def kernel_note(baseline: dict[str, Any], current: dict[str, Any]) -> list[str]:
     base_class, base_desc = describe(baseline)
     cur_class, cur_desc = describe(current)
     lines = [f"CPU kernel class: baseline {base_desc} → current {cur_desc}"]
+    tape = baseline.get("model_tape")
+    if tape and tape == current.get("model_tape"):
+        # Both replayed one tape: no model arithmetic ran, so the CPU changed nothing.
+        lines[0] += " (both replayed the same model tape, so the class does not affect results)"
+        return lines
     if not base_class or not cur_class or base_class != cur_class:
         lines += [
             "",
@@ -311,6 +316,31 @@ def kernel_note(baseline: dict[str, Any], current: dict[str, Any]) -> list[str]:
             "the change. The gate refuses this comparison as infrastructure. "
             "Re-run the job until it lands on the baseline's class, or regenerate "
             "the baseline (tests/recall/README.md).",
+        ]
+    return lines
+
+
+def tape_note(baseline: dict[str, Any], current: dict[str, Any]) -> list[str]:
+    """Say where each side's model outputs came from, and warn when they differ.
+
+    A replayed run answers every model call from a recorded tape, so two runs of
+    one tape saw byte-identical embeddings, entities and reranker scores. A live
+    run and a replayed one, or two tapes, are two sets of model outputs; the Rust
+    comparator refuses such a pair and this says why.
+    """
+    def describe(report: dict[str, Any]) -> str:
+        t = report.get("model_tape")
+        return f"replayed from tape `{t[:12]}`" if t else "computed live"
+
+    lines = [f"Model outputs: baseline {describe(baseline)} → current {describe(current)}"]
+    if baseline.get("model_tape") != current.get("model_tape"):
+        lines += [
+            "",
+            "> [!WARNING]",
+            "> **Not comparable: the two runs' model outputs came from different "
+            "places.** The numbers below compare two sets of embeddings, entities and "
+            "reranker scores, not two versions of the code. The gate refuses this "
+            "comparison as infrastructure.",
         ]
     return lines
 
@@ -361,6 +391,7 @@ def render(
         f"current `{current.get('git_sha', '?')[:7]}` "
         f"({current.get('embedder', '?')}) · tolerance **{tolerance_pct:.1f}%**"
     )
+    lines.extend(tape_note(baseline, current))
     lines.extend(kernel_note(baseline, current))
     lines.extend(rerank_note(baseline, current))
     base_repeats = baseline.get("repeats", 1)
