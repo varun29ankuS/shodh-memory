@@ -1023,31 +1023,61 @@ impl SpannIndex {
 
         let mut partitions = self.partitions.write();
 
-        // Lazily materialize empty partitions for mmap-loaded indices
+        // An mmap-loaded index keeps its postings on disk and `partitions` empty. Filling
+        // `partitions` with empty entries would hide those postings: search and save_to_file
+        // both read in-memory partitions in preference to the mmap once any exist.
         if partitions.is_empty() {
-            let centroids = self.centroids.read();
-            if !centroids.is_empty() {
-                *partitions = centroids
-                    .iter()
-                    .enumerate()
-                    .map(|(i, c)| Partition {
-                        id: i as u32,
-                        centroid: c.clone(),
-                        entries: Vec::new(),
-                    })
-                    .collect();
-            }
+            *partitions = self.materialize_partitions_from_mmap()?;
         }
 
-        if partition_id < partitions.len() {
-            partitions[partition_id].entries.push(PostingEntry {
-                vector_id,
-                pq_codes,
-            });
-            self.num_vectors.fetch_add(1, Ordering::Release);
+        if partition_id >= partitions.len() {
+            return Err(anyhow!(
+                "partition {} out of range ({} partitions); vector {} not inserted",
+                partition_id,
+                partitions.len(),
+                vector_id
+            ));
         }
+        partitions[partition_id].entries.push(PostingEntry {
+            vector_id,
+            pq_codes,
+        });
+        self.num_vectors.fetch_add(1, Ordering::Release);
 
         Ok(())
+    }
+
+    /// Read every posting list off the mmap into memory and release the mmap, so in-memory
+    /// partitions become the one authoritative copy for search, insert and save.
+    fn materialize_partitions_from_mmap(&self) -> Result<Vec<Partition>> {
+        let centroids = self.centroids.read().clone();
+        let pq_subvectors = if self.quantizer.read().is_some() {
+            self.config.dimension / 8
+        } else {
+            0
+        };
+        let mut mmap_guard = self.mmap.write();
+        let Some(ref mmap) = *mmap_guard else {
+            return Ok(centroids
+                .into_iter()
+                .enumerate()
+                .map(|(i, centroid)| Partition {
+                    id: i as u32,
+                    centroid,
+                    entries: Vec::new(),
+                })
+                .collect());
+        };
+        let mut partitions = Vec::with_capacity(centroids.len());
+        for (i, centroid) in centroids.into_iter().enumerate() {
+            partitions.push(Partition {
+                id: i as u32,
+                centroid,
+                entries: self.read_posting_list(mmap, i, pq_subvectors)?,
+            });
+        }
+        *mmap_guard = None;
+        Ok(partitions)
     }
 
     /// Number of vectors in the index
@@ -1180,6 +1210,49 @@ mod tests {
         // Search loaded index
         let results = loaded.search(&vectors[0], 10).unwrap();
         assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_spann_insert_after_load_keeps_loaded_and_new_vectors() {
+        let temp_dir = tempdir().unwrap();
+        let index_path = temp_dir.path().join("insert-after-load.spann");
+        let vectors = generate_random_vectors(500, 384);
+        let config = SpannConfig {
+            dimension: 384,
+            use_pq: true,
+            num_probes: 20,
+            ..Default::default()
+        };
+        let mut index = SpannIndex::new(config);
+        index.build(vectors.clone()).unwrap();
+        index.save_to_file(&index_path).unwrap();
+
+        let mut loaded = SpannIndex::load_from_file(&index_path).unwrap();
+        let extra = generate_random_vectors(1, 384).remove(0);
+        loaded.insert(9_999, &extra).unwrap();
+        assert_eq!(loaded.len(), 501);
+
+        let new_hit = loaded.search(&extra, 10).unwrap();
+        assert!(
+            new_hit.iter().take(3).any(|(id, _)| *id == 9_999),
+            "inserted vector must be searchable: {new_hit:?}"
+        );
+        let old_hit = loaded.search(&vectors[0], 10).unwrap();
+        assert!(
+            old_hit.iter().take(3).any(|(id, _)| *id == 0),
+            "vectors loaded from disk must stay searchable after an insert: {old_hit:?}"
+        );
+
+        let resaved = temp_dir.path().join("resaved.spann");
+        loaded.save_to_file(&resaved).unwrap();
+        let reloaded = SpannIndex::load_from_file(&resaved).unwrap();
+        assert_eq!(
+            reloaded.len(),
+            501,
+            "a save after insert must keep the loaded postings"
+        );
+        let again = reloaded.search(&vectors[0], 10).unwrap();
+        assert!(again.iter().take(3).any(|(id, _)| *id == 0));
     }
 
     #[test]
