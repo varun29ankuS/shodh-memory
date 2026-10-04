@@ -38,15 +38,22 @@ does **not** protect, so the guarantee is not over-read from the feature name.
 Design and operations: [docs/encryption-v2-design.md](docs/encryption-v2-design.md).
 
 **Enabling it.** Set `SHODH_MASTER_PASSPHRASE` before starting the server. On
-first start with no keystore, `<data-dir>/storage/keystore.json` is created
-(owner-only permissions on unix; back it up — without it every record written
-from then on is unrecoverable). With no keystore and no passphrase, nothing
-changes: records are stored exactly as before, byte for byte.
+first start with no keystore, one is created: `<data-root>/keystore.json` for
+the server, shared by every tenant, or `<data-dir>/storage/keystore.json` for a
+standalone store (`SHODH_KEYSTORE_DIR` overrides both). It is owner-only on
+unix; on Windows it inherits the data directory's ACL, so restrict that
+directory. **Back it up separately**: `/api/backup` does not include it, and
+without it every record written from then on is unrecoverable. With no keystore
+and no passphrase, nothing changes: records are stored exactly as before, byte
+for byte.
 
 **Fail-loud rules.** A keystore present without the passphrase, a wrong
-passphrase, a tampered keystore, or a keystore file older than the one this
-database last saw (rollback) is a **hard error at open** — the store never
-opens in plaintext mode beside ciphertext. A record that fails to decrypt is
+passphrase, a tampered keystore, a keystore file older than the one this
+database last saw (rollback), a keystore other than the one the database is
+bound to, or a missing keystore for a database that has been encrypted is a
+**hard error at open** — the store never creates a fresh keystore over
+encrypted records and never opens in plaintext mode beside ciphertext. The
+corruption cleanup never deletes an encrypted record. A record that fails to decrypt is
 an error on read, never a fabricated memory. Reading a plaintext record while
 a keystore is active is counted, logged at WARN, and rewritten encrypted by
 `get`; with `SHODH_REQUIRE_ENCRYPTED_READS=1` it is refused instead.
@@ -79,6 +86,13 @@ a keystore is active is counted, logged at WARN, and rewritten encrypted by
   which tags, entities and dates exist without touching a record. Blinding
   the exact-match keys is designed but not in this change.
 - **The oplog, and the feedback/files/prospective/todos column families.**
+- **The BM25 search index** (`<user>/bm25_index`), which stores full content:
+  a complete plaintext copy of every memory.
+- **The audit log's `content_preview`.**
+- **Vector embeddings**, which can be inverted to approximate the text they
+  encode.
+- **Plaintext written before encryption was turned on**, which remains in older
+  SST files and earlier backups until compaction and backup rotation retire it.
 - **Memory-resident plaintext**: decrypted content lives in process memory
   while in use. This is at-rest protection only.
 - **The unseal secret itself.** A passphrase in the environment of a host

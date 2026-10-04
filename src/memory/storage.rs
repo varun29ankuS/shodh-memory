@@ -964,6 +964,40 @@ struct StorageCrypto {
 static STORAGE_CRYPTO: parking_lot::RwLock<Option<Arc<StorageCrypto>>> =
     parking_lot::RwLock::new(None);
 
+/// Directory holding the process's one keystore, when the process serves more
+/// than one store (the server's data root). Unset, each store keeps its
+/// keystore beside its own data.
+static KEYSTORE_ROOT: parking_lot::RwLock<Option<PathBuf>> = parking_lot::RwLock::new(None);
+
+/// Put the keystore at `dir` for every store opened afterwards. The server calls
+/// this with its data root: one passphrase unseals one keystore, and every
+/// tenant's database binds to it.
+pub fn set_keystore_root(dir: &Path) {
+    *KEYSTORE_ROOT.write() = Some(dir.to_path_buf());
+}
+
+/// Where the keystore for a store at `storage_path` lives:
+/// `SHODH_KEYSTORE_DIR` (read at call time), then [`set_keystore_root`], then
+/// beside the store's own data.
+fn keystore_path_for(storage_path: &Path) -> PathBuf {
+    if let Some(dir) = std::env::var_os("SHODH_KEYSTORE_DIR").filter(|v| !v.is_empty()) {
+        return PathBuf::from(dir).join("keystore.json");
+    }
+    if let Some(dir) = KEYSTORE_ROOT.read().as_ref() {
+        return dir.join("keystore.json");
+    }
+    storage_path.join("keystore.json")
+}
+
+fn allow_keystore_rollback() -> bool {
+    std::env::var("SHODH_ALLOW_KEYSTORE_ROLLBACK")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "true" || v == "1"
+        })
+        .unwrap_or(false)
+}
+
 /// Count of plaintext records read while a keystore was active — the
 /// encryption-required tripwire's metric. Each such read is also a
 /// `tracing::warn!`, and under `SHODH_REQUIRE_ENCRYPTED_READS` an error.
@@ -1486,10 +1520,14 @@ pub(crate) fn crc32_simple(data: &[u8]) -> u32 {
 
 /// Column family name for secondary indices (tags, types, timestamps, etc.)
 const CF_INDEX: &str = "memory_index";
-/// Sentinel (in CF_INDEX) holding the last-seen keystore generation; the
-/// rollback guard in [`MemoryStorage::check_keystore_generation`]. Written only
-/// while a keystore is active.
+/// Pre-binding rollback sentinel (in CF_INDEX): the last-seen keystore
+/// generation, unauthenticated. Read once as a floor when a database is first
+/// bound, then removed; [`KEYSTORE_BINDING_KEY`] replaces it.
 const KEYSTORE_GENERATION_KEY: &[u8] = b"meta:keystore_generation";
+/// The database's binding to the keystore that encrypted it (in CF_INDEX):
+/// [`crate::keystore::seal_binding`]. Written before the first encrypted
+/// record and never removed, so an encrypted database always knows its keystore.
+const KEYSTORE_BINDING_KEY: &[u8] = b"meta:keystore_binding";
 
 /// Column family for the append-only agent-traceability operation log
 /// (`memory::oplog::OpRecord`, spec `docs/superpowers/specs/2026-07-30-agent-traceability-design.md`).
@@ -1713,26 +1751,25 @@ impl MemoryStorage {
     }
 
     /// Load — or on first run with a passphrase, create — the keystore, unseal
-    /// it, verify its integrity MAC and rollback generation, and install the
+    /// it, check it against this database's binding, and install the
     /// process-global record crypto.
     ///
-    /// The four cases, and the one that must fail loud:
+    /// | binding | keystore.json | `SHODH_MASTER_PASSPHRASE` | result |
+    /// |---|---|---|---|
+    /// | none, no encrypted record | absent | unset | plaintext store, nothing written (the default) |
+    /// | none, no encrypted record | absent | set | keystore created, database bound, encrypted from here on |
+    /// | none | present | set | unsealed; bound only if an encrypted record here decrypts under it |
+    /// | present | present | set | unsealed; must be the bound keystore, at the bound generation or newer |
+    /// | present, or an encrypted record | absent | any | **error**: never a fresh keystore over encrypted data |
+    /// | any | present | unset | **error**: the store asked for encryption and it is unavailable |
     ///
-    /// | keystore.json | `SHODH_MASTER_PASSPHRASE` | result |
-    /// |---|---|---|
-    /// | absent | unset | plaintext store, nothing written (the default) |
-    /// | absent | set | keystore created, store encrypted from here on |
-    /// | present | set | unsealed; wrong passphrase is an error |
-    /// | present | unset | **error** — the store asked for encryption and it is unavailable |
-    ///
-    /// The last row is the contract `tests/encryption_unavailable_fails_loud.rs`
-    /// pins: a store with a keystore never opens in plaintext mode, because a
-    /// plaintext open would serve ciphertext as corruption and write plaintext
-    /// next to it.
+    /// A binding-less database is scanned for encrypted records only when a
+    /// keystore is about to be created or adopted, never on a plaintext open.
     fn init_storage_crypto(db: &DB, storage_path: &Path) -> Result<()> {
         use crate::keystore::{KdfParams, Keystore, RecordCryptors};
 
-        let keystore_path = storage_path.join("keystore.json");
+        let keystore_path = Self::resolve_keystore_path(db, storage_path)?;
+        let binding = Self::read_index_meta(db, KEYSTORE_BINDING_KEY)?;
         let passphrase = std::env::var("SHODH_MASTER_PASSPHRASE")
             .ok()
             .filter(|s| !s.is_empty());
@@ -1756,10 +1793,36 @@ impl MemoryStorage {
                     keystore_path.display()
                 ));
             }
-            (false, Some(pass)) => {
+            (false, passphrase) => {
+                if let Some(record) = &binding {
+                    return Err(anyhow!(
+                        "{} is missing, but this database is bound to keystore {}; refusing to \
+                         open it (a new keystore cannot read its records, and plaintext would be \
+                         written beside them). Restore keystore.json from a backup: /api/backup \
+                         does not include it",
+                        keystore_path.display(),
+                        crate::keystore::binding_keystore_id(record)
+                            .map(hex::encode)
+                            .unwrap_or_else(|| "<malformed binding>".to_string())
+                    ));
+                }
+                let Some(pass) = passphrase else {
+                    return Ok(()); // encryption off (plaintext)
+                };
+                if Self::first_encrypted_record(db)?.is_some() {
+                    return Err(anyhow!(
+                        "{} is missing, but this database holds encrypted records; refusing to \
+                         create a new keystore over them. Restore keystore.json from a backup",
+                        keystore_path.display()
+                    ));
+                }
                 let ks = Keystore::create(&pass, KdfParams::production())?;
                 // Persisted BEFORE anything is encrypted under it: a record
                 // written under a DEK that never reached disk is unrecoverable.
+                if let Some(dir) = keystore_path.parent() {
+                    std::fs::create_dir_all(dir)
+                        .context("Failed to create the keystore directory")?;
+                }
                 ks.save_to_path(&keystore_path)
                     .context("Failed to write keystore.json")?;
                 let kek = ks.unseal_with_passphrase(&pass)?;
@@ -1770,15 +1833,15 @@ impl MemoryStorage {
                 );
                 (ks, kek)
             }
-            (false, None) => return Ok(()), // encryption off (plaintext)
         };
 
         ks.verify_integrity(&kek)
             .context("keystore integrity verification failed")?;
-        Self::check_keystore_generation(db, ks.generation)?;
+        let cryptors = RecordCryptors::from_keystore(&ks, &kek)?;
+        let rollback_accepted = Self::check_binding(db, &ks, &kek, binding.as_deref(), &cryptors)?;
 
         let fresh = StorageCrypto {
-            record: RecordCryptors::from_keystore(&ks, &kek)?,
+            record: cryptors,
             kek_fingerprint: ks.kek_fingerprint.clone(),
             generation: ks.generation,
         };
@@ -1791,11 +1854,19 @@ impl MemoryStorage {
                      shodh's process-global encryption supports a single keystore per process"
                 ));
             }
-            Some(existing) if existing.generation > fresh.generation => {
-                // The DB-side sentinel already rejected this above unless the
-                // rollback override is set; keep the newer cryptor set either way.
-                return Ok(());
+            Some(existing) if existing.generation > fresh.generation && !rollback_accepted => {
+                return Err(anyhow!(
+                    "{} (generation {}) is older than the keystore this process already loaded \
+                     (generation {}); it was replaced while running. Set \
+                     SHODH_ALLOW_KEYSTORE_ROLLBACK=true to accept the older keystore",
+                    keystore_path.display(),
+                    fresh.generation,
+                    existing.generation
+                ));
             }
+            // A newer keystore (rotation), the first store, or an accepted
+            // rollback: the cryptors follow the keystore on disk, so no record
+            // is written under an epoch the keystore file does not hold.
             _ => {
                 *slot = Some(Arc::new(fresh));
             }
@@ -1803,50 +1874,159 @@ impl MemoryStorage {
         Ok(())
     }
 
-    /// Rollback guard: refuse a keystore whose generation is older than the last
-    /// one this database saw. The sentinel lives in the index CF and is only
-    /// ever written while a keystore is active, so a plaintext store carries no
-    /// trace of this code.
-    fn check_keystore_generation(db: &DB, generation: u64) -> Result<()> {
-        let cf = db
-            .cf_handle(CF_INDEX)
-            .ok_or_else(|| anyhow!("memory_index CF missing for keystore generation sentinel"))?;
-        let stored = db
-            .get_cf(cf, KEYSTORE_GENERATION_KEY)
-            .context("read keystore generation sentinel")?
-            .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
-            .map(u64::from_le_bytes)
-            .unwrap_or(0);
-        if generation < stored {
-            let allow_rollback = std::env::var("SHODH_ALLOW_KEYSTORE_ROLLBACK")
-                .map(|v| {
-                    let v = v.trim().to_ascii_lowercase();
-                    v == "true" || v == "1"
-                })
-                .unwrap_or(false);
-            if !allow_rollback {
+    /// The keystore path for this store. The first time a store opens under a
+    /// keystore root, a keystore beside its own data is moved to the root if
+    /// this database is encrypted under it, or set aside if nothing used it.
+    fn resolve_keystore_path(db: &DB, storage_path: &Path) -> Result<PathBuf> {
+        let path = keystore_path_for(storage_path);
+        let local = storage_path.join("keystore.json");
+        if path == local || !local.exists() {
+            return Ok(path);
+        }
+        let encrypted_here = Self::read_index_meta(db, KEYSTORE_BINDING_KEY)?.is_some()
+            || Self::first_encrypted_record(db)?.is_some();
+        if encrypted_here && !path.exists() {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).context("Failed to create the keystore directory")?;
+            }
+            std::fs::rename(&local, &path).with_context(|| {
+                format!(
+                    "Failed to move {} to the keystore root {}",
+                    local.display(),
+                    path.display()
+                )
+            })?;
+            tracing::warn!(
+                from = %local.display(),
+                to = %path.display(),
+                "Encryption at rest: moved this store's keystore to the keystore root"
+            );
+            return Ok(path);
+        }
+        if encrypted_here {
+            return Err(anyhow!(
+                "{} is this store's own keystore and its records are encrypted under it, but the \
+                 process keystore is {}; refusing to open one store under two keystores. Open it \
+                 on its own, or re-encrypt it under the root keystore",
+                local.display(),
+                path.display()
+            ));
+        }
+        let unused = local.with_extension("json.unused");
+        std::fs::rename(&local, &unused)
+            .with_context(|| format!("Failed to set aside {}", local.display()))?;
+        tracing::warn!(
+            path = %unused.display(),
+            "Encryption at rest: set aside a per-store keystore that encrypted nothing; this \
+             store uses the keystore root"
+        );
+        Ok(path)
+    }
+
+    /// Tie this database to the unsealed keystore, or confirm it already is.
+    /// Returns whether an older keystore generation was accepted under
+    /// `SHODH_ALLOW_KEYSTORE_ROLLBACK`.
+    fn check_binding(
+        db: &DB,
+        ks: &crate::keystore::Keystore,
+        kek: &crate::keystore::SecretKey,
+        binding: Option<&[u8]>,
+        cryptors: &crate::keystore::RecordCryptors,
+    ) -> Result<bool> {
+        let floor = match binding {
+            Some(record) => crate::keystore::open_binding(kek, record)?,
+            None => {
+                if let Some((key, value)) = Self::first_encrypted_record(db)? {
+                    // AEAD success proves the key; a failure cannot tell a wrong
+                    // key from damage, so it refuses rather than binds.
+                    let epoch = crate::keystore::record_epoch(&value).unwrap_or(0);
+                    cryptors
+                        .for_epoch(epoch)
+                        .ok_or_else(|| anyhow!("keystore holds no DEK for record epoch {epoch}"))
+                        .and_then(|c| c.decrypt_record(&value, &key))
+                        .context(
+                            "this database holds encrypted records that do not decrypt under the \
+                             keystore provided; refusing to bind it to that keystore",
+                        )?;
+                }
+                Self::legacy_generation_floor(db)?
+            }
+        };
+
+        let rollback = ks.generation < floor;
+        if rollback {
+            if !allow_keystore_rollback() {
                 return Err(anyhow!(
-                    "keystore rollback detected: file generation {generation} < last-seen {stored}. \
-                     If you intentionally restored an older keystore (e.g. keystore.json.bak), set \
-                     SHODH_ALLOW_KEYSTORE_ROLLBACK=true once to accept it and reset the sentinel."
+                    "keystore rollback detected: file generation {} < last-seen {floor}. If you \
+                     intentionally restored an older keystore (e.g. keystore.json.bak), set \
+                     SHODH_ALLOW_KEYSTORE_ROLLBACK=true once to accept it and reset the binding.",
+                    ks.generation
                 ));
             }
             tracing::warn!(
-                file_generation = generation,
-                last_seen = stored,
-                "SHODH_ALLOW_KEYSTORE_ROLLBACK set: accepting an older keystore generation (restored \
-                 keystore?) and resetting the rollback sentinel to it. Rollback protection is \
+                file_generation = ks.generation,
+                last_seen = floor,
+                "SHODH_ALLOW_KEYSTORE_ROLLBACK set: accepting an older keystore generation \
+                 (restored keystore?) and resetting the binding to it. Rollback protection is \
                  bypassed for this start — unset the variable afterward."
             );
-            db.put_cf(cf, KEYSTORE_GENERATION_KEY, generation.to_le_bytes())
-                .context("reset keystore generation sentinel")?;
-            return Ok(());
         }
-        if generation > stored {
-            db.put_cf(cf, KEYSTORE_GENERATION_KEY, generation.to_le_bytes())
-                .context("write keystore generation sentinel")?;
+
+        let cf = db
+            .cf_handle(CF_INDEX)
+            .ok_or_else(|| anyhow!("memory_index CF missing for the keystore binding"))?;
+        let mut synced = WriteOptions::default();
+        synced.set_sync(true);
+        if binding.is_none() || ks.generation != floor {
+            db.put_cf_opt(
+                cf,
+                KEYSTORE_BINDING_KEY,
+                crate::keystore::seal_binding(kek, ks.generation),
+                &synced,
+            )
+            .context("write keystore binding")?;
         }
-        Ok(())
+        if binding.is_none() {
+            db.delete_cf_opt(cf, KEYSTORE_GENERATION_KEY, &synced)
+                .context("remove the pre-binding generation sentinel")?;
+        }
+        Ok(rollback)
+    }
+
+    /// The generation the pre-binding sentinel recorded, as a rollback floor.
+    /// A sentinel of the wrong length is an error, never generation 0.
+    fn legacy_generation_floor(db: &DB) -> Result<u64> {
+        match Self::read_index_meta(db, KEYSTORE_GENERATION_KEY)? {
+            None => Ok(0),
+            Some(bytes) => <[u8; 8]>::try_from(bytes.as_slice())
+                .map(u64::from_le_bytes)
+                .map_err(|_| {
+                    anyhow!(
+                        "the keystore generation sentinel is {} bytes, expected 8; refusing to \
+                         read it as generation 0",
+                        bytes.len()
+                    )
+                }),
+        }
+    }
+
+    fn read_index_meta(db: &DB, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let cf = db
+            .cf_handle(CF_INDEX)
+            .ok_or_else(|| anyhow!("memory_index CF missing"))?;
+        db.get_cf(cf, key)
+            .with_context(|| format!("read {}", String::from_utf8_lossy(key)))
+    }
+
+    /// The first encrypted memory record in the database, as (key, value).
+    fn first_encrypted_record(db: &DB) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        for item in db.iterator(IteratorMode::Start) {
+            let (key, value) = item.context("scan for encrypted records")?;
+            if key.len() == 16 && crate::keystore::is_encrypted_record(&value) {
+                return Ok(Some((key.to_vec(), value.to_vec())));
+            }
+        }
+        Ok(None)
     }
 
     /// Open a RocksDB database with column families, automatically repairing if corruption is detected.
@@ -3674,8 +3854,10 @@ impl MemoryStorage {
     /// It preserves:
     /// - Valid Memory entries (any format - current or legacy)
     /// - Stats entries (keys starting with "stats:")
+    /// - Every encrypted (`ENC\0`) record, readable here or not
     pub fn cleanup_corrupted(&self) -> Result<usize> {
         let mut to_delete = Vec::new();
+        let mut undecryptable = 0usize;
 
         // Known non-memory prefixes in the default CF that must be preserved.
         // These are legitimate data entries stored by subsystems that share the
@@ -3715,15 +3897,23 @@ impl MemoryStorage {
                     key.len()
                 );
                 to_delete.push(key.to_vec());
-            } else if crate::keystore::is_encrypted_record(&value) && !can_decrypt(&value) {
-                // Ciphertext this process holds no key for is not corruption,
-                // it is unreadable HERE — deleting it would turn a missing
-                // passphrase or a pruned epoch into data loss.
-                tracing::warn!(
-                    key = %hex::encode(&key),
-                    "cleanup: skipping an encrypted record this process cannot decrypt \
-                     (no keystore, or no DEK for its epoch)"
-                );
+            } else if crate::keystore::is_encrypted_record(&value) {
+                // Never deleted. AEAD cannot tell a wrong key from damaged bytes,
+                // so an encrypted record that fails here may be readable under
+                // the right keystore; deleting it would turn a lost or swapped
+                // keystore into data loss.
+                let readable = can_decrypt(&value)
+                    && decrypt_memory_record(&key, &value)
+                        .and_then(|plain| deserialize_memory(&plain))
+                        .is_ok();
+                if !readable {
+                    undecryptable += 1;
+                    tracing::warn!(
+                        key = %hex::encode(&key),
+                        "cleanup: keeping an encrypted record this process cannot read \
+                         (no keystore, no DEK for its epoch, a different keystore, or damage)"
+                    );
+                }
             } else if decrypt_memory_record(&key, &value)
                 .and_then(|plain| deserialize_memory(&plain))
                 .is_err()
@@ -3744,6 +3934,13 @@ impl MemoryStorage {
             }
         }
 
+        if undecryptable > 0 {
+            tracing::warn!(
+                undecryptable,
+                "cleanup: kept encrypted records this process cannot read; restore the keystore \
+                 that encrypted them"
+            );
+        }
         let count = to_delete.len();
         if count > 0 {
             tracing::info!("Cleaning up {} corrupted memory entries", count);

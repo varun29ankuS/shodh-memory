@@ -40,7 +40,11 @@ recovery code ──SHA-256──▶ recovery key ──────────
 
 ## 3. Keystore file
 
-`<data-dir>/storage/keystore.json`, JSON, holding no plaintext key material:
+One keystore per process. A standalone store keeps it at
+`<data-dir>/storage/keystore.json`; the server keeps one at its data root,
+`<data-root>/keystore.json`, and every tenant's store binds to it (§5).
+`SHODH_KEYSTORE_DIR` overrides both. The file is JSON and holds no plaintext key
+material:
 
 | field | purpose |
 |---|---|
@@ -62,7 +66,8 @@ Production creation uses 256 MiB, 3 passes, 1 lane.
 Writes are atomic: temp file created owner-only (`0600` on unix), fsync,
 rename over the target, fsync the directory; the previous file is kept as
 `keystore.json.bak`. On Windows the file inherits the directory's ACL —
-restrict the data directory.
+restrict the data directory. `/api/backup` does not include the keystore:
+back it up separately, or a restored database cannot be opened.
 
 ## 4. Record envelope
 
@@ -85,12 +90,17 @@ ENC\0 | crypto_version(1) | epoch(4 LE) | nonce(24) | XChaCha20-Poly1305 ct+tag
 
 `MemoryStorage::new` decides once, at open:
 
-| `keystore.json` | `SHODH_MASTER_PASSPHRASE` | result |
-|---|---|---|
-| absent | unset | plaintext store; nothing written, nothing changed |
-| absent | set | keystore created and persisted, then encryption on |
-| present | set | unsealed; wrong passphrase, tampered file, or rollback → error |
-| present | unset | **error** — encryption was requested and is unavailable |
+| binding | `keystore.json` | `SHODH_MASTER_PASSPHRASE` | result |
+|---|---|---|---|
+| none, no encrypted record | absent | unset | plaintext store; nothing written, nothing changed |
+| none, no encrypted record | absent | set | keystore created and persisted, database bound, then encryption on |
+| none | present | set | unsealed; bound only if an encrypted record here decrypts under it |
+| present | present | set | unsealed; must be the bound keystore, at the bound generation or newer |
+| present, or an encrypted record | absent | any | **error** — never a fresh keystore over encrypted data, never a plaintext open |
+| any | present | unset | **error** — encryption was requested and is unavailable |
+
+A database with no binding is scanned for encrypted records only when a
+keystore is about to be created or adopted, never on a plaintext open.
 
 Then, with a keystore active:
 
@@ -105,21 +115,41 @@ Then, with a keystore active:
 - **One decoder.** `deserialize_memory_checked` unwraps the envelope under
   the record's key before the SHO envelope is read. A record this process
   cannot decrypt (no key for its epoch, failed tag) is an error, never a
-  fabrication, and never deleted by the corruption cleanup.
+  fabrication, and never deleted by the corruption cleanup: AEAD cannot tell
+  a wrong key from damaged bytes, so cleanup keeps every encrypted record and
+  counts the ones it cannot read.
 - **The tripwire.** A plaintext record read under an active keystore is
   counted (`plaintext_reads_under_keystore()`), logged at WARN, and — when
   reached through `get` — rewritten encrypted on the spot. With
   `SHODH_REQUIRE_ENCRYPTED_READS=1` (read per call) it is refused with an
   error instead. Tests: `encryption_plaintext_tripwire_warn.rs`,
   `encryption_plaintext_tripwire_strict.rs`.
-- **Rollback guard.** The index CF holds `meta:keystore_generation`, the
-  highest generation this database has seen. A keystore file with a lower
-  generation is refused; `SHODH_ALLOW_KEYSTORE_ROLLBACK=true` accepts it once
-  (for a deliberate restore from `.bak`) and resets the sentinel.
-- **One keystore per process.** The record crypto is process-global, like
-  the store. A second store opened with a different keystore is refused
-  rather than silently sharing keys. The same keystore reopened at a newer
-  generation replaces the cryptor set.
+- **Binding.** The index CF holds `meta:keystore_binding`:
+  `SKB1 | keystore id | generation | tag`. The id and the tag are HMACs keyed
+  by a KEK-derived key, so DEK rotation and passphrase changes keep the id,
+  another keystore cannot produce it, and the generation cannot be edited
+  without the KEK. It is written (synced) before the first encrypted record
+  and never removed. A database written before bindings existed is bound on
+  its next keyed open, after one of its encrypted records decrypts under the
+  keystore; the old unauthenticated `meta:keystore_generation` sentinel is
+  read once as the rollback floor (a wrong-length value is an error) and
+  removed.
+- **Rollback guard.** A keystore whose generation is below the bound one is
+  refused; `SHODH_ALLOW_KEYSTORE_ROLLBACK=true` accepts it once (a deliberate
+  restore from `.bak`), resets the binding, and replaces the running
+  process's cryptors so no record is written under an epoch the restored file
+  does not hold.
+- **One keystore per process.** The record crypto is process-global, like the
+  passphrase. A second store opened with a different keystore is refused
+  rather than silently sharing keys. The same keystore at a newer generation
+  replaces the cryptor set; at an older one it is refused unless the rollback
+  override accepted it.
+- **Tenants.** The server sets the keystore root to its data directory, so
+  every tenant binds to the one keystore its passphrase unseals. The first
+  time a tenant opens under the root, a keystore beside its data moves to the
+  root if its records are encrypted under it and no root keystore exists yet,
+  is renamed `keystore.json.unused` if it encrypted nothing, and is refused if
+  its records are encrypted under it and a root keystore already exists.
 
 ### Turning encryption on over an existing store
 
@@ -143,6 +173,14 @@ Plaintext, deliberately and documented:
   carry them, without a record. HMAC blinding of the exact-match keys is
   designed (equal terms → equal tokens; range keys stay clear) and deferred.
 - **Oplog** and the feedback / files / prospective / todos column families.
+- **The BM25 index** (`<user>/bm25_index`, tantivy): `content` is stored, so
+  it is a complete plaintext copy of every memory under the cold-disk model.
+- **The audit log's `content_preview`.**
+- **Vector embeddings can be inverted** to approximate the text they encode, so
+  a plaintext vector index leaks content, not only similarity.
+- **Old plaintext after turning encryption on.** Records written before the
+  keystore stay in older SST files and in earlier backups until compaction and
+  backup rotation retire them.
 
 ## 7. Operations — `shodh-keyctl`
 
@@ -170,8 +208,8 @@ migration, not a read side effect.
 - **KMS unseal providers** (`SHODH_KMS_WRAP_KEY`-style local wrap, cloud KMS):
   the `kek_wraps` list already admits another provider id.
 - **Index blinding** of exact-match secondary keys (§6).
-- **HKDF-derived subkeys**, **Zeroizing return types** throughout, and an
-  **authenticated rollback sentinel**.
+- **HKDF-derived subkeys** (the DEK wrap key is still the raw KEK) and
+  **Zeroizing return types** throughout.
 - **Re-encrypt-to-current-epoch migration** after `rotate-dek`.
 - **Oblivious access / PIR** — T2/T3 above; needs its own design discussion.
 - **Windows owner-only ACL** on `keystore.json`.
@@ -189,7 +227,11 @@ migration, not a read side effect.
 | `SHODH_REQUIRE_ENCRYPTED_READS=1`: refused, bytes untouched | `tests/encryption_plaintext_tripwire_strict.rs` |
 | no keystore: bytes identical to `encode_sho`, no side files, no sentinel | `tests/encryption_default_off.rs` |
 | DEK rotation, multi-epoch reads, rollback guard and its override | `tests/encryption_rotation.rs` |
-| keystore primitives (wrap AAD, KDF bounds, MAC, recovery, atomic save) | `src/keystore.rs` unit tests |
+| lost keystore: refused with or without the passphrase, never recreated; restore reopens | `tests/encryption_binding_lost_keystore.rs` |
+| cleanup keeps unreadable ciphertext; a keystore other than the bound one is refused | `tests/encryption_binding_foreign_keystore.rs` |
+| tenants share the root keystore; per-store keystores move or are set aside | `tests/encryption_keystore_root_tenants.rs` |
+| accepted rollback writes under the restored keystore's epochs; binding reset | `tests/encryption_rollback_follows_disk.rs` |
+| keystore primitives (wrap AAD, KDF bounds, MAC, recovery, atomic save, binding) | `src/keystore.rs` unit tests |
 
 Each integration test is its own binary because the record crypto is
 process-global.

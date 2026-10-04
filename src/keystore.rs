@@ -89,6 +89,93 @@ fn fingerprint(key: &[u8]) -> [u8; 4] {
     [d[0], d[1], d[2], d[3]]
 }
 
+// ============================================================================
+// DATABASE ↔ KEYSTORE BINDING
+//
+// A database that has ever been encrypted keeps one record naming the keystore
+// that encrypted it and the newest keystore generation it has accepted:
+// `SKB1 | id | generation | tag`. The id and the tag are derived from the master
+// key, so DEK rotation and passphrase changes keep the id, a different keystore
+// can never produce it, and the generation cannot be edited without the key.
+// ============================================================================
+
+const BINDING_MAGIC: &[u8; 4] = b"SKB1";
+/// Length of the public keystore id a binding record carries.
+pub const BINDING_ID_LEN: usize = 8;
+const BINDING_TAG_LEN: usize = 32;
+const BINDING_LEN: usize = BINDING_MAGIC.len() + BINDING_ID_LEN + 8 + BINDING_TAG_LEN;
+
+fn binding_hmac(kek: &SecretKey, label: &[u8], data: &[u8]) -> [u8; 32] {
+    let mut bk =
+        <HmacSha256 as Mac>::new_from_slice(kek.as_slice()).expect("HMAC accepts any key length");
+    Mac::update(&mut bk, b"shodh:db-binding:v1");
+    let key = Zeroizing::new(<[u8; 32]>::from(Mac::finalize(bk).into_bytes()));
+    let mut m =
+        <HmacSha256 as Mac>::new_from_slice(key.as_slice()).expect("HMAC accepts any key length");
+    Mac::update(&mut m, label);
+    Mac::update(&mut m, data);
+    Mac::finalize(m).into_bytes().into()
+}
+
+/// Public id of the keystore holding `kek`.
+pub fn keystore_binding_id(kek: &SecretKey) -> [u8; BINDING_ID_LEN] {
+    let mut id = [0u8; BINDING_ID_LEN];
+    id.copy_from_slice(&binding_hmac(kek, b"id", &[])[..BINDING_ID_LEN]);
+    id
+}
+
+/// The binding record for a database encrypted under `kek` at `generation`.
+pub fn seal_binding(kek: &SecretKey, generation: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(BINDING_LEN);
+    out.extend_from_slice(BINDING_MAGIC);
+    out.extend_from_slice(&keystore_binding_id(kek));
+    out.extend_from_slice(&generation.to_le_bytes());
+    let tag = binding_hmac(kek, b"tag", &out);
+    out.extend_from_slice(&tag);
+    out
+}
+
+/// The keystore id a binding record names, readable without a key so an error
+/// can say which keystore a database needs. `None` for a malformed record.
+pub fn binding_keystore_id(record: &[u8]) -> Option<[u8; BINDING_ID_LEN]> {
+    if record.len() != BINDING_LEN || &record[..BINDING_MAGIC.len()] != BINDING_MAGIC {
+        return None;
+    }
+    let mut id = [0u8; BINDING_ID_LEN];
+    id.copy_from_slice(&record[BINDING_MAGIC.len()..BINDING_MAGIC.len() + BINDING_ID_LEN]);
+    Some(id)
+}
+
+/// Verify a binding record against an unsealed master key and return the
+/// generation it records. A malformed record, a different keystore and a forged
+/// generation are all errors; none of them reads as "no binding".
+pub fn open_binding(kek: &SecretKey, record: &[u8]) -> Result<u64> {
+    let bound = binding_keystore_id(record).ok_or_else(|| {
+        anyhow!(
+            "keystore binding record is malformed ({} bytes, expected {BINDING_LEN})",
+            record.len()
+        )
+    })?;
+    let ours = keystore_binding_id(kek);
+    if bound != ours {
+        return Err(anyhow!(
+            "this database is bound to keystore {}, but the keystore provided is {}",
+            hex::encode(bound),
+            hex::encode(ours)
+        ));
+    }
+    let (head, tag) = record.split_at(BINDING_LEN - BINDING_TAG_LEN);
+    if !bool::from(binding_hmac(kek, b"tag", head)[..].ct_eq(tag)) {
+        return Err(anyhow!(
+            "keystore binding record failed authentication (its generation was altered)"
+        ));
+    }
+    let gen_at = BINDING_MAGIC.len() + BINDING_ID_LEN;
+    let mut generation = [0u8; 8];
+    generation.copy_from_slice(&record[gen_at..gen_at + 8]);
+    Ok(u64::from_le_bytes(generation))
+}
+
 /// AAD bound into a DEK wrap — pins the wrap to its epoch so a DEK cannot be
 /// silently substituted across epochs.
 fn dek_aad(epoch: u32) -> Vec<u8> {
@@ -1059,5 +1146,48 @@ mod tests {
         ks.add_recovery_code(&kek).unwrap();
         assert_eq!(ks.generation, 2);
         ks.verify_integrity(&kek).unwrap();
+    }
+
+    #[test]
+    fn binding_round_trips_and_survives_rotation_and_passphrase_change() {
+        let mut ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks.unseal_with_passphrase("pw").unwrap();
+        let id = keystore_binding_id(&kek);
+        let record = seal_binding(&kek, 7);
+        assert_eq!(binding_keystore_id(&record), Some(id));
+        assert_eq!(open_binding(&kek, &record).unwrap(), 7);
+
+        ks.rotate_dek(&kek).unwrap();
+        ks.set_passphrase(&kek, "new-pw").unwrap();
+        let kek_again = ks.unseal_with_passphrase("new-pw").unwrap();
+        assert_eq!(
+            keystore_binding_id(&kek_again),
+            id,
+            "same master key, same id"
+        );
+        assert_eq!(open_binding(&kek_again, &record).unwrap(), 7);
+    }
+
+    #[test]
+    fn binding_refuses_another_keystore_a_forged_generation_and_a_malformed_record() {
+        let a = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let b = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let kek_a = a.unseal_with_passphrase("pw").unwrap();
+        let kek_b = b.unseal_with_passphrase("pw").unwrap();
+        let record = seal_binding(&kek_a, 3);
+
+        let err = open_binding(&kek_b, &record).unwrap_err().to_string();
+        assert!(err.contains("bound to keystore"), "{err}");
+
+        let mut forged = record.clone();
+        forged[BINDING_MAGIC.len() + BINDING_ID_LEN] ^= 0x01;
+        let err = open_binding(&kek_a, &forged).unwrap_err().to_string();
+        assert!(err.contains("failed authentication"), "{err}");
+
+        let err = open_binding(&kek_a, &record[..record.len() - 1])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("malformed"), "{err}");
+        assert_eq!(binding_keystore_id(b"short"), None);
     }
 }
