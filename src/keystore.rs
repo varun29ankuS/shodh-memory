@@ -194,18 +194,24 @@ fn dek_aad(epoch: u32) -> Vec<u8> {
 
 /// Derive the recovery-code wrapping key. The recovery code is high-entropy, so a
 /// fast hash (not Argon2) suffices — there is nothing to brute-force.
-fn recovery_key_from_code(code: &str) -> [u8; KEY_LEN] {
-    let digest = Sha256::digest(code.trim().as_bytes());
-    let mut k = [0u8; KEY_LEN];
-    k.copy_from_slice(&digest);
+fn recovery_key_from_code(code: &str) -> SecretKey {
+    let mut hasher = Sha256::new();
+    Digest::update(&mut hasher, code.trim().as_bytes());
+    let mut k = Zeroizing::new([0u8; KEY_LEN]);
+    // Hashed straight into the zeroizing buffer. sha2 0.10 does not wipe its own block
+    // buffer, so one copy of the code can outlive this call, as the caller's does.
+    hasher.finalize_into(sha2::digest::generic_array::GenericArray::from_mut_slice(
+        k.as_mut_slice(),
+    ));
     k
 }
 
 /// Generate a high-entropy, transcribable recovery code (192 bits → 48 hex chars).
-fn generate_recovery_code() -> String {
-    let mut raw = [0u8; 24];
-    OsRng.fill_bytes(&mut raw);
-    hex::encode(raw)
+/// The code derives the recovery key, so it is wiped like one.
+fn generate_recovery_code() -> Zeroizing<String> {
+    let mut raw = Zeroizing::new([0u8; 24]);
+    OsRng.fill_bytes(raw.as_mut_slice());
+    Zeroizing::new(hex::encode(raw.as_slice()))
 }
 
 /// AES-256-GCM key-wrap: encrypt `key` under `wrapping_key` with `aad` bound in.
@@ -515,7 +521,7 @@ impl Keystore {
     /// Add (or replace) a recovery wrap of the master key and return the one-time
     /// recovery code. Display it ONCE and never persist it — only the wrap is
     /// stored. Survives passphrase loss as long as the keystore file survives.
-    pub fn add_recovery_code(&mut self, kek: &SecretKey) -> Result<String> {
+    pub fn add_recovery_code(&mut self, kek: &SecretKey) -> Result<Zeroizing<String>> {
         let code = generate_recovery_code();
         let wrap_key_bytes = recovery_key_from_code(&code);
         let wrap = wrap_key(&wrap_key_bytes, kek.as_slice(), KEK_AAD, "recovery")?;
@@ -878,6 +884,16 @@ mod tests {
             salt: b64e(&[0u8; SALT_LEN]),
         };
         assert!(kdf.derive("pw").is_err());
+    }
+
+    #[test]
+    fn recovery_key_derivation_is_unchanged_by_zeroizing() {
+        let expected = Sha256::digest(b"0123abcd");
+        assert_eq!(
+            recovery_key_from_code("  0123abcd\n").as_slice(),
+            expected.as_slice(),
+            "recovery wraps written before this change must still open"
+        );
     }
 
     #[test]

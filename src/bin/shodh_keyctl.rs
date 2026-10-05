@@ -100,7 +100,10 @@ fn main() -> Result<()> {
             ks.verify_integrity(&kek)?;
             let code = ks.add_recovery_code(&kek)?;
             ks.save_to_path(&cli.keystore)?;
-            println!("RECOVERY CODE (store offline, shown once): {code}");
+            println!(
+                "RECOVERY CODE (store offline, shown once): {}",
+                code.as_str()
+            );
         }
         Cmd::Recover => {
             let recovery_code = secret("SHODH_RECOVERY_CODE")?;
@@ -116,7 +119,10 @@ fn main() -> Result<()> {
                 "passphrase reset via recovery code (keystore generation {})",
                 ks.generation
             );
-            println!("NEW RECOVERY CODE (store offline, shown once): {new_code}");
+            println!(
+                "NEW RECOVERY CODE (store offline, shown once): {}",
+                new_code.as_str()
+            );
         }
         Cmd::Status => {
             let ks = load(&cli.keystore)?;
