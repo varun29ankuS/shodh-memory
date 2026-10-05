@@ -1529,6 +1529,17 @@ const KEYSTORE_GENERATION_KEY: &[u8] = b"meta:keystore_generation";
 /// record and never removed, so an encrypted database always knows its keystore.
 const KEYSTORE_BINDING_KEY: &[u8] = b"meta:keystore_binding";
 
+/// Outcome of a guarded migration write ([`MemoryStorage::write_if_unchanged`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Rewrite {
+    /// The record was still as read, and was rewritten.
+    Wrote,
+    /// Another write changed it since the read; it was left alone.
+    Changed,
+    /// It was deleted since the read; it was not resurrected.
+    Gone,
+}
+
 /// Column family for the append-only agent-traceability operation log
 /// (`memory::oplog::OpRecord`, spec `docs/superpowers/specs/2026-07-30-agent-traceability-design.md`).
 ///
@@ -2553,10 +2564,7 @@ impl MemoryStorage {
 
                 // Lazy migration: re-write legacy formats in current format
                 if needs_migration {
-                    if let Err(e) = self.migrate_memory_format(&memory) {
-                        // Migration failure is non-fatal - log and continue
-                        tracing::debug!("Lazy migration skipped for memory {}: {}", memory.id.0, e);
-                    }
+                    self.migrate_if_unchanged(key, &value, &memory);
                 }
 
                 Ok(Some(memory))
@@ -2607,19 +2615,71 @@ impl MemoryStorage {
         Ok(Some(memory))
     }
 
-    /// Re-write a memory in current format (lazy migration helper). "Current"
-    /// includes the record envelope: a plaintext record read under an active
-    /// keystore comes through here and leaves encrypted.
-    fn migrate_memory_format(&self, memory: &Memory) -> Result<()> {
-        let key = memory.id.0.as_bytes();
-        let value = encode_memory(memory).context("Failed to serialize for migration")?;
-
+    /// Lazy migration of a record that was read as `read` at `key`, decoded to `memory`.
+    ///
+    /// Runs under `record_mutation_lock` and writes only if the stored bytes are
+    /// still `read` ([`Self::write_if_unchanged`]): a `modify` that completed since
+    /// the read has already written its own record in the current format, and
+    /// rewriting the older read over it would lose that update. When the lock is
+    /// held, including by this thread inside `modify` or `delete` (both read
+    /// through `get_opt`), the migration is skipped: that caller's own write
+    /// settles the record, and waiting would deadlock. The record is encoded
+    /// before the lock is taken, so the lock covers only the re-read and the put.
+    /// Migration is opportunistic, so every skip and failure is logged, not raised.
+    fn migrate_if_unchanged(&self, key: &[u8], read: &[u8], memory: &Memory) {
+        let value = match encode_memory(memory) {
+            Ok(value) => value,
+            Err(e) => {
+                tracing::debug!("Lazy migration skipped for memory {}: {}", memory.id.0, e);
+                return;
+            }
+        };
+        let Some(_guard) = self.record_mutation_lock.try_lock() else {
+            tracing::debug!(
+                "Lazy migration skipped for memory {}: a record mutation holds the lock",
+                memory.id.0
+            );
+            return;
+        };
         let mut write_opts = WriteOptions::default();
         write_opts.set_sync(false); // Async is fine for migration
+        match self.write_if_unchanged(key, read, &value, &write_opts) {
+            Ok(Rewrite::Wrote) => {
+                tracing::debug!("Migrated memory {} to current format", memory.id.0)
+            }
+            Ok(Rewrite::Changed) | Ok(Rewrite::Gone) => tracing::debug!(
+                "Lazy migration skipped for memory {}: the record changed since it was read",
+                memory.id.0
+            ),
+            Err(e) => tracing::debug!("Lazy migration skipped for memory {}: {}", memory.id.0, e),
+        }
+    }
 
-        self.db.put_opt(key, &value, &write_opts)?;
-        tracing::debug!("Migrated memory {} to current format", memory.id.0);
-        Ok(())
+    /// Write `value` at `key` only if the stored bytes are still `read`. The
+    /// caller holds `record_mutation_lock`, so no `modify` or `delete` lands
+    /// between the check and the write. Always writes at the key that was read,
+    /// never at an id decoded from it.
+    fn write_if_unchanged(
+        &self,
+        key: &[u8],
+        read: &[u8],
+        value: &[u8],
+        write_opts: &WriteOptions,
+    ) -> Result<Rewrite> {
+        match self
+            .db
+            .get(key)
+            .context("re-read before a migration write")?
+        {
+            Some(current) if current.as_slice() == read => {
+                self.db
+                    .put_opt(key, value, write_opts)
+                    .context("migration write")?;
+                Ok(Rewrite::Wrote)
+            }
+            Some(_) => Ok(Rewrite::Changed),
+            None => Ok(Rewrite::Gone),
+        }
     }
 
     /// Find a memory by its external_id (e.g., "linear:SHO-39", "github:pr-123")
@@ -2717,6 +2777,9 @@ impl MemoryStorage {
     /// Delete a memory with configurable durability
     #[allow(unused)] // Public API - available for memory management
     pub fn delete(&self, id: &MemoryId) -> Result<()> {
+        // Serialized with modify and the migration writes, so a migration cannot
+        // write a record back after it is deleted (resurrecting it unindexed).
+        let _guard = self.record_mutation_lock.lock();
         // Clean up indices FIRST while the memory still exists in the main DB,
         // since remove_from_indices() needs to read the memory to reconstruct index keys.
         self.remove_from_indices(id)?;
@@ -4035,7 +4098,7 @@ impl MemoryStorage {
             // destroys the evidence of what the record used to be.
             match deserialize_plain_checked(&key, &plain) {
                 Ok((memory, _)) => {
-                    to_migrate.push((key.to_vec(), memory));
+                    to_migrate.push((key.to_vec(), value.to_vec(), memory));
                 }
                 Err(_) => {
                     failed += 1;
@@ -4053,18 +4116,29 @@ impl MemoryStorage {
             let mut write_opts = WriteOptions::default();
             write_opts.set_sync(self.write_mode == WriteMode::Sync);
 
-            for (key, memory) in to_migrate {
-                match encode_memory(&memory) {
-                    Ok(serialized) => {
-                        if let Err(e) = self.db.put_opt(&key, &serialized, &write_opts) {
-                            tracing::warn!("Failed to migrate memory: {e}");
-                            failed += 1;
-                        } else {
-                            migrated += 1;
-                        }
-                    }
+            // Each write takes the record lock and checks the bytes are still the
+            // scanned ones: the scan and the writes are far apart, and a modify,
+            // access update or delete in between must not be reverted or undone.
+            for (key, read, memory) in to_migrate {
+                let serialized = match encode_memory(&memory) {
+                    Ok(serialized) => serialized,
                     Err(e) => {
                         tracing::warn!("Failed to serialize migrated memory: {e}");
+                        failed += 1;
+                        continue;
+                    }
+                };
+                let _guard = self.record_mutation_lock.lock();
+                match self.write_if_unchanged(&key, &read, &serialized, &write_opts) {
+                    Ok(Rewrite::Wrote) => migrated += 1,
+                    // Rewritten since the scan by a writer that encodes current format.
+                    Ok(Rewrite::Changed) => already_current += 1,
+                    Ok(Rewrite::Gone) => tracing::debug!(
+                        "Migration skipped memory {}: deleted since the scan",
+                        hex::encode(&key)
+                    ),
+                    Err(e) => {
+                        tracing::warn!("Failed to migrate memory: {e}");
                         failed += 1;
                     }
                 }
@@ -5351,11 +5425,11 @@ mod tests {
             "the read path must not rewrite a record it could not trust"
         );
 
-        // And no phantom was written at the fabricated id. `migrate_memory_format`
-        // keys its rewrite off the DECODED id, so an unguarded lazy migration of
-        // a pseudo-decode does not overwrite the original — it MANUFACTURES a
-        // second record, at a key nothing ever wrote to, visible to every
-        // full-CF scan in this file.
+        // And no phantom was written at the fabricated id. A lazy migration keyed
+        // off the DECODED id would not overwrite the original on a pseudo-decode:
+        // it would MANUFACTURE a second record, at a key nothing ever wrote to,
+        // visible to every full-CF scan in this file. It now writes at the key
+        // it read.
         assert!(
             storage
                 .db
@@ -5746,6 +5820,118 @@ mod tests {
             "the now-postcard record must count as already current"
         );
         assert_eq!(failed2, 0);
+    }
+
+    fn lazy_migration_fixture(seed: &str) -> (tempfile::TempDir, MemoryStorage, MemoryId, Memory) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = MemoryStorage::new(dir.path(), None).expect("storage");
+        let id = MemoryId(uuid::Uuid::new_v4());
+        let memory = sample_memory(id.clone(), seed);
+        (dir, storage, id, memory)
+    }
+
+    #[test]
+    fn lazy_migration_rewrites_a_record_still_as_it_was_read() {
+        let (_dir, storage, id, memory) = lazy_migration_fixture("unchanged");
+        let key = id.0.as_bytes();
+        storage.db.put(key, b"as-read").expect("seed");
+        storage.migrate_if_unchanged(key, b"as-read", &memory);
+        let stored = storage.db.get(key).expect("get").expect("present");
+        assert_eq!(stored, encode_memory(&memory).expect("encode"));
+    }
+
+    #[test]
+    fn lazy_migration_never_overwrites_a_record_changed_since_the_read() {
+        let (_dir, storage, id, memory) = lazy_migration_fixture("stale read");
+        let key = id.0.as_bytes();
+        // A modify landed between the unlocked read and the migration.
+        storage
+            .db
+            .put(key, b"written-by-modify")
+            .expect("concurrent write");
+        storage.migrate_if_unchanged(key, b"as-read", &memory);
+        let stored = storage.db.get(key).expect("get").expect("present");
+        assert_eq!(stored, b"written-by-modify", "the newer write survives");
+    }
+
+    /// An SHO v1 (bincode 2.x) record: the legacy shape `get_opt` flags for
+    /// migration. A raw bincode record without the envelope is not flagged, so
+    /// it would never reach the migration path under test.
+    fn seed_legacy(storage: &MemoryStorage, memory: &Memory) -> Vec<u8> {
+        let mut legacy = STORAGE_MAGIC.to_vec();
+        legacy.push(crate::serialization::SHO_VERSION_BINCODE2);
+        legacy.extend(
+            bincode::serde::encode_to_vec(memory, crate::bincode_safe_config()).expect("encode"),
+        );
+        let crc = crc32_simple(&legacy);
+        legacy.extend_from_slice(&crc.to_le_bytes());
+        let (_, needs_migration) =
+            deserialize_memory_checked(memory.id.0.as_bytes(), &legacy).expect("decodes");
+        assert!(needs_migration, "fixture must be a shape get_opt migrates");
+        storage
+            .db
+            .put(memory.id.0.as_bytes(), &legacy)
+            .expect("seed legacy record");
+        legacy
+    }
+
+    #[test]
+    fn lazy_migration_never_resurrects_a_record_deleted_since_the_read() {
+        let (_dir, storage, id, memory) = lazy_migration_fixture("deleted");
+        let key = id.0.as_bytes();
+        storage.db.put(key, b"as-read").expect("seed");
+        storage.db.delete(key).expect("concurrent delete");
+        storage.migrate_if_unchanged(key, b"as-read", &memory);
+        assert_eq!(storage.db.get(key).expect("get"), None, "not written back");
+    }
+
+    #[test]
+    fn a_legacy_read_is_still_migrated_through_the_guard() {
+        let (_dir, storage, id, memory) = lazy_migration_fixture("legacy read");
+        let legacy = seed_legacy(&storage, &memory);
+        storage.get_opt(&id).expect("read").expect("present");
+        let stored = storage
+            .db
+            .get(id.0.as_bytes())
+            .expect("get")
+            .expect("present");
+        assert_ne!(stored, legacy, "rewritten in the current format");
+        assert_eq!(stored, encode_memory(&memory).expect("encode"));
+    }
+
+    #[test]
+    fn delete_of_a_legacy_record_does_not_deadlock_on_its_own_migration() {
+        let (_dir, storage, id, memory) = lazy_migration_fixture("legacy delete");
+        seed_legacy(&storage, &memory);
+        let storage = std::sync::Arc::new(storage);
+        let (done, finished) = std::sync::mpsc::channel();
+        let worker = {
+            let storage = storage.clone();
+            let id = id.clone();
+            std::thread::spawn(move || {
+                done.send(storage.delete(&id).is_ok()).expect("report");
+            })
+        };
+        // delete holds the lock and reads through get_opt; a blocking lock in the
+        // migration would hang here instead of failing.
+        let ok = finished
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("delete finished instead of deadlocking");
+        worker.join().expect("worker");
+        assert!(ok, "delete succeeded");
+        assert_eq!(storage.db.get(id.0.as_bytes()).expect("get"), None);
+    }
+
+    #[test]
+    fn lazy_migration_skips_while_a_mutation_holds_the_lock() {
+        let (_dir, storage, id, memory) = lazy_migration_fixture("locked");
+        let key = id.0.as_bytes();
+        storage.db.put(key, b"as-read").expect("seed");
+        let _held = storage.record_mutation_lock.lock();
+        // Same thread, as inside modify: try_lock fails instead of deadlocking.
+        storage.migrate_if_unchanged(key, b"as-read", &memory);
+        let stored = storage.db.get(key).expect("get").expect("present");
+        assert_eq!(stored, b"as-read", "skipped, not written and not blocked");
     }
 
     #[test]
