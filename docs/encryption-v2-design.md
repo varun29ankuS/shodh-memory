@@ -25,7 +25,7 @@ passphrase in an env file on the data disk gives them both.
 passphrase ──Argon2id(salt,m,t,p)──▶ unseal key ──┐
 recovery code ──SHA-256──▶ recovery key ───────────┼─▶ AES-256-GCM unwrap ─▶ master key (KEK)
                                                                                    │
-                                                                     wraps ▶ DEK_epoch_N
+                                              HMAC("dek-wrap:v1") ▶ wrap key ▶ DEK_epoch_N
                                                                                    │
                                                         XChaCha20-Poly1305 record encryption
 ```
@@ -33,8 +33,13 @@ recovery code ──SHA-256──▶ recovery key ──────────
 - The **KEK** is never stored raw: only wrapped, once per enabled unseal
   provider (`kek_wraps`: `passphrase`, optionally `recovery`). Any one wrap
   unseals — so the KEK is as strong as the weakest enabled provider.
-- **DEKs** are per epoch, wrapped by the KEK with the epoch bound in as AAD so
-  a DEK cannot be substituted across epochs. The active epoch encrypts new
+- **DEKs** are per epoch, wrapped under a key derived from the KEK
+  (`HMAC-SHA256(KEK, "shodh:keystore:dek-wrap:v1")`) with the epoch bound in as
+  AAD so a DEK cannot be substituted across epochs. The KEK itself only keys
+  derivations: this wrap key, the integrity MAC key and the database binding.
+  Keystores written before the wrap key was derived keep raw-KEK wraps, which
+  carry no `wrap` field so their MAC still verifies; the first mutation
+  (rotation, passphrase change, recovery code) re-wraps them. The active epoch encrypts new
   writes; retired epochs stay in the keystore so their records stay readable.
 - Every wrap is AES-256-GCM with a domain-separating AAD.
 
@@ -209,8 +214,7 @@ migration, not a read side effect.
 - **KMS unseal providers** (`SHODH_KMS_WRAP_KEY`-style local wrap, cloud KMS):
   the `kek_wraps` list already admits another provider id.
 - **Index blinding** of exact-match secondary keys (§6).
-- **HKDF-derived subkeys** (the DEK wrap key is still the raw KEK) and
-  **Zeroizing return types** throughout.
+- **Zeroizing return types** throughout.
 - **Re-encrypt-to-current-epoch migration** after `rotate-dek`.
 - **Oblivious access / PIR** — T2/T3 above; needs its own design discussion.
 - **Windows owner-only ACL** on `keystore.json`.

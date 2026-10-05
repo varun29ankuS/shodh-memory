@@ -351,14 +351,61 @@ impl KdfParams {
     }
 }
 
-/// A per-epoch data key, wrapped by the master key (KEK).
+/// The key a DEK entry is wrapped under.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DekWrap {
+    /// The raw KEK: keystores written before wrap keys were derived. Never
+    /// serialized, so such a keystore re-serializes byte for byte and its
+    /// integrity MAC still verifies.
+    #[default]
+    RawKek,
+    /// `HMAC-SHA256(KEK, "shodh:keystore:dek-wrap:v1")`.
+    DerivedV1,
+}
+
+impl DekWrap {
+    fn is_raw_kek(&self) -> bool {
+        *self == DekWrap::RawKek
+    }
+}
+
+/// A per-epoch data key, wrapped under a key derived from the master key (KEK).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DekEntry {
     pub epoch: u32,
-    /// DEK wrapped by the KEK (provider id `"kek"`).
+    /// The wrapped DEK (provider id `"kek"`).
     pub wrapped: Wrapped,
     /// `"active"` or `"retired"`.
     pub state: String,
+    /// Which key `wrapped` is under. Absent in older keystores, meaning the raw KEK.
+    #[serde(default, skip_serializing_if = "DekWrap::is_raw_kek")]
+    pub wrap: DekWrap,
+}
+
+/// The key DEKs are wrapped under, derived from the KEK so the KEK itself only
+/// ever keys derivations (this one, the integrity MAC and the database binding).
+fn dek_wrap_key(kek: &SecretKey) -> SecretKey {
+    let mut m =
+        <HmacSha256 as Mac>::new_from_slice(kek.as_slice()).expect("HMAC accepts any key length");
+    Mac::update(&mut m, b"shodh:keystore:dek-wrap:v1");
+    let mut k = Zeroizing::new([0u8; KEY_LEN]);
+    sha2::digest::FixedOutput::finalize_into(
+        m,
+        sha2::digest::generic_array::GenericArray::from_mut_slice(k.as_mut_slice()),
+    );
+    k
+}
+
+fn wrap_dek(kek: &SecretKey, dek: &[u8], epoch: u32) -> Result<Wrapped> {
+    wrap_key(&dek_wrap_key(kek), dek, &dek_aad(epoch), "kek")
+}
+
+fn unwrap_dek(kek: &SecretKey, entry: &DekEntry) -> Result<SecretKey> {
+    match entry.wrap {
+        DekWrap::DerivedV1 => unwrap_key(&dek_wrap_key(kek), &entry.wrapped, &dek_aad(entry.epoch)),
+        DekWrap::RawKek => unwrap_key(kek, &entry.wrapped, &dek_aad(entry.epoch)),
+    }
 }
 
 /// Serialisable keystore: the master key wrapped per unseal provider, the
@@ -395,7 +442,7 @@ impl Keystore {
 
         let unseal = kdf.derive(passphrase)?;
         let kek_wrap = wrap_key(&unseal, kek.as_slice(), KEK_AAD, "passphrase")?;
-        let dek_wrap = wrap_key(&kek, dek.as_slice(), &dek_aad(0), "kek")?;
+        let dek_wrap = wrap_dek(&kek, dek.as_slice(), 0)?;
 
         let mut ks = Self {
             crypto_version: CRYPTO_VERSION,
@@ -406,6 +453,7 @@ impl Keystore {
                 epoch: 0,
                 wrapped: dek_wrap,
                 state: "active".to_string(),
+                wrap: DekWrap::DerivedV1,
             }],
             active_epoch: 0,
             kek_fingerprint: b64e(&fingerprint(kek.as_slice())),
@@ -489,7 +537,30 @@ impl Keystore {
             .iter()
             .find(|d| d.epoch == epoch)
             .ok_or_else(|| anyhow!("no data key for epoch {epoch}"))?;
-        unwrap_key(kek, &entry.wrapped, &dek_aad(epoch))
+        unwrap_dek(kek, entry)
+    }
+
+    /// New wraps, under the derived key, for every DEK still under the raw KEK.
+    /// Computed without touching `self`, so a mutation that fails here leaves
+    /// the keystore exactly as it was; [`apply_dek_upgrade`](Self::apply_dek_upgrade)
+    /// commits them. Each mutation runs both, so an older keystore moves to
+    /// derived wraps the first time it is changed.
+    fn prepare_dek_upgrade(&self, kek: &SecretKey) -> Result<Vec<(usize, Wrapped)>> {
+        let mut upgraded = Vec::new();
+        for (i, entry) in self.deks.iter().enumerate() {
+            if entry.wrap == DekWrap::RawKek {
+                let dek = unwrap_dek(kek, entry)?;
+                upgraded.push((i, wrap_dek(kek, dek.as_slice(), entry.epoch)?));
+            }
+        }
+        Ok(upgraded)
+    }
+
+    fn apply_dek_upgrade(&mut self, upgraded: Vec<(usize, Wrapped)>) {
+        for (i, wrapped) in upgraded {
+            self.deks[i].wrapped = wrapped;
+            self.deks[i].wrap = DekWrap::DerivedV1;
+        }
     }
 
     /// Rotate the passphrase: re-derive a fresh unseal key (new salt/params) and
@@ -507,12 +578,15 @@ impl Keystore {
     /// passphrase. Derives a fresh salt/params and replaces only the passphrase
     /// wrap; the recovery wrap is preserved.
     pub fn set_passphrase(&mut self, kek: &SecretKey, new: &str) -> Result<()> {
+        self.verify_integrity(kek)?;
         let new_kdf = KdfParams::production();
         let unseal = new_kdf.derive(new)?;
         let new_wrap = wrap_key(&unseal, kek.as_slice(), KEK_AAD, "passphrase")?;
+        let upgraded = self.prepare_dek_upgrade(kek)?;
         self.kek_wraps.retain(|w| w.provider != "passphrase");
         self.kek_wraps.push(new_wrap);
         self.kdf = new_kdf;
+        self.apply_dek_upgrade(upgraded);
         self.generation += 1;
         self.seal(kek)?;
         Ok(())
@@ -522,11 +596,14 @@ impl Keystore {
     /// recovery code. Display it ONCE and never persist it — only the wrap is
     /// stored. Survives passphrase loss as long as the keystore file survives.
     pub fn add_recovery_code(&mut self, kek: &SecretKey) -> Result<Zeroizing<String>> {
+        self.verify_integrity(kek)?;
         let code = generate_recovery_code();
         let wrap_key_bytes = recovery_key_from_code(&code);
         let wrap = wrap_key(&wrap_key_bytes, kek.as_slice(), KEK_AAD, "recovery")?;
+        let upgraded = self.prepare_dek_upgrade(kek)?;
         self.kek_wraps.retain(|w| w.provider != "recovery");
         self.kek_wraps.push(wrap);
+        self.apply_dek_upgrade(upgraded);
         self.generation += 1;
         self.seal(kek)?;
         Ok(code)
@@ -555,9 +632,12 @@ impl Keystore {
     /// BEFORE anything is encrypted under the new epoch: a record written under
     /// an epoch whose DEK was never saved is unrecoverable.
     pub fn rotate_dek(&mut self, kek: &SecretKey) -> Result<u32> {
+        self.verify_integrity(kek)?;
         let new_epoch = self.deks.iter().map(|d| d.epoch).max().unwrap_or(0) + 1;
         let dek = random_key();
-        let wrap = wrap_key(kek, dek.as_slice(), &dek_aad(new_epoch), "kek")?;
+        let wrap = wrap_dek(kek, dek.as_slice(), new_epoch)?;
+        let upgraded = self.prepare_dek_upgrade(kek)?;
+        self.apply_dek_upgrade(upgraded);
         for d in &mut self.deks {
             if d.state == "active" {
                 d.state = "retired".to_string();
@@ -567,6 +647,7 @@ impl Keystore {
             epoch: new_epoch,
             wrapped: wrap,
             state: "active".to_string(),
+            wrap: DekWrap::DerivedV1,
         });
         self.active_epoch = new_epoch;
         self.generation += 1;
@@ -884,6 +965,96 @@ mod tests {
             salt: b64e(&[0u8; SALT_LEN]),
         };
         assert!(kdf.derive("pw").is_err());
+    }
+
+    #[test]
+    fn new_dek_wraps_are_derived_and_the_raw_kek_does_not_open_them() {
+        let ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks.unseal_with_passphrase("pw").unwrap();
+        assert_eq!(ks.deks[0].wrap, DekWrap::DerivedV1);
+        assert!(
+            unwrap_key(&kek, &ks.deks[0].wrapped, &dek_aad(0)).is_err(),
+            "the raw KEK is not the wrap key"
+        );
+        assert!(ks.data_key_for_epoch(&kek, 0).is_ok());
+    }
+
+    #[test]
+    fn legacy_raw_kek_wraps_still_open_and_upgrade_on_first_mutation() {
+        let mut ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks.unseal_with_passphrase("pw").unwrap();
+        let dek0 = ks.data_key_for_epoch(&kek, 0).unwrap();
+
+        // The keystore as a build before derived wrap keys wrote it.
+        ks.deks[0].wrapped = wrap_key(&kek, dek0.as_slice(), &dek_aad(0), "kek").unwrap();
+        ks.deks[0].wrap = DekWrap::RawKek;
+        ks.seal(&kek).unwrap();
+        let legacy_json = ks.to_json().unwrap();
+        assert!(
+            !legacy_json.contains("\"wrap\""),
+            "a legacy entry serializes exactly as before"
+        );
+
+        let mut legacy = Keystore::from_json(&legacy_json).unwrap();
+        legacy
+            .verify_integrity(&kek)
+            .expect("an older keystore's MAC still verifies");
+        assert_eq!(
+            legacy.data_key_for_epoch(&kek, 0).unwrap().as_slice(),
+            dek0.as_slice()
+        );
+
+        legacy.rotate_dek(&kek).unwrap();
+        assert!(
+            legacy.deks.iter().all(|d| d.wrap == DekWrap::DerivedV1),
+            "the first mutation re-wraps every DEK"
+        );
+        legacy.verify_integrity(&kek).unwrap();
+        let reread = Keystore::from_json(&legacy.to_json().unwrap()).unwrap();
+        assert_eq!(
+            reread.data_key_for_epoch(&kek, 0).unwrap().as_slice(),
+            dek0.as_slice(),
+            "epoch 0's key survives the re-wrap"
+        );
+    }
+
+    #[test]
+    fn a_mutation_that_fails_midway_leaves_the_keystore_unchanged() {
+        let mut ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks.unseal_with_passphrase("pw").unwrap();
+        ks.rotate_dek(&kek).unwrap();
+        // Two legacy entries; epoch 1 carries epoch 0's ciphertext, so its unwrap
+        // fails on the epoch AAD after epoch 0 would already have been upgraded.
+        for i in 0..2 {
+            let dek = ks.data_key_for_epoch(&kek, ks.deks[i].epoch).unwrap();
+            ks.deks[i].wrapped =
+                wrap_key(&kek, dek.as_slice(), &dek_aad(ks.deks[i].epoch), "kek").unwrap();
+            ks.deks[i].wrap = DekWrap::RawKek;
+        }
+        ks.deks[1].wrapped = ks.deks[0].wrapped.clone();
+        ks.seal(&kek).unwrap();
+        let before = ks.to_json().unwrap();
+
+        assert!(ks.set_passphrase(&kek, "new-pw").is_err());
+        assert!(ks.add_recovery_code(&kek).is_err());
+        assert!(ks.rotate_dek(&kek).is_err());
+        assert_eq!(ks.to_json().unwrap(), before, "nothing was half-applied");
+        ks.verify_integrity(&kek).expect("still sealed");
+    }
+
+    #[test]
+    fn a_mutation_refuses_a_keystore_whose_mac_does_not_verify() {
+        let mut ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks.unseal_with_passphrase("pw").unwrap();
+        ks.active_epoch = 7;
+        let before = ks.to_json().unwrap();
+        let err = ks.rotate_dek(&kek).unwrap_err().to_string();
+        assert!(err.contains("integrity"), "{err}");
+        assert_eq!(
+            ks.to_json().unwrap(),
+            before,
+            "a tampered keystore is not re-sealed"
+        );
     }
 
     #[test]

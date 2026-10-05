@@ -70,10 +70,10 @@ a keystore is active is counted, logged at WARN, and rewritten encrypted by
   ciphertext moved to another key fails to decrypt (anti-swap).
 - **Key hierarchy.** An Argon2id-derived key (with floor and ceiling on the
   stored parameters, so a tampered `keystore.json` can neither downgrade the
-  KDF nor trigger a multi-GB allocation) wraps a master key; the master key
-  wraps per-epoch data keys. Rotating the passphrase re-wraps the master key
-  in O(1); rotating the data key starts a new epoch and old records stay
-  readable under theirs. An optional recovery code wraps the master key
+  KDF nor trigger a multi-GB allocation) wraps a master key; a key derived from
+  the master key wraps per-epoch data keys. Rotating the passphrase re-wraps
+  the master key in O(1); rotating the data key starts a new epoch and old
+  records stay readable under theirs. An optional recovery code wraps the master key
   independently of the passphrase.
 
 ### NOT covered — plaintext on disk
