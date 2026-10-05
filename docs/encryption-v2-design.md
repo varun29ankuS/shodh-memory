@@ -59,8 +59,9 @@ material:
 
 Argon2id parameters are read from the file, so they are bounded on both sides
 before the KDF runs: a ceiling (4 GiB, 64 passes, 64 lanes) so a tampered
-file cannot force an OOM before any key check, and a floor (8 MiB) so it
-cannot downgrade the KDF to make the passphrase wrap cheap to brute-force.
+file cannot force an OOM before any key check, and a floor so it cannot
+downgrade the KDF to make the passphrase wrap cheap to brute-force: at least
+19 MiB, with 2 passes below 46 MiB (OWASP's Argon2id minimums).
 Production creation uses 256 MiB, 3 passes, 1 lane.
 
 Writes are atomic: temp file created owner-only (`0600` on unix), fsync,

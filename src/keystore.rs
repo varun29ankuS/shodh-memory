@@ -47,11 +47,21 @@ const MAX_ARGON2_P_COST: u32 = 64;
 /// The unseal path runs the KDF to derive the wrap key BEFORE the KEK-keyed
 /// integrity MAC can be checked, so a tampered keystore could otherwise pin the
 /// absolute-weakest params (e.g. m_cost=8 KiB) and make the passphrase wrap
-/// cheaply brute-forced offline. 8 MiB is a defense-in-depth floor — well below
-/// the ~256 MiB production setting, but far above the absurd downgrade.
-const MIN_ARGON2_M_COST_KIB: u32 = 8 * 1024;
-const MIN_ARGON2_T_COST: u32 = 1;
+/// cheaply brute-forced offline. The floor is at least 19 MiB of memory, and
+/// OWASP's Argon2id minimums on top: 19 MiB needs 2 passes, and 1 pass needs
+/// 46 MiB. Memory and passes trade against each other, so a memory floor
+/// alone would let a downgrade keep the memory and drop to one pass.
+const MIN_ARGON2_M_COST_KIB: u32 = 19 * 1024;
+const MIN_ARGON2_T_COST: u32 = 2;
+const MIN_ARGON2_SINGLE_PASS_M_COST_KIB: u32 = 46 * 1024;
 const MIN_ARGON2_P_COST: u32 = 1;
+
+fn meets_kdf_floor(m_cost: u32, t_cost: u32, p_cost: u32) -> bool {
+    m_cost >= MIN_ARGON2_M_COST_KIB
+        && p_cost >= MIN_ARGON2_P_COST
+        && (t_cost >= MIN_ARGON2_T_COST
+            || (t_cost >= 1 && m_cost >= MIN_ARGON2_SINGLE_PASS_M_COST_KIB))
+}
 
 /// AAD bound into the KEK wrap (domain separation / substitution resistance).
 const KEK_AAD: &[u8] = b"shodh:keystore:kek:v1";
@@ -289,8 +299,8 @@ impl KdfParams {
     pub fn fast_for_tests() -> Self {
         Self {
             m_cost: MIN_ARGON2_M_COST_KIB,
-            t_cost: 1,
-            p_cost: 1,
+            t_cost: MIN_ARGON2_T_COST,
+            p_cost: MIN_ARGON2_P_COST,
             salt: b64e(&random_salt()),
         }
     }
@@ -309,16 +319,18 @@ impl KdfParams {
                 self.p_cost
             ));
         }
-        if self.m_cost < MIN_ARGON2_M_COST_KIB
-            || self.t_cost < MIN_ARGON2_T_COST
-            || self.p_cost < MIN_ARGON2_P_COST
-        {
+        if !meets_kdf_floor(self.m_cost, self.t_cost, self.p_cost) {
             return Err(anyhow!(
                 "Argon2 params below safe minimum (possible tampered keystore / KDF downgrade): \
-                 m_cost={} t_cost={} p_cost={}",
+                 m_cost={} KiB t_cost={} p_cost={}; the floor is {} KiB with {} passes, or {} KiB \
+                 with 1. A genuine keystore below it can be unsealed with its recovery code \
+                 (`shodh-keyctl recover`), which re-derives the passphrase wrap at current params",
                 self.m_cost,
                 self.t_cost,
-                self.p_cost
+                self.p_cost,
+                MIN_ARGON2_M_COST_KIB,
+                MIN_ARGON2_T_COST,
+                MIN_ARGON2_SINGLE_PASS_M_COST_KIB
             ));
         }
         let params = Params::new(self.m_cost, self.t_cost, self.p_cost, Some(KEY_LEN))
@@ -866,6 +878,45 @@ mod tests {
             salt: b64e(&[0u8; SALT_LEN]),
         };
         assert!(kdf.derive("pw").is_err());
+    }
+
+    #[test]
+    fn kdf_floor_is_owasp_minimum_on_both_axes() {
+        let at = |m_cost, t_cost| KdfParams {
+            m_cost,
+            t_cost,
+            p_cost: 1,
+            salt: b64e(&[0u8; SALT_LEN]),
+        };
+        assert!(
+            at(19 * 1024, 2).derive("pw").is_ok(),
+            "19 MiB, 2 passes is the floor"
+        );
+        assert!(
+            at(19 * 1024 - 1, 2).derive("pw").is_err(),
+            "one KiB under the floor"
+        );
+        assert!(
+            at(8 * 1024, 2).derive("pw").is_err(),
+            "the previous 8 MiB floor"
+        );
+        assert!(
+            at(12 * 1024, 3).derive("pw").is_err(),
+            "passes never buy back memory under 19 MiB"
+        );
+        assert!(
+            at(19 * 1024, 1).derive("pw").is_err(),
+            "19 MiB at one pass is below OWASP"
+        );
+        assert!(
+            at(46 * 1024 - 1, 1).derive("pw").is_err(),
+            "one pass needs 46 MiB"
+        );
+        assert!(
+            at(46 * 1024, 1).derive("pw").is_ok(),
+            "46 MiB at one pass is OWASP's equal"
+        );
+        assert!(at(19 * 1024, 0).derive("pw").is_err(), "zero passes");
     }
 
     #[test]
