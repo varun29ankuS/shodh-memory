@@ -1065,6 +1065,8 @@ pub struct MultiUserMemoryManager {
 impl MultiUserMemoryManager {
     pub fn new(base_path: std::path::PathBuf, server_config: ServerConfig) -> Result<Self> {
         std::fs::create_dir_all(&base_path)?;
+        // One passphrase, one keystore: every tenant's store binds to the data root's.
+        crate::memory::storage::set_keystore_root(&base_path);
 
         let (event_broadcaster, _) = tokio::sync::broadcast::channel(1024);
 

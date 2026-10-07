@@ -110,6 +110,10 @@ temp_*/
 
 # Credentials (never commit)
 .mcpregistry_*
+# Encryption-at-rest keystore (wrapped keys; still never commit) and raw key files
+keystore.json
+keystore.json.bak
+*.key
 *.token
 
 # Windows artifacts

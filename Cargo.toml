@@ -110,6 +110,10 @@ path = "src/cli.rs"
 name = "recall-eval"
 path = "src/bin/recall_eval.rs"
 
+[[bin]]
+name = "shodh-keyctl"
+path = "src/bin/shodh_keyctl.rs"
+
 [dependencies]
 # Vendored pure-Rust spaCy pipeline (dependency-head parser + POS + lemma) for
 # entity-resolution span-cleaning. Native, no external fetch. Model bundle loaded
@@ -210,8 +214,15 @@ base64 = "0.22"
 sha2 = "0.10"
 hex = "0.4"
 
-# MIF encryption (AES-256-GCM)
+# MIF encryption (AES-256-GCM); also the keystore's key-wrap
 aes-gcm = "0.10"
+# Encryption at rest (opt-in, see docs/encryption-v2-design.md):
+# XChaCha20-Poly1305 for the record envelope (192-bit nonce, no AES-GCM nonce ceiling)
+chacha20poly1305 = "0.10"
+# Argon2id passphrase KDF for the keystore
+argon2 = "0.5"
+# Zeroize key material on drop
+zeroize = "1"
 
 # External integrations (SHO-40)
 hmac = "0.12"
@@ -301,6 +312,17 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
+# The keystore's Argon2id KDF runs at production cost (256 MiB, 3 passes) in
+# the encryption integration tests, because a keystore created with weaker
+# params is a weaker keystore and no test seam may lower them. Unoptimized,
+# one derivation is ~60 s and each test does three to six; optimized it is
+# well under a second. Measured 2026-09-15: `encryption_wrong_passphrase`
+# 178 s → seconds. blake2 is Argon2's hash and dominates its inner loop.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+
 # Tests inherit `dev`, so the same reasoning applies — stated explicitly rather
 # than relied upon, because a future `[profile.dev]` edit should not silently
 # change what `cargo test` emits.
@@ -309,6 +331,11 @@ debug = "line-tables-only"
 
 [profile.test.package."*"]
 debug = false
+
+[profile.test.package.argon2]
+opt-level = 3
+[profile.test.package.blake2]
+opt-level = 3
 
 # Opt-in full debuginfo, for the rare session that needs a real debugger:
 #   cargo build --profile dev-debug

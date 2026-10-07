@@ -1,0 +1,1431 @@
+//! Encryption-at-rest — envelope keystore and record envelope.
+//!
+//! See `docs/encryption-v2-design.md`. This module is the crypto core: an
+//! envelope key hierarchy (a master key / KEK wrapping per-epoch data keys /
+//! DEKs), an Argon2id passphrase unseal path, a recovery-code unseal path, the
+//! serialisable keystore container with an integrity MAC, a key fingerprint and
+//! crypto/schema version gates, and the `ENC\0` record envelope that
+//! `memory::storage` wraps every primary `Memory` record in when a keystore is
+//! active.
+//!
+//! What is NOT here: KMS unseal providers and index blinding. Both are designed
+//! for (the multi-wrap `kek_wraps` list already accepts more providers) and land
+//! separately. Nothing in this module reads the environment or touches the
+//! database; `memory::storage::MemoryStorage::new` owns that wiring.
+
+use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
+use aes_gcm::{Aes256Gcm, Key, Nonce};
+use anyhow::{anyhow, Context, Result};
+use argon2::{Algorithm, Argon2, Params, Version};
+use base64::Engine;
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use hmac::{Hmac, Mac};
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::path::Path;
+use subtle::ConstantTimeEq;
+use zeroize::{Zeroize, Zeroizing};
+
+/// Envelope wire/format version (records + keystore). Bumped on format changes.
+pub const CRYPTO_VERSION: u8 = 1;
+/// Storage schema version gate for migrations.
+pub const SCHEMA_VERSION: u8 = 1;
+
+const KEY_LEN: usize = 32;
+const SALT_LEN: usize = 16;
+
+/// Upper bounds on Argon2 params read from a (possibly tampered) keystore.json,
+/// so a malicious keystore cannot trigger a multi-TB allocation / OOM at unseal
+/// (the DoS happens before any key check). The 4 GiB ceiling is far above a sane
+/// production setting (~256 MiB) yet blocks the absurd.
+const MAX_ARGON2_M_COST_KIB: u32 = 4 * 1024 * 1024;
+const MAX_ARGON2_T_COST: u32 = 64;
+const MAX_ARGON2_P_COST: u32 = 64;
+
+/// Lower bounds on Argon2 params read from a (possibly tampered) keystore.json.
+/// The unseal path runs the KDF to derive the wrap key BEFORE the KEK-keyed
+/// integrity MAC can be checked, so a tampered keystore could otherwise pin the
+/// absolute-weakest params (e.g. m_cost=8 KiB) and make the passphrase wrap
+/// cheaply brute-forced offline. The floor is at least 19 MiB of memory, and
+/// OWASP's Argon2id minimums on top: 19 MiB needs 2 passes, and 1 pass needs
+/// 46 MiB. Memory and passes trade against each other, so a memory floor
+/// alone would let a downgrade keep the memory and drop to one pass.
+const MIN_ARGON2_M_COST_KIB: u32 = 19 * 1024;
+const MIN_ARGON2_T_COST: u32 = 2;
+const MIN_ARGON2_SINGLE_PASS_M_COST_KIB: u32 = 46 * 1024;
+const MIN_ARGON2_P_COST: u32 = 1;
+
+fn meets_kdf_floor(m_cost: u32, t_cost: u32, p_cost: u32) -> bool {
+    m_cost >= MIN_ARGON2_M_COST_KIB
+        && p_cost >= MIN_ARGON2_P_COST
+        && (t_cost >= MIN_ARGON2_T_COST
+            || (t_cost >= 1 && m_cost >= MIN_ARGON2_SINGLE_PASS_M_COST_KIB))
+}
+
+/// AAD bound into the KEK wrap (domain separation / substitution resistance).
+const KEK_AAD: &[u8] = b"shodh:keystore:kek:v1";
+
+/// A 256-bit secret (KEK or DEK), memory-zeroized on drop. Never serialised —
+/// only its *wrapped* form is persisted.
+pub type SecretKey = Zeroizing<[u8; KEY_LEN]>;
+
+fn b64e(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn b64d(s: &str) -> Result<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD
+        .decode(s)
+        .context("invalid base64 in keystore")
+}
+
+fn random_key() -> SecretKey {
+    let mut k = Zeroizing::new([0u8; KEY_LEN]);
+    OsRng.fill_bytes(k.as_mut_slice());
+    k
+}
+
+fn random_salt() -> [u8; SALT_LEN] {
+    let mut s = [0u8; SALT_LEN];
+    OsRng.fill_bytes(&mut s);
+    s
+}
+
+/// Non-secret 4-byte fingerprint of a key: `SHA-256(key)[..4]`. A loss/mismatch
+/// tripwire, not an authenticator.
+fn fingerprint(key: &[u8]) -> [u8; 4] {
+    let d = Sha256::digest(key);
+    [d[0], d[1], d[2], d[3]]
+}
+
+// ============================================================================
+// DATABASE ↔ KEYSTORE BINDING
+//
+// A database that has ever been encrypted keeps one record naming the keystore
+// that encrypted it and the newest keystore generation it has accepted:
+// `SKB1 | id | generation | tag`. The id and the tag are derived from the master
+// key, so DEK rotation and passphrase changes keep the id, a different keystore
+// can never produce it, and the generation cannot be edited without the key.
+// ============================================================================
+
+const BINDING_MAGIC: &[u8; 4] = b"SKB1";
+/// Length of the public keystore id a binding record carries.
+pub const BINDING_ID_LEN: usize = 8;
+const BINDING_TAG_LEN: usize = 32;
+const BINDING_LEN: usize = BINDING_MAGIC.len() + BINDING_ID_LEN + 8 + BINDING_TAG_LEN;
+
+fn binding_hmac(kek: &SecretKey, label: &[u8], data: &[u8]) -> [u8; 32] {
+    let mut bk =
+        <HmacSha256 as Mac>::new_from_slice(kek.as_slice()).expect("HMAC accepts any key length");
+    Mac::update(&mut bk, b"shodh:db-binding:v1");
+    let key = Zeroizing::new(<[u8; 32]>::from(Mac::finalize(bk).into_bytes()));
+    let mut m =
+        <HmacSha256 as Mac>::new_from_slice(key.as_slice()).expect("HMAC accepts any key length");
+    Mac::update(&mut m, label);
+    Mac::update(&mut m, data);
+    Mac::finalize(m).into_bytes().into()
+}
+
+/// Public id of the keystore holding `kek`.
+pub fn keystore_binding_id(kek: &SecretKey) -> [u8; BINDING_ID_LEN] {
+    let mut id = [0u8; BINDING_ID_LEN];
+    id.copy_from_slice(&binding_hmac(kek, b"id", &[])[..BINDING_ID_LEN]);
+    id
+}
+
+/// The binding record for a database encrypted under `kek` at `generation`.
+pub fn seal_binding(kek: &SecretKey, generation: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(BINDING_LEN);
+    out.extend_from_slice(BINDING_MAGIC);
+    out.extend_from_slice(&keystore_binding_id(kek));
+    out.extend_from_slice(&generation.to_le_bytes());
+    let tag = binding_hmac(kek, b"tag", &out);
+    out.extend_from_slice(&tag);
+    out
+}
+
+/// The keystore id a binding record names, readable without a key so an error
+/// can say which keystore a database needs. `None` for a malformed record.
+pub fn binding_keystore_id(record: &[u8]) -> Option<[u8; BINDING_ID_LEN]> {
+    if record.len() != BINDING_LEN || &record[..BINDING_MAGIC.len()] != BINDING_MAGIC {
+        return None;
+    }
+    let mut id = [0u8; BINDING_ID_LEN];
+    id.copy_from_slice(&record[BINDING_MAGIC.len()..BINDING_MAGIC.len() + BINDING_ID_LEN]);
+    Some(id)
+}
+
+/// Verify a binding record against an unsealed master key and return the
+/// generation it records. A malformed record, a different keystore and a forged
+/// generation are all errors; none of them reads as "no binding".
+pub fn open_binding(kek: &SecretKey, record: &[u8]) -> Result<u64> {
+    let bound = binding_keystore_id(record).ok_or_else(|| {
+        anyhow!(
+            "keystore binding record is malformed ({} bytes, expected {BINDING_LEN})",
+            record.len()
+        )
+    })?;
+    let ours = keystore_binding_id(kek);
+    if bound != ours {
+        return Err(anyhow!(
+            "this database is bound to keystore {}, but the keystore provided is {}",
+            hex::encode(bound),
+            hex::encode(ours)
+        ));
+    }
+    let (head, tag) = record.split_at(BINDING_LEN - BINDING_TAG_LEN);
+    if !bool::from(binding_hmac(kek, b"tag", head)[..].ct_eq(tag)) {
+        return Err(anyhow!(
+            "keystore binding record failed authentication (its generation was altered)"
+        ));
+    }
+    let gen_at = BINDING_MAGIC.len() + BINDING_ID_LEN;
+    let mut generation = [0u8; 8];
+    generation.copy_from_slice(&record[gen_at..gen_at + 8]);
+    Ok(u64::from_le_bytes(generation))
+}
+
+/// AAD bound into a DEK wrap — pins the wrap to its epoch so a DEK cannot be
+/// silently substituted across epochs.
+fn dek_aad(epoch: u32) -> Vec<u8> {
+    format!("shodh:keystore:dek:v1:epoch:{epoch}").into_bytes()
+}
+
+/// Derive the recovery-code wrapping key. The recovery code is high-entropy, so a
+/// fast hash (not Argon2) suffices — there is nothing to brute-force.
+fn recovery_key_from_code(code: &str) -> SecretKey {
+    let mut hasher = Sha256::new();
+    Digest::update(&mut hasher, code.trim().as_bytes());
+    let mut k = Zeroizing::new([0u8; KEY_LEN]);
+    // Hashed straight into the zeroizing buffer. sha2 0.10 does not wipe its own block
+    // buffer, so one copy of the code can outlive this call, as the caller's does.
+    hasher.finalize_into(sha2::digest::generic_array::GenericArray::from_mut_slice(
+        k.as_mut_slice(),
+    ));
+    k
+}
+
+/// Generate a high-entropy, transcribable recovery code (192 bits → 48 hex chars).
+/// The code derives the recovery key, so it is wiped like one.
+fn generate_recovery_code() -> Zeroizing<String> {
+    let mut raw = Zeroizing::new([0u8; 24]);
+    OsRng.fill_bytes(raw.as_mut_slice());
+    Zeroizing::new(hex::encode(raw.as_slice()))
+}
+
+/// AES-256-GCM key-wrap: encrypt `key` under `wrapping_key` with `aad` bound in.
+fn wrap_key(
+    wrapping_key: &[u8; KEY_LEN],
+    key: &[u8],
+    aad: &[u8],
+    provider: &str,
+) -> Result<Wrapped> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(wrapping_key));
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let ciphertext = cipher
+        .encrypt(&nonce, Payload { msg: key, aad })
+        .map_err(|e| anyhow!("AES-256-GCM key wrap failed: {e}"))?;
+    Ok(Wrapped {
+        provider: provider.to_string(),
+        nonce: b64e(nonce.as_slice()),
+        ciphertext: b64e(&ciphertext),
+    })
+}
+
+/// Inverse of [`wrap_key`]; errors on wrong key/passphrase, tamper, or AAD mismatch.
+fn unwrap_key(wrapping_key: &[u8; KEY_LEN], w: &Wrapped, aad: &[u8]) -> Result<SecretKey> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(wrapping_key));
+    let nonce_bytes = b64d(&w.nonce)?;
+    if nonce_bytes.len() != 12 {
+        return Err(anyhow!("keystore nonce wrong length"));
+    }
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = b64d(&w.ciphertext)?;
+    let mut plaintext = cipher
+        .decrypt(
+            nonce,
+            Payload {
+                msg: &ciphertext,
+                aad,
+            },
+        )
+        .map_err(|e| {
+            anyhow!("key unwrap failed (wrong key/passphrase or tampered keystore): {e}")
+        })?;
+    if plaintext.len() != KEY_LEN {
+        plaintext.zeroize();
+        return Err(anyhow!("unwrapped key has wrong length"));
+    }
+    let mut k = Zeroizing::new([0u8; KEY_LEN]);
+    k.copy_from_slice(&plaintext);
+    plaintext.zeroize(); // wipe the intermediate key-material buffer
+    Ok(k)
+}
+
+/// A secret wrapped under some unseal provider.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Wrapped {
+    /// Unseal provider id: `"passphrase"` or `"recovery"` (a KMS provider is a
+    /// separate change; the list shape already admits it).
+    pub provider: String,
+    /// base64(12-byte GCM nonce).
+    pub nonce: String,
+    /// base64(ciphertext+tag).
+    pub ciphertext: String,
+}
+
+/// Argon2id parameters for deriving an unseal key from a passphrase.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KdfParams {
+    /// Memory cost in KiB.
+    pub m_cost: u32,
+    /// Iterations.
+    pub t_cost: u32,
+    /// Parallelism (lanes).
+    pub p_cost: u32,
+    /// base64(salt).
+    pub salt: String,
+}
+
+impl KdfParams {
+    /// Strong production defaults (~256 MiB, 3 passes). Tune/upgrade over time.
+    pub fn production() -> Self {
+        Self {
+            m_cost: 256 * 1024,
+            t_cost: 3,
+            p_cost: 1,
+            salt: b64e(&random_salt()),
+        }
+    }
+
+    /// Reduced params for fast tests ONLY (never production). Sits at the
+    /// minimum accepted floor so tests still exercise the real KDF cheaply.
+    #[cfg(test)]
+    pub fn fast_for_tests() -> Self {
+        Self {
+            m_cost: MIN_ARGON2_M_COST_KIB,
+            t_cost: MIN_ARGON2_T_COST,
+            p_cost: MIN_ARGON2_P_COST,
+            salt: b64e(&random_salt()),
+        }
+    }
+
+    /// Derive a 256-bit unseal key from the passphrase under these params.
+    fn derive(&self, passphrase: &str) -> Result<SecretKey> {
+        if self.m_cost > MAX_ARGON2_M_COST_KIB
+            || self.t_cost > MAX_ARGON2_T_COST
+            || self.p_cost > MAX_ARGON2_P_COST
+        {
+            return Err(anyhow!(
+                "Argon2 params exceed safe bounds (possible tampered keystore): \
+                 m_cost={} t_cost={} p_cost={}",
+                self.m_cost,
+                self.t_cost,
+                self.p_cost
+            ));
+        }
+        if !meets_kdf_floor(self.m_cost, self.t_cost, self.p_cost) {
+            return Err(anyhow!(
+                "Argon2 params below safe minimum (possible tampered keystore / KDF downgrade): \
+                 m_cost={} KiB t_cost={} p_cost={}; the floor is {} KiB with {} passes, or {} KiB \
+                 with 1. A genuine keystore below it can be unsealed with its recovery code \
+                 (`shodh-keyctl recover`), which re-derives the passphrase wrap at current params",
+                self.m_cost,
+                self.t_cost,
+                self.p_cost,
+                MIN_ARGON2_M_COST_KIB,
+                MIN_ARGON2_T_COST,
+                MIN_ARGON2_SINGLE_PASS_M_COST_KIB
+            ));
+        }
+        let params = Params::new(self.m_cost, self.t_cost, self.p_cost, Some(KEY_LEN))
+            .map_err(|e| anyhow!("invalid Argon2 params: {e}"))?;
+        let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let salt = b64d(&self.salt)?;
+        let mut out = Zeroizing::new([0u8; KEY_LEN]);
+        argon
+            .hash_password_into(passphrase.as_bytes(), &salt, out.as_mut_slice())
+            .map_err(|e| anyhow!("Argon2id derivation failed: {e}"))?;
+        Ok(out)
+    }
+}
+
+/// The key a DEK entry is wrapped under.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DekWrap {
+    /// The raw KEK: keystores written before wrap keys were derived. Never
+    /// serialized, so such a keystore re-serializes byte for byte and its
+    /// integrity MAC still verifies.
+    #[default]
+    RawKek,
+    /// `HMAC-SHA256(KEK, "shodh:keystore:dek-wrap:v1")`.
+    DerivedV1,
+}
+
+impl DekWrap {
+    fn is_raw_kek(&self) -> bool {
+        *self == DekWrap::RawKek
+    }
+}
+
+/// A per-epoch data key, wrapped under a key derived from the master key (KEK).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DekEntry {
+    pub epoch: u32,
+    /// The wrapped DEK (provider id `"kek"`).
+    pub wrapped: Wrapped,
+    /// `"active"` or `"retired"`.
+    pub state: String,
+    /// Which key `wrapped` is under. Absent in older keystores, meaning the raw KEK.
+    #[serde(default, skip_serializing_if = "DekWrap::is_raw_kek")]
+    pub wrap: DekWrap,
+}
+
+/// The key DEKs are wrapped under, derived from the KEK so the KEK itself only
+/// ever keys derivations (this one, the integrity MAC and the database binding).
+fn dek_wrap_key(kek: &SecretKey) -> SecretKey {
+    let mut m =
+        <HmacSha256 as Mac>::new_from_slice(kek.as_slice()).expect("HMAC accepts any key length");
+    Mac::update(&mut m, b"shodh:keystore:dek-wrap:v1");
+    let mut k = Zeroizing::new([0u8; KEY_LEN]);
+    sha2::digest::FixedOutput::finalize_into(
+        m,
+        sha2::digest::generic_array::GenericArray::from_mut_slice(k.as_mut_slice()),
+    );
+    k
+}
+
+fn wrap_dek(kek: &SecretKey, dek: &[u8], epoch: u32) -> Result<Wrapped> {
+    wrap_key(&dek_wrap_key(kek), dek, &dek_aad(epoch), "kek")
+}
+
+fn unwrap_dek(kek: &SecretKey, entry: &DekEntry) -> Result<SecretKey> {
+    match entry.wrap {
+        DekWrap::DerivedV1 => unwrap_key(&dek_wrap_key(kek), &entry.wrapped, &dek_aad(entry.epoch)),
+        DekWrap::RawKek => unwrap_key(kek, &entry.wrapped, &dek_aad(entry.epoch)),
+    }
+}
+
+/// Serialisable keystore: the master key wrapped per unseal provider, the
+/// epoched data keys wrapped by the master key, and version/fingerprint gates.
+/// Holds no plaintext key material.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Keystore {
+    pub crypto_version: u8,
+    pub schema_version: u8,
+    pub kdf: KdfParams,
+    /// KEK wrapped once per enabled unseal provider (passphrase; optionally recovery).
+    pub kek_wraps: Vec<Wrapped>,
+    pub deks: Vec<DekEntry>,
+    pub active_epoch: u32,
+    /// base64(4-byte KEK fingerprint) — detects unseal-to-wrong-key.
+    pub kek_fingerprint: String,
+    /// Monotonic generation, bumped on every keystore mutation. Combined with a
+    /// database-side sentinel to detect rollback to an older keystore file.
+    #[serde(default)]
+    pub generation: u64,
+    /// HMAC over the keystore (keyed by a KEK-derived integrity key) detecting
+    /// in-place tampering of active_epoch / deks / wraps. Empty until sealed.
+    #[serde(default)]
+    pub mac: String,
+}
+
+impl Keystore {
+    /// Create a fresh keystore: random KEK + an initial active DEK (epoch 0),
+    /// with the KEK wrapped under the passphrase. Returns the keystore only; the
+    /// caller persists it and re-unseals to obtain key material.
+    pub fn create(passphrase: &str, kdf: KdfParams) -> Result<Self> {
+        let kek = random_key();
+        let dek = random_key();
+
+        let unseal = kdf.derive(passphrase)?;
+        let kek_wrap = wrap_key(&unseal, kek.as_slice(), KEK_AAD, "passphrase")?;
+        let dek_wrap = wrap_dek(&kek, dek.as_slice(), 0)?;
+
+        let mut ks = Self {
+            crypto_version: CRYPTO_VERSION,
+            schema_version: SCHEMA_VERSION,
+            kdf,
+            kek_wraps: vec![kek_wrap],
+            deks: vec![DekEntry {
+                epoch: 0,
+                wrapped: dek_wrap,
+                state: "active".to_string(),
+                wrap: DekWrap::DerivedV1,
+            }],
+            active_epoch: 0,
+            kek_fingerprint: b64e(&fingerprint(kek.as_slice())),
+            generation: 0,
+            mac: String::new(),
+        };
+        ks.seal(&kek)?;
+        Ok(ks)
+    }
+
+    /// Recompute and store the integrity MAC. Call after every mutation while the
+    /// KEK is in hand.
+    pub fn seal(&mut self, kek: &SecretKey) -> Result<()> {
+        self.mac = self.compute_mac(kek)?;
+        Ok(())
+    }
+
+    /// Verify the keystore has not been tampered in place (active_epoch, deks, or
+    /// wraps). Requires the unsealed KEK.
+    pub fn verify_integrity(&self, kek: &SecretKey) -> Result<()> {
+        if self.mac.is_empty() {
+            return Err(anyhow!("keystore is not integrity-sealed (missing MAC)"));
+        }
+        let expected = self.compute_mac(kek)?;
+        let ok = expected.len() == self.mac.len()
+            && bool::from(expected.as_bytes().ct_eq(self.mac.as_bytes()));
+        if ok {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "keystore integrity check failed — tampered active_epoch/deks/wraps?"
+            ))
+        }
+    }
+
+    /// HMAC-SHA256 over the keystore JSON (with the `mac` field blanked), keyed by
+    /// a KEK-derived integrity key.
+    fn compute_mac(&self, kek: &SecretKey) -> Result<String> {
+        let mut bare = self.clone();
+        bare.mac = String::new();
+        let bytes = serde_json::to_string(&bare).context("serialize keystore for MAC")?;
+
+        let mut ik = <HmacSha256 as Mac>::new_from_slice(kek.as_slice())
+            .expect("HMAC accepts any key length");
+        Mac::update(&mut ik, b"shodh:keystore-integrity:v1");
+        let ikey = Mac::finalize(ik).into_bytes();
+
+        let mut mac =
+            <HmacSha256 as Mac>::new_from_slice(&ikey).expect("HMAC accepts any key length");
+        Mac::update(&mut mac, bytes.as_bytes());
+        Ok(hex::encode(Mac::finalize(mac).into_bytes()))
+    }
+
+    /// Unseal the master key (KEK) via the passphrase provider; verifies the
+    /// fingerprint so an unexpected key surfaces as an error, not silent garbage.
+    pub fn unseal_with_passphrase(&self, passphrase: &str) -> Result<SecretKey> {
+        let unseal = self.kdf.derive(passphrase)?;
+        let w = self
+            .kek_wraps
+            .iter()
+            .find(|w| w.provider == "passphrase")
+            .ok_or_else(|| anyhow!("keystore has no passphrase wrap"))?;
+        let kek = unwrap_key(&unseal, w, KEK_AAD)?;
+        if b64e(&fingerprint(kek.as_slice())) != self.kek_fingerprint {
+            return Err(anyhow!("keystore KEK fingerprint mismatch after unseal"));
+        }
+        Ok(kek)
+    }
+
+    /// Unwrap the active-epoch data key. Returns `(epoch, dek)`.
+    pub fn active_data_key(&self, kek: &SecretKey) -> Result<(u32, SecretKey)> {
+        let dek = self.data_key_for_epoch(kek, self.active_epoch)?;
+        Ok((self.active_epoch, dek))
+    }
+
+    /// Unwrap the data key for a specific epoch (records written before a
+    /// rotation stay on their original epoch).
+    pub fn data_key_for_epoch(&self, kek: &SecretKey, epoch: u32) -> Result<SecretKey> {
+        let entry = self
+            .deks
+            .iter()
+            .find(|d| d.epoch == epoch)
+            .ok_or_else(|| anyhow!("no data key for epoch {epoch}"))?;
+        unwrap_dek(kek, entry)
+    }
+
+    /// New wraps, under the derived key, for every DEK still under the raw KEK.
+    /// Computed without touching `self`, so a mutation that fails here leaves
+    /// the keystore exactly as it was; [`apply_dek_upgrade`](Self::apply_dek_upgrade)
+    /// commits them. Each mutation runs both, so an older keystore moves to
+    /// derived wraps the first time it is changed.
+    fn prepare_dek_upgrade(&self, kek: &SecretKey) -> Result<Vec<(usize, Wrapped)>> {
+        let mut upgraded = Vec::new();
+        for (i, entry) in self.deks.iter().enumerate() {
+            if entry.wrap == DekWrap::RawKek {
+                let dek = unwrap_dek(kek, entry)?;
+                upgraded.push((i, wrap_dek(kek, dek.as_slice(), entry.epoch)?));
+            }
+        }
+        Ok(upgraded)
+    }
+
+    fn apply_dek_upgrade(&mut self, upgraded: Vec<(usize, Wrapped)>) {
+        for (i, wrapped) in upgraded {
+            self.deks[i].wrapped = wrapped;
+            self.deks[i].wrap = DekWrap::DerivedV1;
+        }
+    }
+
+    /// Rotate the passphrase: re-derive a fresh unseal key (new salt/params) and
+    /// re-wrap the SAME master key under it. O(1) — records are untouched (they
+    /// are keyed by the DEK, not the passphrase). Other wraps (recovery) are
+    /// preserved.
+    pub fn rotate_passphrase(&mut self, old: &str, new: &str) -> Result<()> {
+        let kek = self.unseal_with_passphrase(old)?;
+        self.set_passphrase(&kek, new)
+    }
+
+    /// (Re)wrap the master key under a NEW passphrase, given an already-unsealed
+    /// KEK. This is the recovery primitive: when the old passphrase is lost,
+    /// unseal via the recovery code to obtain the KEK, then install a usable
+    /// passphrase. Derives a fresh salt/params and replaces only the passphrase
+    /// wrap; the recovery wrap is preserved.
+    pub fn set_passphrase(&mut self, kek: &SecretKey, new: &str) -> Result<()> {
+        self.verify_integrity(kek)?;
+        let new_kdf = KdfParams::production();
+        let unseal = new_kdf.derive(new)?;
+        let new_wrap = wrap_key(&unseal, kek.as_slice(), KEK_AAD, "passphrase")?;
+        let upgraded = self.prepare_dek_upgrade(kek)?;
+        self.kek_wraps.retain(|w| w.provider != "passphrase");
+        self.kek_wraps.push(new_wrap);
+        self.kdf = new_kdf;
+        self.apply_dek_upgrade(upgraded);
+        self.generation += 1;
+        self.seal(kek)?;
+        Ok(())
+    }
+
+    /// Add (or replace) a recovery wrap of the master key and return the one-time
+    /// recovery code. Display it ONCE and never persist it — only the wrap is
+    /// stored. Survives passphrase loss as long as the keystore file survives.
+    pub fn add_recovery_code(&mut self, kek: &SecretKey) -> Result<Zeroizing<String>> {
+        self.verify_integrity(kek)?;
+        let code = generate_recovery_code();
+        let wrap_key_bytes = recovery_key_from_code(&code);
+        let wrap = wrap_key(&wrap_key_bytes, kek.as_slice(), KEK_AAD, "recovery")?;
+        let upgraded = self.prepare_dek_upgrade(kek)?;
+        self.kek_wraps.retain(|w| w.provider != "recovery");
+        self.kek_wraps.push(wrap);
+        self.apply_dek_upgrade(upgraded);
+        self.generation += 1;
+        self.seal(kek)?;
+        Ok(code)
+    }
+
+    /// Unseal the master key via a recovery code.
+    pub fn unseal_with_recovery_code(&self, code: &str) -> Result<SecretKey> {
+        let w = self
+            .kek_wraps
+            .iter()
+            .find(|w| w.provider == "recovery")
+            .ok_or_else(|| anyhow!("keystore has no recovery wrap"))?;
+        let kek = unwrap_key(&recovery_key_from_code(code), w, KEK_AAD)?;
+        if b64e(&fingerprint(kek.as_slice())) != self.kek_fingerprint {
+            return Err(anyhow!("recovery code unsealed an unexpected key"));
+        }
+        Ok(kek)
+    }
+
+    /// Rotate the active data key: generate a new epoch's DEK, retire the previous
+    /// active one (kept for reads of old records), and make the new one active.
+    /// Returns the new epoch. Records re-encrypt lazily on their next write; old
+    /// epochs stay readable via [`data_key_for_epoch`](Self::data_key_for_epoch).
+    ///
+    /// The caller must persist the keystore ([`save_to_path`](Self::save_to_path))
+    /// BEFORE anything is encrypted under the new epoch: a record written under
+    /// an epoch whose DEK was never saved is unrecoverable.
+    pub fn rotate_dek(&mut self, kek: &SecretKey) -> Result<u32> {
+        self.verify_integrity(kek)?;
+        let new_epoch = self.deks.iter().map(|d| d.epoch).max().unwrap_or(0) + 1;
+        let dek = random_key();
+        let wrap = wrap_dek(kek, dek.as_slice(), new_epoch)?;
+        let upgraded = self.prepare_dek_upgrade(kek)?;
+        self.apply_dek_upgrade(upgraded);
+        for d in &mut self.deks {
+            if d.state == "active" {
+                d.state = "retired".to_string();
+            }
+        }
+        self.deks.push(DekEntry {
+            epoch: new_epoch,
+            wrapped: wrap,
+            state: "active".to_string(),
+            wrap: DekWrap::DerivedV1,
+        });
+        self.active_epoch = new_epoch;
+        self.generation += 1;
+        self.seal(kek)?;
+        Ok(new_epoch)
+    }
+
+    /// Atomically persist the keystore to `path`: write a temp file, fsync it,
+    /// then rename over the target, so a crash/power-loss never leaves a truncated
+    /// or empty keystore (which would make the KEK — and thus all data —
+    /// unrecoverable). Keeps a `.bak` of the prior keystore as a recovery copy.
+    /// On unix the temp file is CREATED with mode 0600 (never world-readable,
+    /// not even between create and chmod) and the parent dir is fsynced so the
+    /// rename is durable. Windows inherits the directory ACL; restrict the data
+    /// directory itself there.
+    pub fn save_to_path(&self, path: &Path) -> Result<()> {
+        use std::io::Write;
+
+        let json = self.to_json()?;
+
+        // Preserve the previous keystore as a recovery backup before overwriting.
+        if path.exists() {
+            let bak = path.with_extension("json.bak");
+            std::fs::copy(path, &bak).context("failed to back up existing keystore")?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&bak, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+
+        let tmp = path.with_extension("json.tmp");
+        {
+            let mut open = std::fs::OpenOptions::new();
+            open.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                open.mode(0o600);
+            }
+            let mut f = open
+                .open(&tmp)
+                .context("failed to create keystore temp file")?;
+            f.write_all(json.as_bytes())
+                .context("failed to write keystore temp file")?;
+            f.sync_all().context("failed to fsync keystore temp file")?;
+        }
+        #[cfg(unix)]
+        {
+            // `mode` on create is masked by umask and does not apply to a
+            // pre-existing temp file; set it explicitly as well.
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+                .context("failed to restrict keystore temp file permissions")?;
+        }
+        std::fs::rename(&tmp, path).context("failed to rename keystore into place")?;
+        // fsync the directory so the rename itself is durable across a crash.
+        #[cfg(unix)]
+        if let Some(dir) = path.parent() {
+            if let Ok(d) = std::fs::File::open(dir) {
+                let _ = d.sync_all();
+            }
+        }
+        Ok(())
+    }
+
+    pub fn to_json(&self) -> Result<String> {
+        serde_json::to_string_pretty(self).context("failed to serialize keystore")
+    }
+
+    pub fn from_json(s: &str) -> Result<Self> {
+        serde_json::from_str(s).context("failed to parse keystore")
+    }
+}
+
+type HmacSha256 = Hmac<Sha256>;
+
+// ============================================================================
+// Record envelope — encrypt/decrypt a serialized record blob under a DEK.
+// Wire format: `ENC\0 | crypto_version(1) | epoch(4 LE) | nonce(24) | ct+tag`.
+// Records use XChaCha20-Poly1305 (192-bit nonce) so random nonces never approach
+// a collision bound; key-wrapping (low volume) stays on AES-256-GCM.
+// AAD binds the epoch (prevents cross-epoch substitution) and a caller-supplied
+// identity — storage passes the record's RocksDB key, i.e. the memory id — so a
+// ciphertext lifted from one key and replanted at another fails to decrypt.
+// ============================================================================
+
+/// 4-byte marker distinguishing an encrypted record from a plaintext record. A
+/// SHO envelope begins with `SHO`, and no legacy bincode/msgpack `Memory` begins
+/// with `ENC\0`.
+const RECORD_MARKER: &[u8; 4] = b"ENC\x00";
+/// marker(4) + version(1) + epoch(4) + nonce(24, XChaCha20)
+const RECORD_HEADER_LEN: usize = 4 + 1 + 4 + 24;
+/// Poly1305 tag is 16 bytes; a valid ciphertext is at least the tag.
+const RECORD_MIN_LEN: usize = RECORD_HEADER_LEN + 16;
+
+/// Associated data for record AEAD: domain string + epoch, plus a caller-supplied
+/// identity context so a ciphertext only authenticates under the identity it was
+/// written for (anti-swap). An empty `ctx` means epoch-bound only.
+fn record_aad(epoch: u32, ctx: &[u8]) -> Vec<u8> {
+    let mut aad = format!("shodh:record:v1:epoch:{epoch}").into_bytes();
+    aad.push(0x1f); // unit separator: keep ctx from colliding with the epoch text
+    aad.extend_from_slice(ctx);
+    aad
+}
+
+/// `true` if `data` carries the encrypted-record marker.
+pub fn is_encrypted_record(data: &[u8]) -> bool {
+    data.len() >= RECORD_MARKER.len() && &data[..4] == RECORD_MARKER
+}
+
+/// Read the epoch from an encrypted record header, so the reader can select the
+/// right DEK before decrypting. Returns `None` if not an encrypted record.
+pub fn record_epoch(data: &[u8]) -> Option<u32> {
+    if !is_encrypted_record(data) || data.len() < RECORD_HEADER_LEN {
+        return None;
+    }
+    Some(u32::from_le_bytes([data[5], data[6], data[7], data[8]]))
+}
+
+/// Decrypt an encrypted record blob with the DEK for its epoch. The caller is
+/// responsible for selecting `dek` matching [`record_epoch`].
+pub fn decrypt_record(dek: &SecretKey, data: &[u8], aad_ctx: &[u8]) -> Result<Vec<u8>> {
+    if !is_encrypted_record(data) {
+        return Err(anyhow!("not an encrypted record (missing marker)"));
+    }
+    if data.len() < RECORD_MIN_LEN {
+        return Err(anyhow!(
+            "encrypted record too short: {} bytes (min {RECORD_MIN_LEN})",
+            data.len()
+        ));
+    }
+    let version = data[4];
+    if version != CRYPTO_VERSION {
+        return Err(anyhow!("unsupported record crypto version {version}"));
+    }
+    let epoch = u32::from_le_bytes([data[5], data[6], data[7], data[8]]);
+    let nonce = XNonce::from_slice(&data[9..RECORD_HEADER_LEN]);
+    let ciphertext = &data[RECORD_HEADER_LEN..];
+    let cipher = XChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(dek.as_slice()));
+    cipher
+        .decrypt(
+            nonce,
+            Payload {
+                msg: ciphertext,
+                aad: &record_aad(epoch, aad_ctx),
+            },
+        )
+        .map_err(|e| anyhow!("record decrypt failed (wrong key/epoch/identity or tampered): {e}"))
+}
+
+/// Encrypts serialized record blobs under a fixed DEK/epoch. Held by the
+/// storage layer. Reads of older epochs go through [`decrypt_record`] with the
+/// DEK fetched from the keystore for that epoch.
+#[derive(Clone)]
+pub struct RecordCryptor {
+    epoch: u32,
+    dek: SecretKey,
+}
+
+impl RecordCryptor {
+    pub fn new(epoch: u32, dek: SecretKey) -> Self {
+        Self { epoch, dek }
+    }
+
+    pub fn epoch(&self) -> u32 {
+        self.epoch
+    }
+
+    /// Encrypt a serialized record blob under this DEK. `aad_ctx` binds the
+    /// ciphertext to a caller identity (pass `&[]` for none); the same `aad_ctx`
+    /// must be supplied to decrypt.
+    pub fn encrypt_record(&self, plaintext: &[u8], aad_ctx: &[u8]) -> Result<Vec<u8>> {
+        let cipher = XChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(self.dek.as_slice()));
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let ciphertext = cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext,
+                    aad: &record_aad(self.epoch, aad_ctx),
+                },
+            )
+            .map_err(|e| anyhow!("record encrypt failed: {e}"))?;
+        let mut out = Vec::with_capacity(RECORD_HEADER_LEN + ciphertext.len());
+        out.extend_from_slice(RECORD_MARKER);
+        out.push(CRYPTO_VERSION);
+        out.extend_from_slice(&self.epoch.to_le_bytes());
+        out.extend_from_slice(nonce.as_slice());
+        out.extend_from_slice(&ciphertext);
+        Ok(out)
+    }
+
+    /// Decrypt with this DEK (convenience for same-epoch reads/tests).
+    /// `aad_ctx` must match what was passed to [`encrypt_record`](Self::encrypt_record).
+    pub fn decrypt_record(&self, data: &[u8], aad_ctx: &[u8]) -> Result<Vec<u8>> {
+        decrypt_record(&self.dek, data, aad_ctx)
+    }
+}
+
+/// The set of record cryptors a store needs: the active one for new writes, plus
+/// one per retired epoch so records written before a key rotation stay readable.
+/// Built from the keystore's retained per-epoch DEKs — this is what makes data
+/// key rotation safe (the read path selects the DEK for each record's epoch).
+#[derive(Clone)]
+pub struct RecordCryptors {
+    active_epoch: u32,
+    by_epoch: std::collections::HashMap<u32, RecordCryptor>,
+}
+
+impl RecordCryptors {
+    /// Derive a cryptor for every epoch the keystore retains a DEK for.
+    pub fn from_keystore(ks: &Keystore, kek: &SecretKey) -> Result<Self> {
+        let mut by_epoch = std::collections::HashMap::new();
+        for entry in &ks.deks {
+            let dek = ks.data_key_for_epoch(kek, entry.epoch)?;
+            by_epoch.insert(entry.epoch, RecordCryptor::new(entry.epoch, dek));
+        }
+        if !by_epoch.contains_key(&ks.active_epoch) {
+            return Err(anyhow!(
+                "keystore active_epoch {} has no DEK entry",
+                ks.active_epoch
+            ));
+        }
+        Ok(Self {
+            active_epoch: ks.active_epoch,
+            by_epoch,
+        })
+    }
+
+    /// Cryptor for new writes (the active epoch).
+    pub fn active(&self) -> &RecordCryptor {
+        self.by_epoch
+            .get(&self.active_epoch)
+            .expect("active-epoch cryptor present (checked at construction)")
+    }
+
+    /// Cryptor for a stored record's epoch, if the keystore retains that DEK.
+    pub fn for_epoch(&self, epoch: u32) -> Option<&RecordCryptor> {
+        self.by_epoch.get(&epoch)
+    }
+
+    pub fn active_epoch(&self) -> u32 {
+        self.active_epoch
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_unseal_roundtrip() {
+        let ks =
+            Keystore::create("correct horse battery staple", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks
+            .unseal_with_passphrase("correct horse battery staple")
+            .unwrap();
+        let (epoch, dek) = ks.active_data_key(&kek).unwrap();
+        assert_eq!(epoch, 0);
+        assert_eq!(dek.len(), KEY_LEN);
+    }
+
+    #[test]
+    fn wrong_passphrase_fails() {
+        let ks = Keystore::create("right-passphrase", KdfParams::fast_for_tests()).unwrap();
+        assert!(ks.unseal_with_passphrase("wrong-passphrase").is_err());
+    }
+
+    #[test]
+    fn json_roundtrip_preserves_unseal() {
+        let ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let json = ks.to_json().unwrap();
+        let ks2 = Keystore::from_json(&json).unwrap();
+        let kek = ks2.unseal_with_passphrase("pw").unwrap();
+        ks2.active_data_key(&kek).unwrap();
+        // The raw KEK must never appear in the serialised keystore (only wrapped).
+        assert!(
+            !json.contains(&b64e(kek.as_slice())),
+            "raw KEK must not appear in serialized keystore"
+        );
+        assert_eq!(ks.kek_fingerprint, ks2.kek_fingerprint);
+        assert_eq!(ks2.crypto_version, CRYPTO_VERSION);
+        assert_eq!(ks2.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn argon2_is_deterministic_for_same_params() {
+        let kdf = KdfParams::fast_for_tests();
+        let a = kdf.derive("pw").unwrap();
+        let b = kdf.derive("pw").unwrap();
+        assert_eq!(a.as_slice(), b.as_slice());
+    }
+
+    #[test]
+    fn derive_rejects_excessive_argon2_params() {
+        // A tampered keystore with absurd m_cost must be rejected before Argon2 runs.
+        let kdf = KdfParams {
+            m_cost: u32::MAX,
+            t_cost: 3,
+            p_cost: 1,
+            salt: b64e(&[0u8; SALT_LEN]),
+        };
+        assert!(kdf.derive("pw").is_err());
+    }
+
+    #[test]
+    fn derive_rejects_weak_argon2_params() {
+        // A tampered keystore that downgrades the KDF below the floor must be
+        // rejected before Argon2 runs (prevents an offline brute-force downgrade).
+        let kdf = KdfParams {
+            m_cost: 8, // the old absolute-minimum; now below MIN_ARGON2_M_COST_KIB
+            t_cost: 1,
+            p_cost: 1,
+            salt: b64e(&[0u8; SALT_LEN]),
+        };
+        assert!(kdf.derive("pw").is_err());
+    }
+
+    #[test]
+    fn new_dek_wraps_are_derived_and_the_raw_kek_does_not_open_them() {
+        let ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks.unseal_with_passphrase("pw").unwrap();
+        assert_eq!(ks.deks[0].wrap, DekWrap::DerivedV1);
+        assert!(
+            unwrap_key(&kek, &ks.deks[0].wrapped, &dek_aad(0)).is_err(),
+            "the raw KEK is not the wrap key"
+        );
+        assert!(ks.data_key_for_epoch(&kek, 0).is_ok());
+    }
+
+    #[test]
+    fn legacy_raw_kek_wraps_still_open_and_upgrade_on_first_mutation() {
+        let mut ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks.unseal_with_passphrase("pw").unwrap();
+        let dek0 = ks.data_key_for_epoch(&kek, 0).unwrap();
+
+        // The keystore as a build before derived wrap keys wrote it.
+        ks.deks[0].wrapped = wrap_key(&kek, dek0.as_slice(), &dek_aad(0), "kek").unwrap();
+        ks.deks[0].wrap = DekWrap::RawKek;
+        ks.seal(&kek).unwrap();
+        let legacy_json = ks.to_json().unwrap();
+        assert!(
+            !legacy_json.contains("\"wrap\""),
+            "a legacy entry serializes exactly as before"
+        );
+
+        let mut legacy = Keystore::from_json(&legacy_json).unwrap();
+        legacy
+            .verify_integrity(&kek)
+            .expect("an older keystore's MAC still verifies");
+        assert_eq!(
+            legacy.data_key_for_epoch(&kek, 0).unwrap().as_slice(),
+            dek0.as_slice()
+        );
+
+        legacy.rotate_dek(&kek).unwrap();
+        assert!(
+            legacy.deks.iter().all(|d| d.wrap == DekWrap::DerivedV1),
+            "the first mutation re-wraps every DEK"
+        );
+        legacy.verify_integrity(&kek).unwrap();
+        let reread = Keystore::from_json(&legacy.to_json().unwrap()).unwrap();
+        assert_eq!(
+            reread.data_key_for_epoch(&kek, 0).unwrap().as_slice(),
+            dek0.as_slice(),
+            "epoch 0's key survives the re-wrap"
+        );
+    }
+
+    #[test]
+    fn a_mutation_that_fails_midway_leaves_the_keystore_unchanged() {
+        let mut ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks.unseal_with_passphrase("pw").unwrap();
+        ks.rotate_dek(&kek).unwrap();
+        // Two legacy entries; epoch 1 carries epoch 0's ciphertext, so its unwrap
+        // fails on the epoch AAD after epoch 0 would already have been upgraded.
+        for i in 0..2 {
+            let dek = ks.data_key_for_epoch(&kek, ks.deks[i].epoch).unwrap();
+            ks.deks[i].wrapped =
+                wrap_key(&kek, dek.as_slice(), &dek_aad(ks.deks[i].epoch), "kek").unwrap();
+            ks.deks[i].wrap = DekWrap::RawKek;
+        }
+        ks.deks[1].wrapped = ks.deks[0].wrapped.clone();
+        ks.seal(&kek).unwrap();
+        let before = ks.to_json().unwrap();
+
+        assert!(ks.set_passphrase(&kek, "new-pw").is_err());
+        assert!(ks.add_recovery_code(&kek).is_err());
+        assert!(ks.rotate_dek(&kek).is_err());
+        assert_eq!(ks.to_json().unwrap(), before, "nothing was half-applied");
+        ks.verify_integrity(&kek).expect("still sealed");
+    }
+
+    #[test]
+    fn a_mutation_refuses_a_keystore_whose_mac_does_not_verify() {
+        let mut ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks.unseal_with_passphrase("pw").unwrap();
+        ks.active_epoch = 7;
+        let before = ks.to_json().unwrap();
+        let err = ks.rotate_dek(&kek).unwrap_err().to_string();
+        assert!(err.contains("integrity"), "{err}");
+        assert_eq!(
+            ks.to_json().unwrap(),
+            before,
+            "a tampered keystore is not re-sealed"
+        );
+    }
+
+    #[test]
+    fn recovery_key_derivation_is_unchanged_by_zeroizing() {
+        let expected = Sha256::digest(b"0123abcd");
+        assert_eq!(
+            recovery_key_from_code("  0123abcd\n").as_slice(),
+            expected.as_slice(),
+            "recovery wraps written before this change must still open"
+        );
+    }
+
+    #[test]
+    fn kdf_floor_is_owasp_minimum_on_both_axes() {
+        let at = |m_cost, t_cost| KdfParams {
+            m_cost,
+            t_cost,
+            p_cost: 1,
+            salt: b64e(&[0u8; SALT_LEN]),
+        };
+        assert!(
+            at(19 * 1024, 2).derive("pw").is_ok(),
+            "19 MiB, 2 passes is the floor"
+        );
+        assert!(
+            at(19 * 1024 - 1, 2).derive("pw").is_err(),
+            "one KiB under the floor"
+        );
+        assert!(
+            at(8 * 1024, 2).derive("pw").is_err(),
+            "the previous 8 MiB floor"
+        );
+        assert!(
+            at(12 * 1024, 3).derive("pw").is_err(),
+            "passes never buy back memory under 19 MiB"
+        );
+        assert!(
+            at(19 * 1024, 1).derive("pw").is_err(),
+            "19 MiB at one pass is below OWASP"
+        );
+        assert!(
+            at(46 * 1024 - 1, 1).derive("pw").is_err(),
+            "one pass needs 46 MiB"
+        );
+        assert!(
+            at(46 * 1024, 1).derive("pw").is_ok(),
+            "46 MiB at one pass is OWASP's equal"
+        );
+        assert!(at(19 * 1024, 0).derive("pw").is_err(), "zero passes");
+    }
+
+    #[test]
+    fn record_cryptors_decrypt_across_epochs_after_rotation() {
+        let mut ks = Keystore::create("pw-rotation-test", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks.unseal_with_passphrase("pw-rotation-test").unwrap();
+
+        // Encrypt a record under the original epoch (0).
+        let pre = RecordCryptors::from_keystore(&ks, &kek).unwrap();
+        assert_eq!(pre.active_epoch(), 0);
+        let ct0 = pre
+            .active()
+            .encrypt_record(b"pre-rotation-blob", b"")
+            .unwrap();
+        assert_eq!(record_epoch(&ct0), Some(0));
+
+        // Rotate the DEK -> epoch 1.
+        assert_eq!(ks.rotate_dek(&kek).unwrap(), 1);
+
+        // A fresh cryptor set (as a restarted process would build) reads BOTH epochs.
+        let post = RecordCryptors::from_keystore(&ks, &kek).unwrap();
+        assert_eq!(post.active_epoch(), 1, "writes now use epoch 1");
+        // The pre-rotation record still decrypts under its retired epoch-0 DEK.
+        assert_eq!(
+            post.for_epoch(0)
+                .unwrap()
+                .decrypt_record(&ct0, b"")
+                .unwrap(),
+            b"pre-rotation-blob"
+        );
+        // New writes go out at epoch 1 and round-trip.
+        let ct1 = post
+            .active()
+            .encrypt_record(b"post-rotation-blob", b"")
+            .unwrap();
+        assert_eq!(record_epoch(&ct1), Some(1));
+        assert_eq!(
+            post.for_epoch(1)
+                .unwrap()
+                .decrypt_record(&ct1, b"")
+                .unwrap(),
+            b"post-rotation-blob"
+        );
+    }
+
+    #[test]
+    fn recovery_code_resets_lost_passphrase() {
+        let mut ks = Keystore::create("original-pass", KdfParams::fast_for_tests()).unwrap();
+        let kek0 = ks.unseal_with_passphrase("original-pass").unwrap();
+        let code = ks.add_recovery_code(&kek0).unwrap();
+
+        // Passphrase "lost": recover via the code, then install a new passphrase.
+        let kek_via_code = ks.unseal_with_recovery_code(&code).unwrap();
+        ks.set_passphrase(&kek_via_code, "brand-new-pass").unwrap();
+
+        // The new passphrase unseals the SAME master key...
+        let kek1 = ks.unseal_with_passphrase("brand-new-pass").unwrap();
+        assert_eq!(kek0.as_slice(), kek1.as_slice());
+        // ...and the old passphrase no longer works.
+        assert!(ks.unseal_with_passphrase("original-pass").is_err());
+    }
+
+    #[test]
+    fn wrap_unwrap_roundtrip_and_aad_binding() {
+        let wk = [7u8; KEY_LEN];
+        let secret = [9u8; KEY_LEN];
+        let w = wrap_key(&wk, &secret, b"aad-a", "x").unwrap();
+
+        // correct key + AAD recovers the secret
+        let got = unwrap_key(&wk, &w, b"aad-a").unwrap();
+        assert_eq!(got.as_slice(), &secret);
+
+        // wrong AAD fails (binding holds)
+        assert!(unwrap_key(&wk, &w, b"aad-b").is_err());
+        // wrong wrapping key fails
+        assert!(unwrap_key(&[8u8; KEY_LEN], &w, b"aad-a").is_err());
+    }
+
+    #[test]
+    fn epoch_aad_prevents_cross_epoch_unwrap() {
+        // A DEK wrapped for epoch 0 must not unwrap under epoch 1's AAD.
+        let kek = [3u8; KEY_LEN];
+        let dek = [4u8; KEY_LEN];
+        let w = wrap_key(&kek, &dek, &dek_aad(0), "kek").unwrap();
+        assert!(unwrap_key(&kek, &w, &dek_aad(1)).is_err());
+        assert!(unwrap_key(&kek, &w, &dek_aad(0)).is_ok());
+    }
+
+    #[test]
+    fn fingerprint_is_stable_and_distinguishing() {
+        assert_eq!(fingerprint(&[1u8; KEY_LEN]), fingerprint(&[1u8; KEY_LEN]));
+        assert_ne!(fingerprint(&[1u8; KEY_LEN]), fingerprint(&[2u8; KEY_LEN]));
+    }
+
+    #[test]
+    fn record_encrypt_decrypt_roundtrip() {
+        let cryptor = RecordCryptor::new(0, Zeroizing::new([5u8; KEY_LEN]));
+        let plaintext = b"postcard-serialized-memory-record-bytes".to_vec();
+        let enc = cryptor.encrypt_record(&plaintext, b"mem-1").unwrap();
+        assert!(is_encrypted_record(&enc));
+        assert_eq!(record_epoch(&enc), Some(0));
+        assert_ne!(enc, plaintext);
+        assert_eq!(cryptor.decrypt_record(&enc, b"mem-1").unwrap(), plaintext);
+        // Identity binding: the same ciphertext under a different id fails (anti-swap).
+        assert!(cryptor.decrypt_record(&enc, b"mem-2").is_err());
+    }
+
+    #[test]
+    fn plaintext_envelopes_are_not_marked_encrypted() {
+        // A SHO envelope and a raw bincode blob both lack the ENC\0 marker.
+        assert!(!is_encrypted_record(b"SHO\x02payload"));
+        let plain = vec![0x10, 0x00, 0x00, 0x00, 0x42];
+        assert!(!is_encrypted_record(&plain));
+        assert_eq!(record_epoch(&plain), None);
+        assert!(!is_encrypted_record(b"ENC")); // shorter than the marker
+    }
+
+    #[test]
+    fn record_wrong_dek_fails() {
+        let c1 = RecordCryptor::new(0, Zeroizing::new([1u8; KEY_LEN]));
+        let enc = c1.encrypt_record(b"secret", b"").unwrap();
+        assert!(decrypt_record(&Zeroizing::new([2u8; KEY_LEN]), &enc, b"").is_err());
+    }
+
+    #[test]
+    fn record_tamper_is_detected() {
+        let c = RecordCryptor::new(3, Zeroizing::new([7u8; KEY_LEN]));
+        let mut enc = c.encrypt_record(b"payload", b"").unwrap();
+        let last = enc.len() - 1;
+        enc[last] ^= 0xff; // flip a ciphertext byte
+        assert!(c.decrypt_record(&enc, b"").is_err());
+    }
+
+    #[test]
+    fn record_epoch_in_header_matches() {
+        let c = RecordCryptor::new(42, Zeroizing::new([9u8; KEY_LEN]));
+        let enc = c.encrypt_record(b"x", b"").unwrap();
+        assert_eq!(record_epoch(&enc), Some(42));
+        assert_eq!(c.epoch(), 42);
+    }
+
+    #[test]
+    fn record_from_keystore_dek_end_to_end() {
+        let ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks.unseal_with_passphrase("pw").unwrap();
+        let (epoch, dek) = ks.active_data_key(&kek).unwrap();
+        let cryptor = RecordCryptor::new(epoch, dek);
+        let enc = cryptor.encrypt_record(b"end-to-end", b"").unwrap();
+        assert_eq!(cryptor.decrypt_record(&enc, b"").unwrap(), b"end-to-end");
+    }
+
+    #[test]
+    fn rotate_passphrase_preserves_master_key() {
+        let mut ks = Keystore::create("old-pass", KdfParams::fast_for_tests()).unwrap();
+        let kek_before = ks.unseal_with_passphrase("old-pass").unwrap();
+        ks.rotate_passphrase("old-pass", "new-pass").unwrap();
+        assert!(ks.unseal_with_passphrase("old-pass").is_err());
+        let kek_after = ks.unseal_with_passphrase("new-pass").unwrap();
+        // Same master key -> records untouched by a passphrase change.
+        assert_eq!(kek_before.as_slice(), kek_after.as_slice());
+    }
+
+    #[test]
+    fn rotate_passphrase_wrong_old_is_rejected() {
+        let mut ks = Keystore::create("old", KdfParams::fast_for_tests()).unwrap();
+        assert!(ks.rotate_passphrase("not-old", "new").is_err());
+        assert!(ks.unseal_with_passphrase("old").is_ok()); // unchanged
+    }
+
+    #[test]
+    fn recovery_code_unseals_same_key() {
+        let mut ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks.unseal_with_passphrase("pw").unwrap();
+        let code = ks.add_recovery_code(&kek).unwrap();
+        assert_eq!(code.len(), 48);
+        assert_eq!(
+            ks.unseal_with_recovery_code(&code).unwrap().as_slice(),
+            kek.as_slice()
+        );
+        assert!(ks.unseal_with_recovery_code("deadbeef").is_err());
+    }
+
+    #[test]
+    fn recovery_survives_passphrase_rotation() {
+        let mut ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks.unseal_with_passphrase("pw").unwrap();
+        let code = ks.add_recovery_code(&kek).unwrap();
+        ks.rotate_passphrase("pw", "pw2").unwrap();
+        assert_eq!(
+            ks.unseal_with_recovery_code(&code).unwrap().as_slice(),
+            kek.as_slice()
+        );
+    }
+
+    #[test]
+    fn rotate_dek_adds_epoch_and_keeps_old_readable() {
+        let mut ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks.unseal_with_passphrase("pw").unwrap();
+        let (e0, dek0) = ks.active_data_key(&kek).unwrap();
+        assert_eq!(e0, 0);
+
+        let e1 = ks.rotate_dek(&kek).unwrap();
+        assert_eq!(e1, 1);
+        let (active_epoch, dek_active) = ks.active_data_key(&kek).unwrap();
+        assert_eq!(active_epoch, 1);
+
+        // Old epoch's DEK is still recoverable (for reading old records); new differs.
+        assert_eq!(
+            ks.data_key_for_epoch(&kek, 0).unwrap().as_slice(),
+            dek0.as_slice()
+        );
+        assert_ne!(dek_active.as_slice(), dek0.as_slice());
+    }
+
+    #[test]
+    fn save_to_path_is_atomic_reloadable_and_backed_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keystore.json");
+        let ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+
+        ks.save_to_path(&path).unwrap();
+        assert!(path.exists());
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "no leftover temp"
+        );
+        let loaded = Keystore::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(loaded.unseal_with_passphrase("pw").is_ok());
+
+        // A second save preserves the prior keystore as a .bak recovery copy.
+        ks.save_to_path(&path).unwrap();
+        assert!(path.with_extension("json.bak").exists(), "backup written");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for p in [&path, &path.with_extension("json.bak")] {
+                let mode = std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+                assert_eq!(
+                    mode,
+                    0o600,
+                    "{} must be owner-only, got {mode:o}",
+                    p.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn integrity_seal_detects_in_place_tampering() {
+        let ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks.unseal_with_passphrase("pw").unwrap();
+        ks.verify_integrity(&kek).unwrap(); // sealed at create
+
+        let mut tampered = ks.clone();
+        tampered.active_epoch = 99;
+        assert!(tampered.verify_integrity(&kek).is_err());
+
+        let mut t2 = ks.clone();
+        t2.kek_fingerprint = "AAAAAA==".to_string();
+        assert!(t2.verify_integrity(&kek).is_err());
+
+        // survives a JSON round-trip (mac + generation persisted)
+        let reloaded = Keystore::from_json(&ks.to_json().unwrap()).unwrap();
+        reloaded.verify_integrity(&kek).unwrap();
+    }
+
+    #[test]
+    fn generation_bumps_on_mutation_and_reseals() {
+        let mut ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        assert_eq!(ks.generation, 0);
+        let kek = ks.unseal_with_passphrase("pw").unwrap();
+
+        ks.rotate_dek(&kek).unwrap();
+        assert_eq!(ks.generation, 1);
+        ks.verify_integrity(&kek).unwrap(); // re-sealed after mutation
+
+        ks.add_recovery_code(&kek).unwrap();
+        assert_eq!(ks.generation, 2);
+        ks.verify_integrity(&kek).unwrap();
+    }
+
+    #[test]
+    fn binding_round_trips_and_survives_rotation_and_passphrase_change() {
+        let mut ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks.unseal_with_passphrase("pw").unwrap();
+        let id = keystore_binding_id(&kek);
+        let record = seal_binding(&kek, 7);
+        assert_eq!(binding_keystore_id(&record), Some(id));
+        assert_eq!(open_binding(&kek, &record).unwrap(), 7);
+
+        ks.rotate_dek(&kek).unwrap();
+        ks.set_passphrase(&kek, "new-pw").unwrap();
+        let kek_again = ks.unseal_with_passphrase("new-pw").unwrap();
+        assert_eq!(
+            keystore_binding_id(&kek_again),
+            id,
+            "same master key, same id"
+        );
+        assert_eq!(open_binding(&kek_again, &record).unwrap(), 7);
+    }
+
+    #[test]
+    fn binding_refuses_another_keystore_a_forged_generation_and_a_malformed_record() {
+        let a = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let b = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let kek_a = a.unseal_with_passphrase("pw").unwrap();
+        let kek_b = b.unseal_with_passphrase("pw").unwrap();
+        let record = seal_binding(&kek_a, 3);
+
+        let err = open_binding(&kek_b, &record).unwrap_err().to_string();
+        assert!(err.contains("bound to keystore"), "{err}");
+
+        let mut forged = record.clone();
+        forged[BINDING_MAGIC.len() + BINDING_ID_LEN] ^= 0x01;
+        let err = open_binding(&kek_a, &forged).unwrap_err().to_string();
+        assert!(err.contains("failed authentication"), "{err}");
+
+        let err = open_binding(&kek_a, &record[..record.len() - 1])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("malformed"), "{err}");
+        assert_eq!(binding_keystore_id(b"short"), None);
+    }
+}
