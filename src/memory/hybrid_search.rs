@@ -342,6 +342,40 @@ impl BM25Index {
             Index::create_in_dir(path, schema).context("Failed to create BM25 index")?
         };
 
+        info!("BM25 index initialized at {:?}", path);
+        Self::from_index(index, path)
+    }
+
+    /// The BM25 index for an ENCRYPTED store: built in RAM, never written to disk.
+    ///
+    /// The on-disk index stores each memory's `content` and every token's
+    /// positions, so beside a sealed record store it is a plaintext copy of every
+    /// memory. Under a keystore the index is therefore rebuilt in memory on each
+    /// start (it begins empty, so [`HybridSearchEngine::needs_backfill`] is true and
+    /// the startup backfill fills it from the decrypted records), and an index left
+    /// on disk from before encryption was turned on is deleted as plaintext residue.
+    pub fn in_memory(path: &Path) -> Result<Self> {
+        if path.exists() {
+            std::fs::remove_dir_all(path).with_context(|| {
+                format!("Failed to remove the plaintext BM25 index at {path:?} under a keystore")
+            })?;
+            tracing::warn!(
+                "removed the on-disk BM25 index at {:?}: under a keystore it is a plaintext copy \
+                 of every memory. Lexical search is rebuilt in memory on each start.",
+                path
+            );
+        }
+        let marker = path.with_extension("backfill-pending");
+        if marker.exists() {
+            std::fs::remove_file(&marker)
+                .with_context(|| format!("Failed to remove {marker:?}"))?;
+        }
+        let index = Index::create_in_ram(build_schema());
+        info!("BM25 index held in memory (keystore active)");
+        Self::from_index(index, path)
+    }
+
+    fn from_index(index: Index, path: &Path) -> Result<Self> {
         // Resolve field handles from the index's actual schema (which may have
         // been loaded from disk). Using builder-created handles would be wrong
         // if the on-disk schema has different field IDs due to schema evolution.
@@ -369,8 +403,6 @@ impl BM25Index {
             .reload_policy(tantivy::ReloadPolicy::OnCommitWithDelay)
             .try_into()
             .context("Failed to create index reader")?;
-
-        info!("BM25 index initialized at {:?}", path);
 
         Ok(Self {
             index,
@@ -846,7 +878,11 @@ impl HybridSearchEngine {
         _embedder: Arc<MiniLMEmbedder>,
         config: HybridSearchConfig,
     ) -> Result<Self> {
-        let bm25_index = BM25Index::new(bm25_path)?;
+        let bm25_index = if crate::memory::storage::encryption_active() {
+            BM25Index::in_memory(bm25_path)?
+        } else {
+            BM25Index::new(bm25_path)?
+        };
 
         Ok(Self { bm25_index, config })
     }
@@ -1225,6 +1261,50 @@ impl HybridSearchEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Under a keystore the lexical index must not become a plaintext copy of the
+    /// sealed store: nothing of it reaches disk, and an index left there from
+    /// before encryption is removed rather than reopened.
+    #[test]
+    fn an_in_memory_index_writes_nothing_and_removes_the_plaintext_one() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("bm25_index");
+        {
+            let on_disk = BM25Index::new(&path).expect("create on disk");
+            on_disk
+                .upsert(&MemoryId(uuid::Uuid::new_v4()), "the secret plan", &[], &[])
+                .expect("upsert");
+            on_disk.commit().expect("commit");
+        }
+        assert!(path.exists(), "precondition: a plaintext index on disk");
+
+        let index = BM25Index::in_memory(&path).expect("in memory");
+        assert!(
+            !path.exists(),
+            "the plaintext index left on disk is removed"
+        );
+        assert!(
+            index.is_empty(),
+            "an in-memory index starts empty and is backfilled"
+        );
+
+        let id = MemoryId(uuid::Uuid::new_v4());
+        index
+            .upsert(&id, "the sealed plan", &[], &[])
+            .expect("upsert");
+        index.commit().expect("commit");
+        index.reload().expect("reload");
+        let hits = index.search("plan", 5).expect("search");
+        assert_eq!(
+            hits.first().map(|(hit, _)| hit.clone()),
+            Some(id),
+            "lexical search still answers"
+        );
+        assert!(
+            !path.exists(),
+            "indexing under a keystore wrote nothing to disk"
+        );
+    }
 
     /// Index `n` documents that all score identically for `keyword`, one
     /// commit per document as `remember` does it, so the index is many

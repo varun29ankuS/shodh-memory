@@ -179,8 +179,12 @@ Plaintext, deliberately and documented:
   carry them, without a record. HMAC blinding of the exact-match keys is
   designed (equal terms → equal tokens; range keys stay clear) and deferred.
 - **Oplog** and the feedback / files / prospective / todos column families.
-- **The BM25 index** (`<user>/bm25_index`, tantivy): `content` is stored, so
-  it is a complete plaintext copy of every memory under the cold-disk model.
+- **The BM25 index** (`<user>/bm25_index`, tantivy) is NOT written under a
+  keystore: it stores `content` and token positions, so on disk it would be a
+  plaintext copy of every memory. With a keystore active it is held in memory,
+  filled at start by the backfill from the decrypted records, and an index left
+  on disk from before encryption was enabled is deleted. Without a keystore it
+  is on disk as before.
 - **The audit log's `content_preview`.**
 - **Vector embeddings can be inverted** to approximate the text they encode, so
   a plaintext vector index leaks content, not only similarity.
