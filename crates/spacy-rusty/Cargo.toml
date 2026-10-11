@@ -28,7 +28,7 @@ capi = []     # plain C-ABI exports for wasmtime / non-JS hosts (mod capi)
 fancy-regex = "0.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-safetensors = "0.4"
+safetensors = "0.8"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
