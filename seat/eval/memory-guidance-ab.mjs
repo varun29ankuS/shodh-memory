@@ -118,9 +118,17 @@ const GUIDANCE_ARG = argOf("--guidance"); // "on" | "off" for --phase run
  *             seat; the control arm.
  *   on      — server defaults (all mechanisms on): the ship-candidate arm.
  *   framing — proactive sample-framing only (single-factor attribution arm).
- * Arms: mech/guidance off → A; anything treated → B.
+ *   r1off   — full ship bundle EXCEPT the R1 untrusted-memory fence (security
+ *             R1 single-factor control): every other mechanism keeps its ON
+ *             default, only untrusted_memory_framing is forced off. Paired
+ *             against `on` it isolates R1's accuracy cost from the rest of the
+ *             bundle. Use `--arm A` for this control and `--arm B` for `on`,
+ *             since both presets are "treated" and would otherwise both derive
+ *             arm B.
+ * Arms: mech/guidance off → A; anything treated → B (override with --arm).
  */
-const MECH_ARG = argOf("--mech"); // "off" | "on" | "framing"
+const MECH_ARG = argOf("--mech"); // "off" | "on" | "framing" | "r1off"
+const ARM_ARG = argOf("--arm"); // optional "A" | "B" override for --phase run
 const MECH_PRESETS = {
   off: {
     guidance: false,
@@ -128,6 +136,7 @@ const MECH_PRESETS = {
     recall_lineage: false,
     verify_loop: false,
     mcp_memory_tool_filter: false,
+    untrusted_memory_framing: false,
   },
   on: undefined, // omit the field — server defaults are the ship configuration
   framing: {
@@ -136,6 +145,11 @@ const MECH_PRESETS = {
     recall_lineage: false,
     verify_loop: false,
     mcp_memory_tool_filter: false,
+    untrusted_memory_framing: false,
+  },
+  // Full ship bundle with only R1 turned off — the security-R1 control arm.
+  r1off: {
+    untrusted_memory_framing: false,
   },
 };
 const usingFixture = PROVIDER === "lmstudio" && MODEL === "fixture-deterministic-v1";
@@ -598,7 +612,13 @@ async function phaseRun() {
   const guidance = GUIDANCE_ARG === "on" ? await loadGuidance() : undefined;
   const mechanisms = MECH_PRESETS[MECH_ARG ?? "off"];
   const treated = GUIDANCE_ARG === "on" || (MECH_ARG !== undefined && MECH_ARG !== "off");
-  const arm = treated ? "B" : "A";
+  // --arm pins the bucket explicitly, needed when both arms are "treated"
+  // presets (e.g. r1off vs on): the derived rule would call both B.
+  if (ARM_ARG !== undefined && ARM_ARG !== "A" && ARM_ARG !== "B") {
+    console.error(`--arm must be A or B`);
+    process.exit(2);
+  }
+  const arm = ARM_ARG ?? (treated ? "B" : "A");
   const scratch = path.join(scratchRoot, `scratch-run-${LABEL_ARG}-${Date.now()}`);
   mkdirSync(scratch, { recursive: true });
 
@@ -727,10 +747,20 @@ async function launchSeat(runName, runUser, scratch, fixturePort) {
 
   const base = `http://127.0.0.1:${seatPort}`;
   if (!(await waitFor(`${base}/healthz`))) throw new Error(`seat ${runName} never came up`);
-  const health = await (await fetch(`${base}/healthz`)).json();
-  const bridged = (health.mcp_servers ?? []).find((server) => server.name === "shodh-memory");
-  if (!bridged || bridged.tool_count === 0) {
-    throw new Error(`seat ${runName}: shodh-memory MCP server not bridged (${JSON.stringify(health.mcp_servers)})`);
+  // The MCP bridge connects asynchronously AFTER /healthz first goes green, so
+  // the server can briefly report status "connecting"/tool_count 0. Poll for
+  // the bridge to finish rather than sampling it once (a single check races the
+  // spawn under machine load). Test-infra robustness only — no bearing on arms.
+  let bridged;
+  const bridgeDeadline = Date.now() + 60_000;
+  for (;;) {
+    const health = await (await fetch(`${base}/healthz`)).json();
+    bridged = (health.mcp_servers ?? []).find((server) => server.name === "shodh-memory");
+    if (bridged && bridged.tool_count > 0) break;
+    if (Date.now() > bridgeDeadline) {
+      throw new Error(`seat ${runName}: shodh-memory MCP server not bridged (${JSON.stringify(health.mcp_servers)})`);
+    }
+    await sleep(500);
   }
   return { child, base, toolCount: bridged.tool_count };
 }
