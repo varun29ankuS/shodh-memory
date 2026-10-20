@@ -33,6 +33,7 @@ pub mod storage;
 pub mod temporal_facts;
 pub mod todo_formatter;
 pub mod todos;
+pub mod trust_gate;
 pub mod types;
 pub mod visualization;
 
@@ -4598,22 +4599,8 @@ impl MemorySystem {
                     .unwrap_or_else(|_| "fitted".to_string())
                     .to_ascii_lowercase();
                 let t = if adapt_feature == "fitted" {
-                    // (mu, sd, weight) per standardized feature, then bias — from
-                    // the run-27267533447 fit. Order must match `feats` below.
-                    const FIT: [(f32, f32, f32); 11] = [
-                        (2.77242, 1.87083, -0.301375),    // bm_peak
-                        (1.3841, 0.180661, -0.0212517),   // vec_peak
-                        (0.307389, 0.170755, -0.243719),  // agreement_top10
-                        (93.4129, 43.8602, -0.556471),    // max_bm
-                        (0.597371, 0.0823258, 0.236463),  // max_vec
-                        (106.897, 36.4931, 0.597537),     // n_bm_pos
-                        (31.4138, 7.54534, -0.881755),    // n_vec_pos
-                        (116.222, 38.3149, 0.582615),     // n_hybrid
-                        (9.90148, 0.987682, 0.304049),    // n_graph
-                        (0.358194, 0.0710801, 0.0264384), // graph_max_activation
-                        (54.1034, 16.0475, -0.571797),    // query_len
-                    ];
-                    const FIT_BIAS: f32 = -0.985886;
+                    // Coefficients, standardisation and the out-of-fit count live in
+                    // `trust_gate`; the feature order is `trust_gate::FEATURE_NAMES`.
                     let mut by_vec: Vec<(&MemoryId, f32)> = hybrid_components
                         .iter()
                         .filter(|(_, (_, v))| *v > 0.0)
@@ -4717,11 +4704,9 @@ impl MemorySystem {
                         graph_max_act,
                         query_text.len() as f32,
                     ];
-                    let mut s = FIT_BIAS;
-                    for ((mu, sd, w), x) in FIT.iter().zip(feats) {
-                        s += w * (x - mu) / sd;
-                    }
-                    1.0 / (1.0 + (-s.clamp(-30.0, 30.0)).exp())
+                    let eval = crate::memory::trust_gate::evaluate(&feats);
+                    crate::memory::trust_gate::record(&feats, &eval);
+                    eval.t
                 } else if adapt_feature == "agreement" {
                     let agree_k = env_w("SHODH_ADAPT_AGREE_K", 10.0).max(1.0) as usize;
                     let agree_lo = env_w("SHODH_ADAPT_AGREE_LO", 0.1);
