@@ -612,6 +612,11 @@ fn ppr_intern(
 /// gold within 2 hops for 97.9% of held-out LoCoMo cases walks
 /// `[e.from_entity, e.to_entity]` — undirected — so its ceiling was measured
 /// over a graph the live leg cannot walk.
+///
+/// `dir_fix` now defaults to ON — see [`TraversalLimits::default`]. The invariant
+/// the fix restores is simple enough to state: **the neighbour of `current`
+/// across an edge is never `current`.** `neighbour_is_never_the_node_we_are_standing_on`
+/// asserts it from both endpoints.
 /// Diagnostic counter: how many times the direction fix actually changed the
 /// traversal target (the current node was the `to` endpoint, so the true
 /// neighbour is `from`). Zero overhead when the fix is off, because the
@@ -666,17 +671,22 @@ pub const DEFAULT_GRAPH_MAX_EDGES: usize = 100;
 pub struct TraversalLimits {
     /// Follow an edge to its true non-source endpoint (`SHODH_GRAPH_EDGE_DIR`).
     ///
-    /// See [`edge_neighbor`] for what the legacy `false` behaviour costs.
+    /// On by default. The legacy alternative is not a tuning choice, it is a
+    /// defect: when `current` is already the `to` endpoint it resolves the
+    /// neighbour to `current` itself, so half of every directed edge's reach is
+    /// unavailable and `IsA` (instance → category) is inert in the only direction
+    /// a by-category question needs. `SHODH_GRAPH_EDGE_DIR=0` restores the legacy
+    /// behaviour as an A/B control. See [`edge_neighbor`] for what it costs.
     pub dir_fix: bool,
     /// Per-node edge budget (`SHODH_GRAPH_MAX_EDGES`).
     pub max_edges: usize,
 }
 
 impl Default for TraversalLimits {
-    /// The shipped behaviour: legacy `to_entity`-only traversal, 100 edges/node.
+    /// The shipped behaviour: true-endpoint traversal, 100 edges/node.
     fn default() -> Self {
         Self {
-            dir_fix: false,
+            dir_fix: true,
             max_edges: DEFAULT_GRAPH_MAX_EDGES,
         }
     }
@@ -689,8 +699,8 @@ impl TraversalLimits {
     /// byte-identical behaviour to before the flags existed.
     pub fn from_env() -> Self {
         let dir_fix = std::env::var("SHODH_GRAPH_EDGE_DIR")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+            .unwrap_or(true);
         let max_edges = std::env::var("SHODH_GRAPH_MAX_EDGES")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
@@ -3310,6 +3320,98 @@ mod tests {
     // PIPE-7: Bidirectional Spreading Activation Tests
     // =========================================================================
 
+    /// Build a minimal edge for direction tests. Only the endpoints matter.
+    fn directed_edge(from: Uuid, to: Uuid) -> crate::graph_memory::RelationshipEdge {
+        let now = chrono::Utc::now();
+        crate::graph_memory::RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: from,
+            to_entity: to,
+            relation_type: crate::graph_memory::RelationType::RelatedTo,
+            strength: 1.0,
+            created_at: now,
+            valid_at: now,
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: now,
+            activation_count: 1,
+            ltp_status: crate::graph_memory::LtpStatus::None,
+            tier: crate::graph_memory::EdgeTier::L1Working,
+            activation_timestamps: None,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+            provenance: Vec::new(),
+            promoted_at: None,
+        }
+    }
+
+    /// The invariant the direction fix restores: the neighbour of `current`
+    /// across an edge is never `current`. The legacy behaviour returned
+    /// `to_entity` unconditionally, so standing on the `to` endpoint resolved to
+    /// yourself — a self-loop that dropped every incoming connection.
+    #[test]
+    fn neighbour_is_never_the_node_we_are_standing_on() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let edge = directed_edge(a, b);
+
+        assert_eq!(
+            edge_neighbor(&edge, &a, true),
+            b,
+            "from the source, go to the target"
+        );
+        assert_eq!(
+            edge_neighbor(&edge, &b, true),
+            a,
+            "from the target, go BACK to the source — this is the half that was missing"
+        );
+        for current in [a, b] {
+            assert_ne!(
+                edge_neighbor(&edge, &current, true),
+                current,
+                "traversal must never resolve to the node it is standing on"
+            );
+        }
+    }
+
+    /// The defect, pinned so the control arm is honest about what it restores.
+    /// `SHODH_GRAPH_EDGE_DIR=0` reproduces it exactly for A/B comparison.
+    #[test]
+    fn the_legacy_control_still_reproduces_the_self_loop() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let edge = directed_edge(a, b);
+        assert_eq!(
+            edge_neighbor(&edge, &b, false),
+            b,
+            "legacy resolves the target endpoint to itself — that is the bug, kept only as a control"
+        );
+    }
+
+    /// A category node must be able to reach its instances. `IsA` points
+    /// instance -> category, so a query asking by category ("what animal...")
+    /// seeds at `animal` and reaches `turtle` only by traversing backwards.
+    /// Under the legacy behaviour the taxonomy is inert in exactly this
+    /// direction, which is the direction it exists for.
+    #[test]
+    fn a_category_can_reach_its_instances() {
+        let turtle = Uuid::new_v4();
+        let animal = Uuid::new_v4();
+        let is_a = directed_edge(turtle, animal);
+        assert_eq!(
+            edge_neighbor(&is_a, &animal, true),
+            turtle,
+            "seeding at the category must reach the instance"
+        );
+        assert_eq!(
+            edge_neighbor(&is_a, &animal, false),
+            animal,
+            "legacy: the taxonomy cannot be traversed from the category side at all"
+        );
+    }
+
     #[test]
     fn test_bidirectional_constants_valid() {
         // Minimum entities must be at least 2 for bidirectional to make sense
@@ -4140,9 +4242,9 @@ mod tests {
     fn traversal_limits_default_is_the_shipped_behaviour() {
         let d = TraversalLimits::default();
         assert!(
-            !d.dir_fix,
-            "the direction fix must stay OFF by default — flipping a retrieval \
-             default without measurement is not allowed"
+            d.dir_fix,
+            "the direction fix is ON by default: the legacy endpoint rule walks to the \
+             node already being stood on, which is a defect, not a tuning choice"
         );
         assert_eq!(
             d.max_edges, DEFAULT_GRAPH_MAX_EDGES,
@@ -4204,19 +4306,20 @@ mod tests {
             .entities_activated
         };
 
-        let dir_off = run_a();
-        assert_eq!(
-            dir_off, 1,
-            "with the flag unset the live leg must stay on the seed alone \
-             (the incoming edge is a self-loop), got {dir_off}"
-        );
-        std::env::set_var("SHODH_GRAPH_EDGE_DIR", "1");
         let dir_on = run_a();
-        std::env::remove_var("SHODH_GRAPH_EDGE_DIR");
         assert_eq!(
             dir_on, 2,
-            "SHODH_GRAPH_EDGE_DIR=1 must reach the LIVE leg and recover the \
-             incoming-edge neighbour, got {dir_on}"
+            "with the flag unset the live leg must recover the incoming-edge \
+             neighbour: the direction fix is on by default, got {dir_on}"
+        );
+        std::env::set_var("SHODH_GRAPH_EDGE_DIR", "0");
+        let dir_off = run_a();
+        std::env::remove_var("SHODH_GRAPH_EDGE_DIR");
+        assert_eq!(
+            dir_off, 1,
+            "SHODH_GRAPH_EDGE_DIR=0 must reach the LIVE leg and restore the legacy \
+             walk, which stays on the seed alone (the incoming edge is a self-loop), \
+             got {dir_off}"
         );
 
         // --- SHODH_GRAPH_MAX_EDGES: two outgoing edges, budget of one ---

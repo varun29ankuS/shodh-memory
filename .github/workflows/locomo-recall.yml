@@ -79,9 +79,39 @@ jobs:
           shared-key: recall-eval
 
       - name: Install LLVM (ONNX runtime build dep)
+        # Bounded and retried. Unbounded, this step has hung twice on an
+        # unreachable apt mirror — once for 1h41m before it was killed by hand —
+        # while the same step takes ~50s when the mirror is healthy. With the
+        # job allowing 300 minutes and no step budget, a hung mirror silently
+        # burns five hours of runner time and returns no measurement at all,
+        # which is the worst outcome: slow AND uninformative. Ten minutes is
+        # twelve times the healthy duration, so a timeout here means broken, not
+        # slow.
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y llvm-dev libclang-dev clang
+          set -euo pipefail
+          # Skip entirely when the toolchain is already present. The hosted
+          # runner image usually ships clang and libclang, so the common case
+          # needs no network at all — and a step that does not run cannot hang.
+          if command -v clang >/dev/null 2>&1 && ls /usr/lib/llvm-*/lib/libclang.so* >/dev/null 2>&1; then
+            echo "clang + libclang already present; skipping apt"
+            clang --version | head -1
+            exit 0
+          fi
+          # Each apt call is individually bounded. `apt-get update` HANGS rather
+          # than failing when a mirror is unreachable (observed twice: 1h41m and
+          # 25m before intervention, against ~50s healthy), so a bare retry loop
+          # never fires — the command simply never returns and the step budget is
+          # consumed instead. `timeout` converts the hang into a failure the
+          # retry can actually act on.
+          for attempt in 1 2 3; do
+            if sudo timeout 120 apt-get update; then
+              break
+            fi
+            echo "apt-get update failed or hung (attempt $attempt/3); retrying in 15s"
+            sleep 15
+          done
+          sudo timeout 300 apt-get install -y llvm-dev libclang-dev clang
 
       - name: Set up e5-small-v2 embedder
         if: ${{ github.event.inputs.embedder == 'e5' }}
