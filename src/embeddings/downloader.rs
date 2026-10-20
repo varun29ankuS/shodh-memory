@@ -1246,9 +1246,8 @@ mod tests {
     /// never touches versioned subdirectories (coexistence is the point).
     #[test]
     fn cleanup_legacy_keeps_versioned_dirs() {
-        let tmp = std::env::temp_dir().join("shodh-test-legacy-ort-cleanup");
-        let _ = fs::remove_dir_all(&tmp);
-        fs::create_dir_all(&tmp).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().to_path_buf();
         // legacy unversioned files in the base dir
         fs::write(tmp.join("onnxruntime.dll"), b"stale").unwrap();
         fs::write(tmp.join("libonnxruntime.so"), b"stale").unwrap();
@@ -1270,16 +1269,14 @@ mod tests {
             versioned.join("onnxruntime.dll").exists(),
             "versioned runtime must be untouched"
         );
-        let _ = fs::remove_dir_all(&tmp);
     }
 
     /// Regression test for #250: a 14KB providers_shared stub masquerading as
     /// libonnxruntime.so must be detected and rejected by the size guard.
     #[test]
     fn test_ort_size_guard_rejects_stub() {
-        let tmp = std::env::temp_dir().join("shodh-test-ort-size-guard");
-        let _ = fs::remove_dir_all(&tmp);
-        fs::create_dir_all(&tmp).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().to_path_buf();
 
         #[cfg(target_os = "windows")]
         let lib_name = "onnxruntime.dll";
@@ -1304,9 +1301,6 @@ mod tests {
             real_meta.len() >= 1_000_000,
             "real lib should pass size check"
         );
-
-        // Clean up
-        let _ = fs::remove_dir_all(&tmp);
     }
 
     /// Verify that the dot-prefix filter excludes providers_shared
