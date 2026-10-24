@@ -252,6 +252,43 @@ pub struct Report {
     /// written without it stay byte-identical and still parse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_timing: Option<StageTimingReport>,
+    /// Where the fitted trust gate stood on this suite: how many queries it
+    /// read with a feature outside the range its coefficients were fitted on.
+    /// `None` when the gated mode never ran the fitted gate. Omitted from the
+    /// JSON when absent, for the same reason as `stage_timing`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<GateReport>,
+}
+
+/// The fitted trust gate's standing on a suite (`memory::trust_gate`).
+///
+/// The gate is a logistic fit over standardised features. A feature further
+/// from its fit mean than `fit_range_sd` standard deviations contributes a
+/// logit the fit never saw, so `t` on that query is extrapolation, not the
+/// probability it was trained to be. This block makes that visible per suite
+/// instead of per ranking change: a fraction near 1.0 means the leg shape the
+/// coefficients were fitted on no longer exists, and the gate's behaviour is
+/// an accident of which extrapolations cancel.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct GateReport {
+    /// Queries in the gated mode.
+    pub queries: usize,
+    /// Queries on which the fitted gate ran and recorded a trace.
+    pub traced: usize,
+    /// Traced queries with at least one feature outside the fit range.
+    pub out_of_fit_queries: usize,
+    /// `out_of_fit_queries / traced`; 0.0 when nothing was traced.
+    pub out_of_fit_fraction: f64,
+    /// Per feature, how many traced queries had it outside the fit range.
+    /// Only features that were ever out of range appear.
+    pub features_out_of_fit: BTreeMap<String, usize>,
+    /// The range, in fit standard deviations, a feature may sit in before it
+    /// counts as out of fit.
+    pub fit_range_sd: f32,
+    /// Spread of the gate's output over the traced queries.
+    pub t_min: f64,
+    pub t_median: f64,
+    pub t_max: f64,
 }
 
 /// One pipeline stage's latency distribution across the suite.
@@ -1389,6 +1426,7 @@ mod tests {
             repeats: 1,
             failures: vec![],
             stage_timing: None,
+            gate: None,
         }
     }
 
@@ -1514,6 +1552,43 @@ mod tests {
         v.as_object_mut().unwrap().remove("model_tape");
         let parsed: Report = serde_json::from_value(v).expect("old report must parse");
         assert_eq!(parsed.model_tape, None);
+    }
+
+    /// The checked-in baseline predates the gate block; it must parse without it, and a
+    /// report that carries one must round-trip with it, so a reviewer can read where the
+    /// gate stood on the run that produced the numbers.
+    #[test]
+    fn gate_block_is_optional_on_read_and_kept_on_write() {
+        let mut v = serde_json::to_value(report_with_full(0.6, 0.7, 0.5, 0.4)).unwrap();
+        assert!(
+            v.as_object().unwrap().get("gate").is_none(),
+            "a report without a gate reading must not write the key"
+        );
+        v.as_object_mut().unwrap().remove("gate");
+        let parsed: Report = serde_json::from_value(v).expect("old report must parse");
+        assert_eq!(parsed.gate, None);
+
+        let mut with_gate = report_with_full(0.6, 0.7, 0.5, 0.4);
+        with_gate.gate = Some(GateReport {
+            queries: 100,
+            traced: 100,
+            out_of_fit_queries: 100,
+            out_of_fit_fraction: 1.0,
+            features_out_of_fit: [("n_graph".to_string(), 100), ("n_vec_pos".to_string(), 100)]
+                .into_iter()
+                .collect(),
+            fit_range_sd: 4.0,
+            t_min: 0.002,
+            t_median: 0.228,
+            t_max: 0.749,
+        });
+        let text = serde_json::to_string(&with_gate).unwrap();
+        let back: Report = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.gate, with_gate.gate);
+        // The gate block is diagnostic: it never enters the baseline comparison.
+        assert!(
+            compare_to_baseline(&with_gate, &report_with_full(0.6, 0.7, 0.5, 0.4), 2.0).is_empty()
+        );
     }
 
     /// Same class on different chips is comparable: the class, not the chip, decides the

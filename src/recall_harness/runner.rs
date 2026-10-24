@@ -28,10 +28,10 @@ use super::fixtures::{
 use super::metrics::{paired_bootstrap_ci, Metrics};
 use super::report::{
     aggregate_category, aggregate_layer, median, AblationCaseRow, AblationReport, AblationRow,
-    CategoryReport, DeltaCi, Failure, FunnelReport, FunnelStageRow, GraphStructure, KernelClass,
-    LayerReport, LearningCurveArm, LearningCurveReport, LinkingReport, LinkingRow, PerCaseRecord,
-    ReachabilityCategory, ReachabilityReport, Report, RerankSetting, StageRow, StageTimingReport,
-    SMOKE_K,
+    CategoryReport, DeltaCi, Failure, FunnelReport, FunnelStageRow, GateReport, GraphStructure,
+    KernelClass, LayerReport, LearningCurveArm, LearningCurveReport, LinkingReport, LinkingRow,
+    PerCaseRecord, ReachabilityCategory, ReachabilityReport, Report, RerankSetting, StageRow,
+    StageTimingReport, SMOKE_K,
 };
 
 /// Embedder identifier emitted in the report. Matches the model wired into
@@ -449,6 +449,9 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
             print_stage_timing(st);
         });
 
+    // Where the fitted trust gate stood on the gated mode's repeat-0 pass.
+    let gate_report = aggregate_gate(highest_mode, &passes).inspect(print_gate);
+
     let report = Report {
         suite: inputs.suite.clone(),
         embedder: EMBEDDER_ID.to_string(),
@@ -463,6 +466,7 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
         repeats,
         failures,
         stage_timing: stage_timing_report,
+        gate: gate_report,
     };
 
     // Per-case diagnostics for every mode, from the same repeat-0 pass the
@@ -766,6 +770,75 @@ fn stage_row(name: &str, per_case_ms: &[f64], e2e_mean_ms: f64) -> StageRow {
 ///
 /// Returns `None` when no probes were collected (flag off, or the mode was never
 /// run), so an absent breakdown is never confused with an all-zero one.
+/// Fold the gated mode's per-query gate traces (repeat 0, the pass the
+/// quality metrics come from) into the report's `gate` block.
+fn aggregate_gate(mode: LayerMode, passes: &[OnePassResult]) -> Option<GateReport> {
+    use crate::memory::trust_gate::{FEATURE_NAMES, FIT_RANGE_SD};
+    let mp = passes.first()?.per_mode.get(&mode)?;
+    let queries = mp.gate_traces.len();
+    let traced: Vec<&crate::memory::trust_gate::GateTrace> =
+        mp.gate_traces.iter().flatten().collect();
+    if traced.is_empty() {
+        return None;
+    }
+    let mut features_out_of_fit: BTreeMap<String, usize> = BTreeMap::new();
+    let mut out_of_fit_queries = 0usize;
+    for tr in &traced {
+        if tr.eval.out_of_fit > 0 {
+            out_of_fit_queries += 1;
+        }
+        for (name, z) in FEATURE_NAMES.iter().zip(tr.eval.z.iter()) {
+            if z.abs() > FIT_RANGE_SD {
+                *features_out_of_fit.entry((*name).to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    let ts: Vec<f64> = traced.iter().map(|tr| tr.eval.t as f64).collect();
+    let t_min = ts.iter().cloned().fold(f64::INFINITY, f64::min);
+    let t_max = ts.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    Some(GateReport {
+        queries,
+        traced: traced.len(),
+        out_of_fit_queries,
+        out_of_fit_fraction: out_of_fit_queries as f64 / traced.len() as f64,
+        features_out_of_fit,
+        fit_range_sd: FIT_RANGE_SD,
+        t_min,
+        t_median: median(&ts),
+        t_max,
+    })
+}
+
+fn print_gate(g: &GateReport) {
+    let by_feature: Vec<String> = g
+        .features_out_of_fit
+        .iter()
+        .map(|(name, n)| format!("{name} {n}"))
+        .collect();
+    eprintln!(
+        "  trust gate: {}/{} queries read a feature outside ±{} sd of the fit{}; t min={:.3} median={:.3} max={:.3}",
+        g.out_of_fit_queries,
+        g.traced,
+        g.fit_range_sd,
+        if by_feature.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", by_feature.join(", "))
+        },
+        g.t_min,
+        g.t_median,
+        g.t_max,
+    );
+    if g.out_of_fit_fraction > 0.1 {
+        eprintln!(
+            "  warning: the fitted trust gate is extrapolating on {:.0}% of queries; its \
+             coefficients were fitted on a different leg shape. Refit from the \
+             SHODH_FUSION_FEATURE_EXPORT export before reading its t as a probability.",
+            g.out_of_fit_fraction * 100.0
+        );
+    }
+}
+
 fn aggregate_stage_timing(
     mode: LayerMode,
     passes: &[OnePassResult],
@@ -935,6 +1008,10 @@ struct ModePassResult {
     /// state. Diagnostic only: it locates a repeat divergence (a different pool
     /// vs different scores over the same pool) and is never gated on.
     rerank_pools: Vec<CaseRankList>,
+    /// For each case, the fitted trust gate's inputs and reading from the
+    /// timed recall; `None` where the gate did not run (non-full mode, or
+    /// another `SHODH_ADAPT_FEATURE`). Diagnostic only, never gated on.
+    gate_traces: Vec<Option<crate::memory::trust_gate::GateTrace>>,
     /// For each case, the ordered candidate list every pipeline stage
     /// recorded while the pool query ran (graph, vector, bm25, hybrid,
     /// fusion, ...), in pipeline order, as corpus ids with the stage's score
@@ -1132,6 +1209,8 @@ fn run_one_pass(
         let mut per_case = Vec::with_capacity(cases.len());
         let mut latencies_ms = Vec::with_capacity(cases.len());
         let mut stage_probes: Vec<crate::stage_probe::Probe> = Vec::new();
+        let mut gate_traces: Vec<Option<crate::memory::trust_gate::GateTrace>> =
+            Vec::with_capacity(cases.len());
         let mut by_category_cases: HashMap<SmokeCategory, Vec<Metrics>> = HashMap::new();
         let mut ranks: Vec<CaseRankList> = Vec::with_capacity(cases.len());
         let mut deep_ranks: Vec<CaseRankList> = Vec::with_capacity(cases.len());
@@ -1179,6 +1258,12 @@ fn run_one_pass(
             // instrumented and uninstrumented end-to-end numbers are directly
             // comparable. That comparison is the perturbation check; run the
             // suite both ways and require agreement.
+            // The fitted trust gate's inputs and reading for this recall, from
+            // the production call itself. Full mode only: the flat adaptive
+            // fusion that runs the gate is the full pipeline.
+            if matches!(*mode, LayerMode::Full) {
+                crate::memory::trust_gate::begin();
+            }
             let started = Instant::now();
             let (result, probe) = if stage_timing {
                 match system.read().recall_with_timing(&query) {
@@ -1193,6 +1278,8 @@ fn run_one_pass(
             if stage_timing {
                 stage_probes.push(probe);
             }
+            let gate_trace = crate::memory::trust_gate::take().flatten();
+            gate_traces.push(gate_trace.clone());
 
             let memories = match result {
                 Ok(m) => m,
@@ -1238,6 +1325,7 @@ fn run_one_pass(
                         "query_len": case.query.len(),
                         "gold_final_rank": gold_final_rank,
                         "features": features,
+                        "gate": gate_trace,
                     })
                     .to_string(),
                 );
@@ -1427,6 +1515,7 @@ fn run_one_pass(
                         "pool": rerank_pools[i].retrieved,
                         "legs": legs_json,
                         "ce": ce_json,
+                        "gate": gate_traces.get(i).cloned().flatten(),
                     })
                     .to_string(),
                 );
@@ -1444,6 +1533,7 @@ fn run_one_pass(
                 rerank_pools,
                 leg_lists,
                 stage_probes,
+                gate_traces,
             },
         );
     }
