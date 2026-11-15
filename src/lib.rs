@@ -38,6 +38,7 @@ pub mod ingest;
 pub mod integrations;
 pub mod integrity;
 pub mod kb;
+pub mod keystore;
 pub mod local_ipc;
 pub mod memory;
 pub mod metrics;
